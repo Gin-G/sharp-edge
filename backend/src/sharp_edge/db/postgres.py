@@ -1,0 +1,255 @@
+"""PostgreSQL backend — for production via CloudNativePG."""
+
+import csv
+import json
+from typing import Optional
+
+import asyncpg
+
+from .base import BetDatabase
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS bets (
+    bet_id TEXT PRIMARY KEY,
+    sportsbook TEXT NOT NULL,
+    bet_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    odds DOUBLE PRECISION,
+    closing_line DOUBLE PRECISION,
+    ev DOUBLE PRECISION,
+    stake DOUBLE PRECISION NOT NULL,
+    profit DOUBLE PRECISION DEFAULT 0.0,
+    time_placed TIMESTAMPTZ,
+    time_settled TIMESTAMPTZ,
+    sport TEXT,
+    league TEXT,
+    bet_info TEXT,
+    legs JSONB,
+    leg_count INTEGER DEFAULT 1,
+    tags TEXT,
+    source TEXT DEFAULT 'fanduel',
+    raw_json JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS bankroll_log (
+    id SERIAL PRIMARY KEY,
+    timestamp TIMESTAMPTZ DEFAULT NOW(),
+    sportsbook TEXT, balance DOUBLE PRECISION,
+    deposit DOUBLE PRECISION DEFAULT 0.0,
+    withdrawal DOUBLE PRECISION DEFAULT 0.0, note TEXT
+);
+CREATE TABLE IF NOT EXISTS sync_state (
+    key TEXT PRIMARY KEY, value TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+"""
+
+INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_bets_status ON bets(status)",
+    "CREATE INDEX IF NOT EXISTS idx_bets_league ON bets(league)",
+    "CREATE INDEX IF NOT EXISTS idx_bets_sportsbook ON bets(sportsbook)",
+    "CREATE INDEX IF NOT EXISTS idx_bets_time_placed ON bets(time_placed)",
+    "CREATE INDEX IF NOT EXISTS idx_bets_bet_type ON bets(bet_type)",
+    "CREATE INDEX IF NOT EXISTS idx_bets_tags ON bets USING gin(to_tsvector('english', coalesce(tags, '')))",
+]
+
+
+class PostgresDatabase(BetDatabase):
+    def __init__(self, url: str):
+        self.url = url
+        self._pool: Optional[asyncpg.Pool] = None
+
+    async def connect(self) -> None:
+        self._pool = await asyncpg.create_pool(self.url, min_size=2, max_size=10)
+        async with self._pool.acquire() as conn:
+            await conn.execute(SCHEMA)
+            for idx in INDEXES:
+                try:
+                    await conn.execute(idx)
+                except Exception:
+                    pass  # GIN index may fail on empty table, that's fine
+
+    async def close(self) -> None:
+        if self._pool:
+            await self._pool.close()
+
+    async def upsert_bet(self, bet: dict) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO bets (
+                    bet_id, sportsbook, bet_type, status, odds, closing_line, ev,
+                    stake, profit, time_placed, time_settled, sport, league,
+                    bet_info, legs, leg_count, tags, source, raw_json, updated_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())
+                ON CONFLICT(bet_id) DO UPDATE SET
+                    status=EXCLUDED.status, profit=EXCLUDED.profit,
+                    time_settled=EXCLUDED.time_settled, closing_line=EXCLUDED.closing_line,
+                    ev=EXCLUDED.ev, raw_json=EXCLUDED.raw_json, updated_at=NOW()
+                """,
+                bet["bet_id"], bet["sportsbook"], bet["bet_type"], bet["status"],
+                bet.get("odds"), bet.get("closing_line"), bet.get("ev"),
+                bet["stake"], bet.get("profit", 0),
+                bet.get("time_placed"), bet.get("time_settled"),
+                bet.get("sport"), bet.get("league"), bet.get("bet_info"),
+                bet.get("legs"), bet.get("leg_count", 1),
+                bet.get("tags"), bet.get("source", "fanduel"), bet.get("raw_json"),
+            )
+
+    async def upsert_bets(self, bets: list[dict]) -> int:
+        for bet in bets:
+            await self.upsert_bet(bet)
+        return len(bets)
+
+    async def query_bets(self, **kwargs) -> list[dict]:
+        conditions, params = self._build_filters(**kwargs)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        limit = kwargs.get("limit", 500)
+        offset = kwargs.get("offset", 0)
+        n = len(params)
+        query = f"SELECT * FROM bets {where} ORDER BY time_placed DESC LIMIT ${n+1} OFFSET ${n+2}"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params, limit, offset)
+            return [dict(r) for r in rows]
+
+    async def get_summary_stats(self, **kwargs) -> dict:
+        conditions = ["status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
+        params = []
+        idx = 1
+        for key in ("league", "sportsbook", "bet_type"):
+            if kwargs.get(key):
+                conditions.append(f"{key} = ${idx}")
+                params.append(kwargs[key])
+                idx += 1
+        if kwargs.get("since"):
+            conditions.append(f"time_placed >= ${idx}")
+            params.append(kwargs["since"])
+            idx += 1
+        where = f"WHERE {' AND '.join(conditions)}"
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""SELECT COUNT(*) as total_bets,
+                    SUM(CASE WHEN status='SETTLED_WIN' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN status='SETTLED_LOSS' THEN 1 ELSE 0 END) as losses,
+                    SUM(stake) as total_wagered, SUM(profit) as net_profit,
+                    AVG(odds) as avg_odds, AVG(stake) as avg_stake,
+                    MIN(time_placed) as first_bet, MAX(time_placed) as last_bet
+                FROM bets {where}""",
+                *params,
+            )
+            d = dict(row)
+            wag = d.get("total_wagered") or 0
+            d["roi_pct"] = round((d["net_profit"] / wag) * 100, 2) if wag > 0 else 0.0
+            return d
+
+    async def get_breakdown(self, group_by: str = "league", since: Optional[str] = None) -> list[dict]:
+        valid = {"league", "sportsbook", "bet_type", "sport"}
+        if group_by not in valid:
+            raise ValueError(f"group_by must be one of {valid}")
+        conditions = ["status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
+        params = []
+        if since:
+            conditions.append("time_placed >= $1")
+            params.append(since)
+        where = f"WHERE {' AND '.join(conditions)}"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""SELECT {group_by}, COUNT(*) as total_bets,
+                    SUM(CASE WHEN status='SETTLED_WIN' THEN 1 ELSE 0 END) as wins,
+                    SUM(stake) as total_wagered, SUM(profit) as net_profit
+                FROM bets {where} GROUP BY {group_by} ORDER BY net_profit DESC""",
+                *params,
+            )
+        results = []
+        for row in rows:
+            d = dict(row)
+            d["losses"] = d["total_bets"] - d["wins"]
+            d["win_pct"] = round(d["wins"] / d["total_bets"] * 100, 1) if d["total_bets"] else 0
+            d["roi_pct"] = round(d["net_profit"] / d["total_wagered"] * 100, 2) if d["total_wagered"] else 0
+            results.append(d)
+        return results
+
+    async def get_calendar_data(self, since: Optional[str] = None, until: Optional[str] = None) -> list[dict]:
+        conditions = ["status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
+        params = []
+        idx = 1
+        if since:
+            conditions.append(f"time_placed >= ${idx}")
+            params.append(since)
+            idx += 1
+        if until:
+            conditions.append(f"time_placed <= ${idx}")
+            params.append(until)
+            idx += 1
+        where = f"WHERE {' AND '.join(conditions)}"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""SELECT date(time_placed) as day, COUNT(*) as total_bets,
+                    SUM(CASE WHEN status='SETTLED_WIN' THEN 1 ELSE 0 END) as wins,
+                    SUM(stake) as wagered, SUM(profit) as net_profit
+                FROM bets {where} GROUP BY date(time_placed) ORDER BY day""",
+                *params,
+            )
+        return [dict(r) for r in rows]
+
+    async def get_sync_state(self, key: str) -> Optional[str]:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT value FROM sync_state WHERE key = $1", key)
+            return row["value"] if row else None
+
+    async def set_sync_state(self, key: str, value: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO sync_state (key, value, updated_at) VALUES ($1, $2, NOW()) "
+                "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                key, value,
+            )
+
+    async def import_pikkit_csv(self, csv_path: str) -> int:
+        count = 0
+        with open(csv_path, "r") as f:
+            for row in csv.DictReader(f):
+                if row.get("status") not in ("SETTLED_WIN", "SETTLED_LOSS", "PLACED"):
+                    continue
+                legs = row.get("bet_info", "").split("|")
+                await self.upsert_bet({
+                    "bet_id": row["bet_id"],
+                    "sportsbook": row.get("sportsbook", "unknown"),
+                    "bet_type": row.get("type", "straight"),
+                    "status": row["status"],
+                    "odds": float(row["odds"]) if row.get("odds") else None,
+                    "closing_line": float(row["closing_line"]) if row.get("closing_line") else None,
+                    "ev": float(row["ev"]) if row.get("ev") else None,
+                    "stake": float(row.get("amount", 0)),
+                    "profit": float(row.get("profit", 0)),
+                    "time_placed": row.get("time_placed_iso"),
+                    "time_settled": row.get("time_settled_iso"),
+                    "sport": row.get("sports"),
+                    "league": row.get("leagues"),
+                    "bet_info": row.get("bet_info"),
+                    "legs": json.dumps(legs),
+                    "leg_count": len(legs),
+                    "tags": row.get("tags"),
+                    "source": "pikkit",
+                    "raw_json": None,
+                })
+                count += 1
+        return count
+
+    def _build_filters(self, **kwargs) -> tuple[list[str], list]:
+        conditions, params = [], []
+        idx = 1
+        for key in ("status", "league", "sportsbook", "bet_type", "sport"):
+            if kwargs.get(key):
+                conditions.append(f"{key} = ${idx}")
+                params.append(kwargs[key])
+                idx += 1
+        if kwargs.get("since"):
+            conditions.append(f"time_placed >= ${idx}")
+            params.append(kwargs["since"])
+            idx += 1
+        if kwargs.get("until"):
+            conditions.append(f"time_placed <= ${idx}")
+            params.append(kwargs["until"])
+            idx += 1
+        return conditions, params

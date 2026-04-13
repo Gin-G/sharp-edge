@@ -1,0 +1,12 @@
+.env
+*.db
+.claude/
+__pycache__/
+*.pyc
+.ruff_cache/
+dist/
+*.egg-info/
+node_modules/
+.svelte-kit/
+build/
+.vite/

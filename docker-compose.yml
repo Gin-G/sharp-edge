@@ -1,0 +1,46 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false   # Copy .env.example → .env to set FanDuel/Anthropic keys
+    environment:
+      - DATABASE_URL=sqlite:////data/bets.db
+    volumes:
+      - ./backend/src:/app/src   # editable install — uvicorn --reload picks up changes
+      - ${HOME}/.sharp-edge:/data  # host-mounted so native MCP server shares the same DB
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Browser fetches go to the host-forwarded backend port — localhost works here
+        VITE_API_BASE: http://localhost:8000
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Uncomment to test the postgres backend locally (mirrors CloudNativePG in production):
+  # postgres:
+  #   image: postgres:16
+  #   environment:
+  #     POSTGRES_DB: sharpedge
+  #     POSTGRES_USER: sharpedge
+  #     POSTGRES_PASSWORD: devpassword
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+
+volumes:
+  # pgdata:

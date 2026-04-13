@@ -1,0 +1,33 @@
+{{- if .Values.cnpg.enabled }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ .Release.Name }}-cnpg
+spec:
+  instances: {{ .Values.cnpg.instances }}
+  imageName: ghcr.io/cloudnative-pg/postgresql:16
+
+  storage:
+    size: {{ .Values.cnpg.storage.size }}
+    storageClass: {{ .Values.cnpg.storage.storageClass }}
+
+  bootstrap:
+    initdb:
+      database: sharpedge
+      owner: sharpedge
+
+  postgresql:
+    parameters:
+      shared_buffers: "128MB"
+      effective_cache_size: "256MB"
+
+  {{- if .Values.cnpg.backup.enabled }}
+  backup:
+    volumeSnapshot:
+      className: rook-ceph-block
+    retentionPolicy: "7d"
+  {{- end }}
+
+  monitoring:
+    enablePodMonitor: true
+{{- end }}

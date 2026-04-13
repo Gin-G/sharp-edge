@@ -1,0 +1,68 @@
+replicaCount: 1
+
+image:
+  repository: harbor.your-domain.com/sharp-edge/backend
+  tag: latest
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: true
+  className: cilium
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: sharp-edge.your-domain.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: sharp-edge-tls
+      hosts:
+        - sharp-edge.your-domain.com
+
+# CloudNativePG cluster
+cnpg:
+  enabled: true
+  instances: 2
+  storage:
+    size: 5Gi
+    storageClass: rook-ceph-block
+  backup:
+    enabled: true
+    schedule: "0 0 2 * * *"  # 2 AM daily
+    # barmanObjectStore configured separately
+
+env:
+  DATABASE_URL: ""  # Injected from CNPG secret
+  ANTHROPIC_API_KEY: ""  # From ExternalSecret / OpenBao
+  FANDUEL_EMAIL: ""
+  FANDUEL_PASSWORD: ""
+  FANDUEL_STATE: "CO"
+  CORS_ORIGINS: '["https://sharp-edge.your-domain.com"]'
+
+# ExternalSecret for OpenBao integration
+externalSecret:
+  enabled: true
+  secretStoreName: sharp-edge-secret-store
+  keys:
+    - remoteRef: secret/data/sharp-edge/anthropic
+      property: api_key
+      secretKey: ANTHROPIC_API_KEY
+    - remoteRef: secret/data/sharp-edge/fanduel
+      property: email
+      secretKey: FANDUEL_EMAIL
+    - remoteRef: secret/data/sharp-edge/fanduel
+      property: password
+      secretKey: FANDUEL_PASSWORD
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
