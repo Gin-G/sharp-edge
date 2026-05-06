@@ -1,0 +1,20 @@
+{{- if .Values.backend.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.app.name }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sharp-edge.labels" . | nindent 4 }}
+    component: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Values.app.name }}
+    component: backend
+  ports:
+    - name: http
+      port: {{ .Values.backend.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

@@ -2,7 +2,13 @@
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: {{ .Release.Name }}-cnpg
+  name: {{ include "sharp-edge.cnpgClusterName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sharp-edge.labels" . | nindent 4 }}
+    component: database
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
 spec:
   instances: {{ .Values.cnpg.instances }}
   imageName: ghcr.io/cloudnative-pg/postgresql:16
@@ -18,14 +24,14 @@ spec:
 
   postgresql:
     parameters:
-      shared_buffers: "128MB"
-      effective_cache_size: "256MB"
+      shared_buffers: {{ .Values.cnpg.postgresql.shared_buffers | quote }}
+      effective_cache_size: {{ .Values.cnpg.postgresql.effective_cache_size | quote }}
 
   {{- if .Values.cnpg.backup.enabled }}
   backup:
     volumeSnapshot:
-      className: rook-ceph-block
-    retentionPolicy: "7d"
+      className: {{ .Values.cnpg.backup.snapshotClass }}
+    retentionPolicy: {{ .Values.cnpg.backup.retentionPolicy | quote }}
   {{- end }}
 
   monitoring:

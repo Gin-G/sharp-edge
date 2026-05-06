@@ -1,0 +1,53 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Values.app.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.app.name }}
+    group: {{ .Values.app.group }}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/ssl-passthrough: "false"
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | quote }}
+    external-dns.alpha.kubernetes.io/target: "8.44.158.127"
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    {{- if .Values.frontend.enabled }}
+    - hosts:
+        - {{ .Values.frontend.fqdn }}
+      secretName: {{ .Values.app.name }}-frontend-tls
+    {{- end }}
+    {{- if .Values.backend.enabled }}
+    - hosts:
+        - {{ .Values.backend.fqdn }}
+      secretName: {{ .Values.app.name }}-backend-tls
+    {{- end }}
+  rules:
+    {{- if .Values.frontend.enabled }}
+    - host: {{ .Values.frontend.fqdn }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Values.app.name }}-frontend
+                port:
+                  number: {{ .Values.frontend.port }}
+    {{- end }}
+    {{- if .Values.backend.enabled }}
+    - host: {{ .Values.backend.fqdn }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Values.app.name }}-backend
+                port:
+                  number: {{ .Values.backend.port }}
+    {{- end }}
+{{- end }}

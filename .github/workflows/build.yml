@@ -1,0 +1,90 @@
+name: Build and bump
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: meta
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PW }}
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USER }}/sharp-edge-backend:${{ steps.meta.outputs.tag }}
+            ${{ secrets.DOCKER_USER }}/sharp-edge-backend:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USER }}/sharp-edge-backend:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USER }}/sharp-edge-backend:buildcache,mode=max
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          build-args: |
+            VITE_API_BASE=https://api.sharp-edge.nickknows.net
+          tags: |
+            ${{ secrets.DOCKER_USER }}/sharp-edge-frontend:${{ steps.meta.outputs.tag }}
+            ${{ secrets.DOCKER_USER }}/sharp-edge-frontend:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USER }}/sharp-edge-frontend:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USER }}/sharp-edge-frontend:buildcache,mode=max
+
+  bump:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Update image tags in values.yaml
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          yq -i ".backend.image.tag = \"${TAG}\"" helm/sharp-edge/values.yaml
+          yq -i ".frontend.image.tag = \"${TAG}\"" helm/sharp-edge/values.yaml
+
+      - name: Commit and push
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add helm/sharp-edge/values.yaml
+          if git diff --staged --quiet; then
+            echo "values.yaml unchanged — nothing to commit"
+            exit 0
+          fi
+          git commit -m "ci: bump images to ${TAG}"
+          git pull --rebase --autostash
+          git push

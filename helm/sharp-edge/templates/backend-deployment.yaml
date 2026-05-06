@@ -1,0 +1,57 @@
+{{- if .Values.backend.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.app.name }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sharp-edge.labels" . | nindent 4 }}
+    component: backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.app.name }}
+      component: backend
+  template:
+    metadata:
+      labels:
+        {{- include "sharp-edge.labels" . | nindent 8 }}
+        component: backend
+    spec:
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.backend.port }}
+              name: http
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sharp-edge.cnpgAppSecret" . }}
+                  key: uri
+            - name: LOG_LEVEL
+              value: {{ .Values.backend.env.LOG_LEVEL | quote }}
+            - name: CORS_ORIGINS
+              value: {{ printf "[\"https://%s\"]" .Values.frontend.fqdn | quote }}
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: {{ .Values.backend.port | quote }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+{{- end }}
