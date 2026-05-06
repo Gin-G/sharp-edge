@@ -2,11 +2,22 @@
 
 import csv
 import json
+from datetime import datetime
 from typing import Optional
 
 import asyncpg
 
 from .base import BetDatabase
+
+
+def _to_dt(v):
+    """Coerce ISO-8601 strings to datetime; asyncpg refuses str for timestamptz.
+    SQLite tolerated raw ISO strings; Postgres does not."""
+    if v is None or isinstance(v, datetime):
+        return v
+    if isinstance(v, str):
+        return datetime.fromisoformat(v.replace("Z", "+00:00"))
+    raise TypeError(f"unsupported timestamp type: {type(v).__name__}")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bets (
@@ -90,7 +101,7 @@ class PostgresDatabase(BetDatabase):
                 bet["bet_id"], bet["sportsbook"], bet["bet_type"], bet["status"],
                 bet.get("odds"), bet.get("closing_line"), bet.get("ev"),
                 bet["stake"], bet.get("profit", 0),
-                bet.get("time_placed"), bet.get("time_settled"),
+                _to_dt(bet.get("time_placed")), _to_dt(bet.get("time_settled")),
                 bet.get("sport"), bet.get("league"), bet.get("bet_info"),
                 bet.get("legs"), bet.get("leg_count", 1),
                 bet.get("tags"), bet.get("source", "fanduel"), bet.get("raw_json"),
@@ -123,7 +134,7 @@ class PostgresDatabase(BetDatabase):
                 idx += 1
         if kwargs.get("since"):
             conditions.append(f"time_placed >= ${idx}")
-            params.append(kwargs["since"])
+            params.append(_to_dt(kwargs["since"]))
             idx += 1
         where = f"WHERE {' AND '.join(conditions)}"
         async with self._pool.acquire() as conn:
@@ -150,7 +161,7 @@ class PostgresDatabase(BetDatabase):
         params = []
         if since:
             conditions.append("time_placed >= $1")
-            params.append(since)
+            params.append(_to_dt(since))
         where = f"WHERE {' AND '.join(conditions)}"
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -175,11 +186,11 @@ class PostgresDatabase(BetDatabase):
         idx = 1
         if since:
             conditions.append(f"time_placed >= ${idx}")
-            params.append(since)
+            params.append(_to_dt(since))
             idx += 1
         if until:
             conditions.append(f"time_placed <= ${idx}")
-            params.append(until)
+            params.append(_to_dt(until))
             idx += 1
         where = f"WHERE {' AND '.join(conditions)}"
         async with self._pool.acquire() as conn:
@@ -246,10 +257,10 @@ class PostgresDatabase(BetDatabase):
                 idx += 1
         if kwargs.get("since"):
             conditions.append(f"time_placed >= ${idx}")
-            params.append(kwargs["since"])
+            params.append(_to_dt(kwargs["since"]))
             idx += 1
         if kwargs.get("until"):
             conditions.append(f"time_placed <= ${idx}")
-            params.append(kwargs["until"])
+            params.append(_to_dt(kwargs["until"]))
             idx += 1
         return conditions, params
