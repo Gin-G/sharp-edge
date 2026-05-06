@@ -8,12 +8,11 @@ metadata:
     app: {{ .Values.app.name }}
     group: {{ .Values.app.group }}
   annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/ssl-passthrough: "false"
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
     cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | quote }}
     external-dns.alpha.kubernetes.io/target: "8.44.158.127"
+    {{- if .Values.backend.enabled }}
+    traefik.ingress.kubernetes.io/router.middlewares: {{ printf "%s-%s-strip-api@kubernetescrd" .Release.Namespace .Values.app.name | quote }}
+    {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   tls:
@@ -25,8 +24,8 @@ spec:
       http:
         paths:
           {{- if .Values.backend.enabled }}
-          - path: /api(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /api
+            pathType: Prefix
             backend:
               service:
                 name: {{ .Values.app.name }}-backend
@@ -34,8 +33,8 @@ spec:
                   number: {{ .Values.backend.port }}
           {{- end }}
           {{- if .Values.frontend.enabled }}
-          - path: /()(.*)
-            pathType: ImplementationSpecific
+          - path: /
+            pathType: Prefix
             backend:
               service:
                 name: {{ .Values.app.name }}-frontend

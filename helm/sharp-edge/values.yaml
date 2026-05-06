@@ -36,7 +36,7 @@ backend:
     LOG_LEVEL: info
 ingress:
   enabled: true
-  className: nginx
+  className: traefik
   clusterIssuer: letsencrypt-cloudflare
 cnpg:
   enabled: true
