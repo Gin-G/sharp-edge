@@ -1,12 +1,11 @@
 app:
   name: sharp-edge
   group: analytics
-
 frontend:
   enabled: true
   image:
     repository: ncging/sharp-edge-frontend
-    tag: latest
+    tag: 2a48d61
     pullPolicy: Always
   replicas: 1
   port: 80
@@ -18,12 +17,11 @@ frontend:
     limits:
       cpu: 200m
       memory: 128Mi
-
 backend:
   enabled: true
   image:
     repository: ncging/sharp-edge-backend
-    tag: latest
+    tag: 2a48d61
     pullPolicy: Always
   replicas: 1
   port: 8000
@@ -37,12 +35,10 @@ backend:
       memory: 512Mi
   env:
     LOG_LEVEL: info
-
 ingress:
   enabled: true
   className: nginx
   clusterIssuer: letsencrypt-cloudflare
-
 cnpg:
   enabled: true
   instances: 2
