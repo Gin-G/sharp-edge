@@ -5,7 +5,7 @@ frontend:
   enabled: true
   image:
     repository: ncging/sharp-edge-frontend
-    tag: f5ab434
+    tag: 0c8ac9c
     pullPolicy: Always
   replicas: 1
   port: 80
@@ -21,7 +21,7 @@ backend:
   enabled: true
   image:
     repository: ncging/sharp-edge-backend
-    tag: f5ab434
+    tag: 0c8ac9c
     pullPolicy: Always
   replicas: 1
   port: 8000
