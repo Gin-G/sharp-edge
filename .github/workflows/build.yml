@@ -48,7 +48,7 @@ jobs:
           context: ./frontend
           push: true
           build-args: |
-            VITE_API_BASE=https://api.sharp-edge.nickknows.net
+            VITE_API_BASE=https://sharp-edge.nickknows.net/api
           tags: |
             ${{ secrets.DOCKER_USER }}/sharp-edge-frontend:${{ steps.meta.outputs.tag }}
             ${{ secrets.DOCKER_USER }}/sharp-edge-frontend:latest

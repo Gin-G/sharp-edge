@@ -10,44 +10,36 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/ssl-passthrough: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
     cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | quote }}
     external-dns.alpha.kubernetes.io/target: "8.44.158.127"
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   tls:
-    {{- if .Values.frontend.enabled }}
     - hosts:
         - {{ .Values.frontend.fqdn }}
-      secretName: {{ .Values.app.name }}-frontend-tls
-    {{- end }}
-    {{- if .Values.backend.enabled }}
-    - hosts:
-        - {{ .Values.backend.fqdn }}
-      secretName: {{ .Values.app.name }}-backend-tls
-    {{- end }}
+      secretName: {{ .Values.app.name }}-tls
   rules:
-    {{- if .Values.frontend.enabled }}
     - host: {{ .Values.frontend.fqdn }}
       http:
         paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Values.app.name }}-frontend
-                port:
-                  number: {{ .Values.frontend.port }}
-    {{- end }}
-    {{- if .Values.backend.enabled }}
-    - host: {{ .Values.backend.fqdn }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
+          {{- if .Values.backend.enabled }}
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: {{ .Values.app.name }}-backend
                 port:
                   number: {{ .Values.backend.port }}
-    {{- end }}
+          {{- end }}
+          {{- if .Values.frontend.enabled }}
+          - path: /()(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ .Values.app.name }}-frontend
+                port:
+                  number: {{ .Values.frontend.port }}
+          {{- end }}
 {{- end }}
