@@ -41,7 +41,7 @@ ingress:
   clusterIssuer: letsencrypt-cloudflare
 cnpg:
   enabled: true
-  instances: 2
+  instances: 1
   storage:
     size: 5Gi
     storageClass: rook-ceph-block
