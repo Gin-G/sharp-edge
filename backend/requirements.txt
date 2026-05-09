@@ -1,0 +1,23 @@
+# Backend runtime dependencies. Mirrors pyproject [project.dependencies] +
+# the [models] extras so a single `pip install -r requirements.txt` gets you
+# everything needed to run the API including the MLB batter screen.
+
+# --- Core API ---
+mcp[cli]>=1.0.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+httpx>=0.27.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+aiosqlite>=0.20.0
+asyncpg>=0.30.0
+anthropic>=0.40.0
+pyjwt>=2.9.0
+itsdangerous>=2.2.0
+
+# --- Sports models / batter screen ---
+pybaseball>=2.2.7
+MLB-StatsAPI>=1.9.0
+pandas>=1.5.3
+nba_api>=1.5.0
+nfl_data_py>=0.3.0

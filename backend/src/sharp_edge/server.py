@@ -42,7 +42,9 @@ class StatsInput(BaseModel):
 async def get_stats(params: StatsInput, ctx: Context) -> str:
     """Get aggregate betting stats: win rate, P/L, ROI with optional filters."""
     db = _get_db(ctx)
-    stats = await db.get_summary_stats(**params.model_dump(exclude_none=True))
+    stats = await db.get_summary_stats(
+        settings.mcp_user_id, **params.model_dump(exclude_none=True)
+    )
     return json.dumps(stats, default=str)
 
 
@@ -56,7 +58,9 @@ class BreakdownInput(BaseModel):
 async def get_breakdown(params: BreakdownInput, ctx: Context) -> str:
     """P/L breakdown grouped by league, sportsbook, bet_type, or sport."""
     db = _get_db(ctx)
-    result = await db.get_breakdown(group_by=params.group_by, since=params.since)
+    result = await db.get_breakdown(
+        settings.mcp_user_id, group_by=params.group_by, since=params.since
+    )
     return json.dumps(result, default=str)
 
 
@@ -74,7 +78,7 @@ class ScoreInput(BaseModel):
 async def score_proposed_bet(params: ScoreInput, ctx: Context) -> str:
     """Score a proposed bet against your historical patterns."""
     db = _get_db(ctx)
-    history = await db.query_bets(limit=5000)
+    history = await db.query_bets(settings.mcp_user_id, limit=5000)
     result = score_bet(params.model_dump(), history)
     return json.dumps(result, default=str)
 
@@ -92,7 +96,9 @@ class HistoryInput(BaseModel):
 async def query_history(params: HistoryInput, ctx: Context) -> str:
     """Query stored bet history with optional filters."""
     db = _get_db(ctx)
-    bets = await db.query_bets(**params.model_dump(exclude_none=True))
+    bets = await db.query_bets(
+        settings.mcp_user_id, **params.model_dump(exclude_none=True)
+    )
     return json.dumps({"count": len(bets), "bets": bets}, default=str)
 
 
@@ -100,7 +106,7 @@ async def query_history(params: HistoryInput, ctx: Context) -> str:
 async def get_insights(ctx: Context) -> str:
     """Generate actionable insights from your complete betting history."""
     db = _get_db(ctx)
-    history = await db.query_bets(limit=5000)
+    history = await db.query_bets(settings.mcp_user_id, limit=5000)
     return json.dumps({"insights": generate_insights(history)})
 
 
@@ -121,7 +127,7 @@ async def sync_fanduel(params: SyncInput, ctx: Context) -> str:
         raw_bets = await fd.fetch_all_settled_bets(max_pages=params.max_pages or 500)
         count = 0
         for raw in raw_bets:
-            await db.upsert_bet(fd.normalize_bet(raw))
+            await db.upsert_bet(settings.mcp_user_id, fd.normalize_bet(raw))
             count += 1
         return json.dumps({"status": "ok", "bets_synced": count})
     except Exception as e:
@@ -139,7 +145,7 @@ class ImportInput(BaseModel):
 async def import_csv(params: ImportInput, ctx: Context) -> str:
     """Import bet history from a Pikkit CSV export."""
     db = _get_db(ctx)
-    count = await db.import_pikkit_csv(params.csv_path)
+    count = await db.import_pikkit_csv(settings.mcp_user_id, params.csv_path)
     return json.dumps({"status": "ok", "bets_imported": count})
 
 

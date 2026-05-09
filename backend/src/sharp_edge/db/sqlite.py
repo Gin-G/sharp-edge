@@ -11,7 +11,8 @@ from .base import BetDatabase
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bets (
-    bet_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    bet_id TEXT NOT NULL,
     sportsbook TEXT NOT NULL,
     bet_type TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -31,24 +32,44 @@ CREATE TABLE IF NOT EXISTS bets (
     source TEXT DEFAULT 'fanduel',
     raw_json TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, bet_id)
 );
 CREATE TABLE IF NOT EXISTS bankroll_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
     timestamp TEXT DEFAULT (datetime('now')),
     sportsbook TEXT, balance REAL,
     deposit REAL DEFAULT 0.0, withdrawal REAL DEFAULT 0.0, note TEXT
 );
 CREATE TABLE IF NOT EXISTS sync_state (
-    key TEXT PRIMARY KEY, value TEXT,
-    updated_at TEXT DEFAULT (datetime('now'))
+    user_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, key)
 );
+CREATE INDEX IF NOT EXISTS idx_bets_user_id ON bets(user_id);
 CREATE INDEX IF NOT EXISTS idx_bets_status ON bets(status);
 CREATE INDEX IF NOT EXISTS idx_bets_league ON bets(league);
 CREATE INDEX IF NOT EXISTS idx_bets_sportsbook ON bets(sportsbook);
 CREATE INDEX IF NOT EXISTS idx_bets_time_placed ON bets(time_placed);
 CREATE INDEX IF NOT EXISTS idx_bets_bet_type ON bets(bet_type);
+CREATE INDEX IF NOT EXISTS idx_bankroll_user_id ON bankroll_log(user_id);
 """
+
+
+async def _has_user_id_column(db: aiosqlite.Connection, table: str) -> bool:
+    cursor = await db.execute(f"PRAGMA table_info({table})")
+    cols = [row["name"] for row in await cursor.fetchall()]
+    return "user_id" in cols
+
+
+async def _table_exists(db: aiosqlite.Connection, table: str) -> bool:
+    cursor = await db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    )
+    return await cursor.fetchone() is not None
 
 
 class SQLiteDatabase(BetDatabase):
@@ -62,6 +83,18 @@ class SQLiteDatabase(BetDatabase):
     async def connect(self) -> None:
         self._db = await aiosqlite.connect(str(self.db_path))
         self._db.row_factory = aiosqlite.Row
+
+        # Detect old schema (no user_id column on bets) and wipe so the new
+        # multi-user schema can take its place. One-shot migration.
+        if await _table_exists(self._db, "bets") and not await _has_user_id_column(
+            self._db, "bets"
+        ):
+            await self._db.executescript(
+                "DROP TABLE IF EXISTS bets;"
+                "DROP TABLE IF EXISTS bankroll_log;"
+                "DROP TABLE IF EXISTS sync_state;"
+            )
+
         await self._db.executescript(SCHEMA)
         await self._db.commit()
 
@@ -69,42 +102,45 @@ class SQLiteDatabase(BetDatabase):
         if self._db:
             await self._db.close()
 
-    async def upsert_bet(self, bet: dict) -> None:
+    async def upsert_bet(self, user_id: str, bet: dict) -> None:
+        params = {**bet, "user_id": user_id}
         await self._db.execute(
             """INSERT INTO bets (
-                bet_id, sportsbook, bet_type, status, odds, closing_line, ev,
+                user_id, bet_id, sportsbook, bet_type, status, odds, closing_line, ev,
                 stake, profit, time_placed, time_settled, sport, league,
                 bet_info, legs, leg_count, tags, source, raw_json, updated_at
             ) VALUES (
-                :bet_id, :sportsbook, :bet_type, :status, :odds, :closing_line, :ev,
+                :user_id, :bet_id, :sportsbook, :bet_type, :status, :odds, :closing_line, :ev,
                 :stake, :profit, :time_placed, :time_settled, :sport, :league,
                 :bet_info, :legs, :leg_count, :tags, :source, :raw_json, datetime('now')
-            ) ON CONFLICT(bet_id) DO UPDATE SET
+            ) ON CONFLICT(user_id, bet_id) DO UPDATE SET
                 status=excluded.status, profit=excluded.profit,
                 time_settled=excluded.time_settled, closing_line=excluded.closing_line,
                 ev=excluded.ev, raw_json=excluded.raw_json, updated_at=datetime('now')
             """,
-            bet,
+            params,
         )
         await self._db.commit()
 
-    async def upsert_bets(self, bets: list[dict]) -> int:
+    async def upsert_bets(self, user_id: str, bets: list[dict]) -> int:
         for bet in bets:
-            await self.upsert_bet(bet)
+            await self.upsert_bet(user_id, bet)
         return len(bets)
 
-    async def query_bets(self, **kwargs) -> list[dict]:
+    async def query_bets(self, user_id: str, **kwargs) -> list[dict]:
         conditions, params = self._build_filters(**kwargs)
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        conditions.insert(0, "user_id = ?")
+        params.insert(0, user_id)
+        where = f"WHERE {' AND '.join(conditions)}"
         limit = kwargs.get("limit", 500)
         offset = kwargs.get("offset", 0)
         query = f"SELECT * FROM bets {where} ORDER BY time_placed DESC LIMIT ? OFFSET ?"
         cursor = await self._db.execute(query, (*params, limit, offset))
         return [dict(row) for row in await cursor.fetchall()]
 
-    async def get_summary_stats(self, **kwargs) -> dict:
-        conditions = ["status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
-        params = []
+    async def get_summary_stats(self, user_id: str, **kwargs) -> dict:
+        conditions = ["user_id = ?", "status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
+        params = [user_id]
         for key in ("league", "sportsbook", "bet_type", "since"):
             val = kwargs.get(key)
             if val:
@@ -128,12 +164,14 @@ class SQLiteDatabase(BetDatabase):
         row["roi_pct"] = round((row["net_profit"] / wag) * 100, 2) if wag > 0 else 0.0
         return row
 
-    async def get_breakdown(self, group_by: str = "league", since: Optional[str] = None) -> list[dict]:
+    async def get_breakdown(
+        self, user_id: str, group_by: str = "league", since: Optional[str] = None
+    ) -> list[dict]:
         valid = {"league", "sportsbook", "bet_type", "sport"}
         if group_by not in valid:
             raise ValueError(f"group_by must be one of {valid}")
-        conditions = ["status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
-        params = []
+        conditions = ["user_id = ?", "status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
+        params = [user_id]
         if since:
             conditions.append("time_placed >= ?")
             params.append(since)
@@ -154,9 +192,11 @@ class SQLiteDatabase(BetDatabase):
             results.append(d)
         return results
 
-    async def get_calendar_data(self, since: Optional[str] = None, until: Optional[str] = None) -> list[dict]:
-        conditions = ["status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
-        params = []
+    async def get_calendar_data(
+        self, user_id: str, since: Optional[str] = None, until: Optional[str] = None
+    ) -> list[dict]:
+        conditions = ["user_id = ?", "status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
+        params = [user_id]
         if since:
             conditions.append("time_placed >= ?")
             params.append(since)
@@ -173,27 +213,32 @@ class SQLiteDatabase(BetDatabase):
         )
         return [dict(row) for row in await cursor.fetchall()]
 
-    async def get_sync_state(self, key: str) -> Optional[str]:
-        cursor = await self._db.execute("SELECT value FROM sync_state WHERE key = ?", (key,))
+    async def get_sync_state(self, user_id: str, key: str) -> Optional[str]:
+        cursor = await self._db.execute(
+            "SELECT value FROM sync_state WHERE user_id = ? AND key = ?",
+            (user_id, key),
+        )
         row = await cursor.fetchone()
         return row["value"] if row else None
 
-    async def set_sync_state(self, key: str, value: str) -> None:
+    async def set_sync_state(self, user_id: str, key: str, value: str) -> None:
         await self._db.execute(
-            "INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, datetime('now')) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')",
-            (key, value),
+            "INSERT INTO sync_state (user_id, key, value, updated_at) "
+            "VALUES (?, ?, ?, datetime('now')) "
+            "ON CONFLICT(user_id, key) DO UPDATE SET "
+            "value=excluded.value, updated_at=datetime('now')",
+            (user_id, key, value),
         )
         await self._db.commit()
 
-    async def import_pikkit_csv(self, csv_path: str) -> int:
+    async def import_pikkit_csv(self, user_id: str, csv_path: str) -> int:
         count = 0
         with open(csv_path, "r") as f:
             for row in csv.DictReader(f):
                 if row.get("status") not in ("SETTLED_WIN", "SETTLED_LOSS", "PLACED"):
                     continue
                 legs = row.get("bet_info", "").split("|")
-                await self.upsert_bet({
+                await self.upsert_bet(user_id, {
                     "bet_id": row["bet_id"],
                     "sportsbook": row.get("sportsbook", "unknown"),
                     "bet_type": row.get("type", "straight"),

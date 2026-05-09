@@ -4,6 +4,7 @@ const BASE = (import.meta.env.VITE_API_BASE as string) || 'http://localhost:8000
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...init?.headers },
     ...init,
   });
@@ -77,6 +78,10 @@ export function setManualToken(token: string): Promise<{ status: string; expires
     method: 'POST',
     body: JSON.stringify({ token }),
   });
+}
+
+export function logout(): Promise<{ status: string }> {
+  return req('/auth/logout', { method: 'POST' });
 }
 
 // --- Sync ---

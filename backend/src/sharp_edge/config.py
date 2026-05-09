@@ -26,6 +26,17 @@ class Settings(BaseSettings):
     log_level: str = "info"
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
+    # Sessions — signed cookie used to scope every user's data.
+    # Override in production via SESSION_SECRET env var; generate with
+    # `python -c 'import secrets; print(secrets.token_urlsafe(32))'`.
+    session_secret: str = "dev-secret-change-me"
+    session_cookie_name: str = "sharp_edge_sid"
+    session_max_age: int = 60 * 60 * 24 * 365  # 1 year
+
+    # MCP server is single-user (runs on the operator's machine), so it uses
+    # a fixed user_id rather than HTTP sessions.
+    mcp_user_id: str = "mcp-local"
+
     @property
     def is_postgres(self) -> bool:
         return self.database_url.startswith("postgresql")

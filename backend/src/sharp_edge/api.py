@@ -1,13 +1,15 @@
 """FastAPI application — REST API for the Sharp Edge frontend."""
 
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from starlette.middleware.sessions import SessionMiddleware
 
 from .config import settings
 from .db import create_database, BetDatabase
@@ -18,22 +20,30 @@ from .chat import chat as chat_with_claude
 
 logger = logging.getLogger(__name__)
 
-# Singletons
+# Per-user FanDuel auth, keyed by session uid. Replaces the old singleton so
+# different visitors can each log in to their own FanDuel account.
 _db: Optional[BetDatabase] = None
-_fd_auth: Optional[FanDuelAuth] = None
+_fd_auth: dict[str, FanDuelAuth] = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _db, _fd_auth
+    global _db
     _db = await create_database(settings.database_url)
-    if settings.fanduel_email:
-        _fd_auth = FanDuelAuth(settings.fanduel_email, settings.fanduel_password)
     yield
     await _db.close()
 
 
 app = FastAPI(title="Sharp Edge", version="0.1.0", lifespan=lifespan)
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.session_secret,
+    session_cookie=settings.session_cookie_name,
+    max_age=settings.session_max_age,
+    same_site="lax",
+    https_only=False,  # set True behind TLS in prod via env override
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,8 +58,18 @@ def get_db() -> BetDatabase:
     return _db
 
 
+def get_uid(request: Request) -> str:
+    """Pull the visitor's uid from the signed session cookie, minting one on
+    first contact. Every per-user endpoint depends on this."""
+    uid = request.session.get("uid")
+    if not uid:
+        uid = uuid.uuid4().hex
+        request.session["uid"] = uid
+    return uid
+
+
 # ------------------------------------------------------------------
-# Auth
+# Auth (FanDuel — per-user)
 # ------------------------------------------------------------------
 
 class LoginRequest(BaseModel):
@@ -62,34 +82,50 @@ class ManualTokenRequest(BaseModel):
 
 
 @app.post("/auth/login")
-async def login(req: LoginRequest):
-    global _fd_auth
-    _fd_auth = FanDuelAuth(req.email, req.password)
+async def login(req: LoginRequest, uid: str = Depends(get_uid)):
+    auth = FanDuelAuth(req.email, req.password)
     try:
-        token = await _fd_auth.login()
-        return {"status": "ok", "expires_in": int(_fd_auth._token_exp - __import__("time").time())}
+        await auth.login()
+        _fd_auth[uid] = auth
+        return {
+            "status": "ok",
+            "expires_in": int(auth._token_exp - __import__("time").time()),
+        }
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
 
 
 @app.post("/auth/token")
-async def set_manual_token(req: ManualTokenRequest):
+async def set_manual_token(req: ManualTokenRequest, uid: str = Depends(get_uid)):
     """Set a manually-captured JWT from browser DevTools."""
-    global _fd_auth
-    if not _fd_auth:
-        _fd_auth = FanDuelAuth("", "")
-    _fd_auth.set_manual_token(req.token)
-    return {"status": "ok", "expires_in": int(_fd_auth._token_exp - __import__("time").time())}
+    auth = _fd_auth.get(uid)
+    if not auth:
+        auth = FanDuelAuth("", "")
+        _fd_auth[uid] = auth
+    auth.set_manual_token(req.token)
+    return {
+        "status": "ok",
+        "expires_in": int(auth._token_exp - __import__("time").time()),
+    }
 
 
 @app.get("/auth/status")
-async def auth_status():
-    if not _fd_auth or not _fd_auth.token:
+async def auth_status(uid: str = Depends(get_uid)):
+    auth = _fd_auth.get(uid)
+    if not auth or not auth.token:
         return {"authenticated": False}
     return {
         "authenticated": True,
-        "expired": _fd_auth.is_expired,
+        "expired": auth.is_expired,
     }
+
+
+@app.post("/auth/logout")
+async def logout(request: Request, uid: str = Depends(get_uid)):
+    """Clear FanDuel auth for this session and rotate the session id."""
+    _fd_auth.pop(uid, None)
+    request.session.clear()
+    return {"status": "ok"}
 
 
 # ------------------------------------------------------------------
@@ -97,18 +133,21 @@ async def auth_status():
 # ------------------------------------------------------------------
 
 @app.post("/bets/sync")
-async def sync_bets(db: BetDatabase = Depends(get_db)):
-    if not _fd_auth or not _fd_auth.token:
+async def sync_bets(
+    uid: str = Depends(get_uid), db: BetDatabase = Depends(get_db)
+):
+    auth = _fd_auth.get(uid)
+    if not auth or not auth.token:
         raise HTTPException(400, "Not authenticated with FanDuel")
 
-    token = await _fd_auth.ensure_token()
+    token = await auth.ensure_token()
     fd = FanDuelClient(auth_token=token, state=settings.fanduel_state)
     try:
         raw_bets = await fd.fetch_all_settled_bets()
         count = 0
         for raw in raw_bets:
             norm = fd.normalize_bet(raw)
-            await db.upsert_bet(norm)
+            await db.upsert_bet(uid, norm)
             count += 1
         return {"status": "ok", "bets_synced": count}
     finally:
@@ -120,11 +159,15 @@ class ImportCSVRequest(BaseModel):
 
 
 @app.post("/bets/import")
-async def import_csv(req: ImportCSVRequest, db: BetDatabase = Depends(get_db)):
+async def import_csv(
+    req: ImportCSVRequest,
+    uid: str = Depends(get_uid),
+    db: BetDatabase = Depends(get_db),
+):
     from pathlib import Path
     if not Path(req.csv_path).exists():
         raise HTTPException(404, f"File not found: {req.csv_path}")
-    count = await db.import_pikkit_csv(req.csv_path)
+    count = await db.import_pikkit_csv(uid, req.csv_path)
     return {"status": "ok", "bets_imported": count}
 
 
@@ -141,8 +184,12 @@ class BetQuery(BaseModel):
 
 
 @app.post("/bets/history")
-async def get_history(q: BetQuery, db: BetDatabase = Depends(get_db)):
-    bets = await db.query_bets(**q.model_dump(exclude_none=True))
+async def get_history(
+    q: BetQuery,
+    uid: str = Depends(get_uid),
+    db: BetDatabase = Depends(get_db),
+):
+    bets = await db.query_bets(uid, **q.model_dump(exclude_none=True))
     return {"count": len(bets), "bets": bets}
 
 
@@ -152,29 +199,35 @@ async def get_stats(
     sportsbook: Optional[str] = None,
     bet_type: Optional[str] = None,
     since: Optional[str] = None,
+    uid: str = Depends(get_uid),
     db: BetDatabase = Depends(get_db),
 ):
     return await db.get_summary_stats(
-        league=league, sportsbook=sportsbook, bet_type=bet_type, since=since
+        uid, league=league, sportsbook=sportsbook, bet_type=bet_type, since=since
     )
 
 
 @app.get("/bets/breakdown/{group_by}")
 async def get_breakdown(
-    group_by: str, since: Optional[str] = None, db: BetDatabase = Depends(get_db)
+    group_by: str,
+    since: Optional[str] = None,
+    uid: str = Depends(get_uid),
+    db: BetDatabase = Depends(get_db),
 ):
     try:
-        return await db.get_breakdown(group_by=group_by, since=since)
+        return await db.get_breakdown(uid, group_by=group_by, since=since)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
 @app.get("/bets/calendar")
 async def get_calendar(
-    since: Optional[str] = None, until: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    uid: str = Depends(get_uid),
     db: BetDatabase = Depends(get_db),
 ):
-    return await db.get_calendar_data(since=since, until=until)
+    return await db.get_calendar_data(uid, since=since, until=until)
 
 
 class ScoreBetRequest(BaseModel):
@@ -188,22 +241,28 @@ class ScoreBetRequest(BaseModel):
 
 
 @app.post("/bets/score")
-async def score_proposed_bet(req: ScoreBetRequest, db: BetDatabase = Depends(get_db)):
-    history = await db.query_bets(limit=5000)
+async def score_proposed_bet(
+    req: ScoreBetRequest,
+    uid: str = Depends(get_uid),
+    db: BetDatabase = Depends(get_db),
+):
+    history = await db.query_bets(uid, limit=5000)
     return score_bet(req.model_dump(), history)
 
 
 @app.get("/bets/insights")
 async def get_insights(
-    since: Optional[str] = None, league: Optional[str] = None,
+    since: Optional[str] = None,
+    league: Optional[str] = None,
+    uid: str = Depends(get_uid),
     db: BetDatabase = Depends(get_db),
 ):
-    history = await db.query_bets(league=league, since=since, limit=5000)
+    history = await db.query_bets(uid, league=league, since=since, limit=5000)
     return {"insights": generate_insights(history)}
 
 
 # ------------------------------------------------------------------
-# Batters — MLB hot-bat / BvP screen
+# Batters — MLB hot-bat / BvP screen (not user-scoped — public data)
 # ------------------------------------------------------------------
 
 def _df_to_records(df) -> list[dict]:
@@ -238,7 +297,7 @@ async def batter_screen(
     except ImportError as e:
         raise HTTPException(
             500,
-            f"models extras not installed (pip install -e '.[models]'): {e}",
+            f"models extras not installed (pip install -r requirements.txt): {e}",
         )
 
     from fastapi.concurrency import run_in_threadpool
@@ -273,13 +332,18 @@ class ChatRequest(BaseModel):
 
 
 @app.post("/chat")
-async def chat_endpoint(req: ChatRequest, db: BetDatabase = Depends(get_db)):
+async def chat_endpoint(
+    req: ChatRequest,
+    uid: str = Depends(get_uid),
+    db: BetDatabase = Depends(get_db),
+):
     if not settings.anthropic_api_key:
         raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
     result = await chat_with_claude(
         messages=req.messages,
         db=db,
         api_key=settings.anthropic_api_key,
+        user_id=uid,
         model=req.model,
     )
     return result

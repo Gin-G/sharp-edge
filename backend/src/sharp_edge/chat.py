@@ -7,12 +7,11 @@ response back. Claude can query bet history, run analysis, score bets, etc.
 
 import json
 import logging
-from typing import AsyncIterator
 
 from anthropic import AsyncAnthropic
 
 from .db.base import BetDatabase
-from .analysis import score_bet, generate_insights, categorize_market
+from .analysis import score_bet, generate_insights
 
 logger = logging.getLogger(__name__)
 
@@ -97,28 +96,33 @@ TOOLS = [
 ]
 
 
-async def handle_tool_call(tool_name: str, tool_input: dict, db: BetDatabase) -> str:
+async def handle_tool_call(
+    tool_name: str, tool_input: dict, db: BetDatabase, user_id: str
+) -> str:
     """Execute a tool call and return the result as a string."""
     if tool_name == "query_bets":
-        bets = await db.query_bets(**tool_input)
+        bets = await db.query_bets(user_id, **tool_input)
         return json.dumps({"count": len(bets), "bets": bets}, default=str)
 
     elif tool_name == "get_stats":
-        stats = await db.get_summary_stats(**tool_input)
+        stats = await db.get_summary_stats(user_id, **tool_input)
         return json.dumps(stats, default=str)
 
     elif tool_name == "get_breakdown":
-        breakdown = await db.get_breakdown(**tool_input)
+        breakdown = await db.get_breakdown(user_id, **tool_input)
         return json.dumps(breakdown, default=str)
 
     elif tool_name == "score_bet":
-        history = await db.query_bets(limit=5000)
+        history = await db.query_bets(user_id, limit=5000)
         result = score_bet(tool_input, history)
         return json.dumps(result, default=str)
 
     elif tool_name == "get_insights":
         history = await db.query_bets(
-            league=tool_input.get("league"), since=tool_input.get("since"), limit=5000
+            user_id,
+            league=tool_input.get("league"),
+            since=tool_input.get("since"),
+            limit=5000,
         )
         insights = generate_insights(history)
         return json.dumps({"insights": insights})
@@ -130,18 +134,10 @@ async def chat(
     messages: list[dict],
     db: BetDatabase,
     api_key: str,
+    user_id: str,
     model: str = "claude-sonnet-4-20250514",
 ) -> dict:
-    """Send a chat message to Claude with betting tools.
-
-    Args:
-        messages: Conversation history [{role, content}, ...]
-        db: Database instance for tool execution
-        api_key: Anthropic API key
-
-    Returns:
-        dict with 'response' (text) and 'messages' (updated conversation)
-    """
+    """Send a chat message to Claude with betting tools, scoped to user_id."""
     client = AsyncAnthropic(api_key=api_key)
 
     response = await client.messages.create(
@@ -152,19 +148,17 @@ async def chat(
         messages=messages,
     )
 
-    # Handle tool use loop
     while response.stop_reason == "tool_use":
         tool_results = []
         for block in response.content:
             if block.type == "tool_use":
-                result = await handle_tool_call(block.name, block.input, db)
+                result = await handle_tool_call(block.name, block.input, db, user_id)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
                     "content": result,
                 })
 
-        # Append assistant response and tool results, then continue
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
 
@@ -176,10 +170,7 @@ async def chat(
             messages=messages,
         )
 
-    # Extract final text response
     text = "".join(block.text for block in response.content if hasattr(block, "text"))
-
-    # Append final assistant response to conversation
     messages.append({"role": "assistant", "content": response.content})
 
     return {"response": text, "messages": messages}

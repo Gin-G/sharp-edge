@@ -19,9 +19,11 @@ def _to_dt(v):
         return datetime.fromisoformat(v.replace("Z", "+00:00"))
     raise TypeError(f"unsupported timestamp type: {type(v).__name__}")
 
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bets (
-    bet_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    bet_id TEXT NOT NULL,
     sportsbook TEXT NOT NULL,
     bet_type TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -41,29 +43,52 @@ CREATE TABLE IF NOT EXISTS bets (
     source TEXT DEFAULT 'fanduel',
     raw_json JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (user_id, bet_id)
 );
 CREATE TABLE IF NOT EXISTS bankroll_log (
     id SERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
     timestamp TIMESTAMPTZ DEFAULT NOW(),
     sportsbook TEXT, balance DOUBLE PRECISION,
     deposit DOUBLE PRECISION DEFAULT 0.0,
     withdrawal DOUBLE PRECISION DEFAULT 0.0, note TEXT
 );
 CREATE TABLE IF NOT EXISTS sync_state (
-    key TEXT PRIMARY KEY, value TEXT,
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    user_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (user_id, key)
 );
 """
 
 INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_bets_user_id ON bets(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_bets_status ON bets(status)",
     "CREATE INDEX IF NOT EXISTS idx_bets_league ON bets(league)",
     "CREATE INDEX IF NOT EXISTS idx_bets_sportsbook ON bets(sportsbook)",
     "CREATE INDEX IF NOT EXISTS idx_bets_time_placed ON bets(time_placed)",
     "CREATE INDEX IF NOT EXISTS idx_bets_bet_type ON bets(bet_type)",
+    "CREATE INDEX IF NOT EXISTS idx_bankroll_user_id ON bankroll_log(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_bets_tags ON bets USING gin(to_tsvector('english', coalesce(tags, '')))",
 ]
+
+
+async def _has_user_id_column(conn: asyncpg.Connection, table: str) -> bool:
+    row = await conn.fetchrow(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = $1 AND column_name = 'user_id'",
+        table,
+    )
+    return row is not None
+
+
+async def _table_exists(conn: asyncpg.Connection, table: str) -> bool:
+    row = await conn.fetchrow(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = $1", table
+    )
+    return row is not None
 
 
 class PostgresDatabase(BetDatabase):
@@ -74,6 +99,15 @@ class PostgresDatabase(BetDatabase):
     async def connect(self) -> None:
         self._pool = await asyncpg.create_pool(self.url, min_size=2, max_size=10)
         async with self._pool.acquire() as conn:
+            # One-shot wipe when the old (single-user) schema is detected.
+            if await _table_exists(conn, "bets") and not await _has_user_id_column(
+                conn, "bets"
+            ):
+                await conn.execute(
+                    "DROP TABLE IF EXISTS bets CASCADE; "
+                    "DROP TABLE IF EXISTS bankroll_log CASCADE; "
+                    "DROP TABLE IF EXISTS sync_state CASCADE;"
+                )
             await conn.execute(SCHEMA)
             for idx in INDEXES:
                 try:
@@ -85,20 +119,20 @@ class PostgresDatabase(BetDatabase):
         if self._pool:
             await self._pool.close()
 
-    async def upsert_bet(self, bet: dict) -> None:
+    async def upsert_bet(self, user_id: str, bet: dict) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """INSERT INTO bets (
-                    bet_id, sportsbook, bet_type, status, odds, closing_line, ev,
+                    user_id, bet_id, sportsbook, bet_type, status, odds, closing_line, ev,
                     stake, profit, time_placed, time_settled, sport, league,
                     bet_info, legs, leg_count, tags, source, raw_json, updated_at
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())
-                ON CONFLICT(bet_id) DO UPDATE SET
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
+                ON CONFLICT(user_id, bet_id) DO UPDATE SET
                     status=EXCLUDED.status, profit=EXCLUDED.profit,
                     time_settled=EXCLUDED.time_settled, closing_line=EXCLUDED.closing_line,
                     ev=EXCLUDED.ev, raw_json=EXCLUDED.raw_json, updated_at=NOW()
                 """,
-                bet["bet_id"], bet["sportsbook"], bet["bet_type"], bet["status"],
+                user_id, bet["bet_id"], bet["sportsbook"], bet["bet_type"], bet["status"],
                 bet.get("odds"), bet.get("closing_line"), bet.get("ev"),
                 bet["stake"], bet.get("profit", 0),
                 _to_dt(bet.get("time_placed")), _to_dt(bet.get("time_settled")),
@@ -107,26 +141,27 @@ class PostgresDatabase(BetDatabase):
                 bet.get("tags"), bet.get("source", "fanduel"), bet.get("raw_json"),
             )
 
-    async def upsert_bets(self, bets: list[dict]) -> int:
+    async def upsert_bets(self, user_id: str, bets: list[dict]) -> int:
         for bet in bets:
-            await self.upsert_bet(bet)
+            await self.upsert_bet(user_id, bet)
         return len(bets)
 
-    async def query_bets(self, **kwargs) -> list[dict]:
+    async def query_bets(self, user_id: str, **kwargs) -> list[dict]:
         conditions, params = self._build_filters(**kwargs)
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        all_conditions, all_params = self._renumber(user_id, conditions, params)
+        where = f"WHERE {' AND '.join(all_conditions)}"
         limit = kwargs.get("limit", 500)
         offset = kwargs.get("offset", 0)
-        n = len(params)
+        n = len(all_params)
         query = f"SELECT * FROM bets {where} ORDER BY time_placed DESC LIMIT ${n+1} OFFSET ${n+2}"
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(query, *params, limit, offset)
+            rows = await conn.fetch(query, *all_params, limit, offset)
             return [dict(r) for r in rows]
 
-    async def get_summary_stats(self, **kwargs) -> dict:
-        conditions = ["status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
-        params = []
-        idx = 1
+    async def get_summary_stats(self, user_id: str, **kwargs) -> dict:
+        conditions = ["user_id = $1", "status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
+        params = [user_id]
+        idx = 2
         for key in ("league", "sportsbook", "bet_type"):
             if kwargs.get(key):
                 conditions.append(f"{key} = ${idx}")
@@ -153,14 +188,16 @@ class PostgresDatabase(BetDatabase):
             d["roi_pct"] = round((d["net_profit"] / wag) * 100, 2) if wag > 0 else 0.0
             return d
 
-    async def get_breakdown(self, group_by: str = "league", since: Optional[str] = None) -> list[dict]:
+    async def get_breakdown(
+        self, user_id: str, group_by: str = "league", since: Optional[str] = None
+    ) -> list[dict]:
         valid = {"league", "sportsbook", "bet_type", "sport"}
         if group_by not in valid:
             raise ValueError(f"group_by must be one of {valid}")
-        conditions = ["status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
-        params = []
+        conditions = ["user_id = $1", "status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
+        params = [user_id]
         if since:
-            conditions.append("time_placed >= $1")
+            conditions.append("time_placed >= $2")
             params.append(_to_dt(since))
         where = f"WHERE {' AND '.join(conditions)}"
         async with self._pool.acquire() as conn:
@@ -180,10 +217,12 @@ class PostgresDatabase(BetDatabase):
             results.append(d)
         return results
 
-    async def get_calendar_data(self, since: Optional[str] = None, until: Optional[str] = None) -> list[dict]:
-        conditions = ["status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
-        params = []
-        idx = 1
+    async def get_calendar_data(
+        self, user_id: str, since: Optional[str] = None, until: Optional[str] = None
+    ) -> list[dict]:
+        conditions = ["user_id = $1", "status IN ('SETTLED_WIN', 'SETTLED_LOSS')"]
+        params = [user_id]
+        idx = 2
         if since:
             conditions.append(f"time_placed >= ${idx}")
             params.append(_to_dt(since))
@@ -203,27 +242,32 @@ class PostgresDatabase(BetDatabase):
             )
         return [dict(r) for r in rows]
 
-    async def get_sync_state(self, key: str) -> Optional[str]:
+    async def get_sync_state(self, user_id: str, key: str) -> Optional[str]:
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT value FROM sync_state WHERE key = $1", key)
+            row = await conn.fetchrow(
+                "SELECT value FROM sync_state WHERE user_id = $1 AND key = $2",
+                user_id, key,
+            )
             return row["value"] if row else None
 
-    async def set_sync_state(self, key: str, value: str) -> None:
+    async def set_sync_state(self, user_id: str, key: str, value: str) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO sync_state (key, value, updated_at) VALUES ($1, $2, NOW()) "
-                "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
-                key, value,
+                "INSERT INTO sync_state (user_id, key, value, updated_at) "
+                "VALUES ($1, $2, $3, NOW()) "
+                "ON CONFLICT(user_id, key) DO UPDATE SET "
+                "value=EXCLUDED.value, updated_at=NOW()",
+                user_id, key, value,
             )
 
-    async def import_pikkit_csv(self, csv_path: str) -> int:
+    async def import_pikkit_csv(self, user_id: str, csv_path: str) -> int:
         count = 0
         with open(csv_path, "r") as f:
             for row in csv.DictReader(f):
                 if row.get("status") not in ("SETTLED_WIN", "SETTLED_LOSS", "PLACED"):
                     continue
                 legs = row.get("bet_info", "").split("|")
-                await self.upsert_bet({
+                await self.upsert_bet(user_id, {
                     "bet_id": row["bet_id"],
                     "sportsbook": row.get("sportsbook", "unknown"),
                     "bet_type": row.get("type", "straight"),
@@ -246,6 +290,18 @@ class PostgresDatabase(BetDatabase):
                 })
                 count += 1
         return count
+
+    def _renumber(self, user_id: str, conditions: list[str], params: list) -> tuple[list[str], list]:
+        """Take filter conditions that use $1.. numbering and renumber them to
+        start at $2 (since $1 is reserved for user_id). Returns the full
+        condition list (with user_id first) and the full param list."""
+        all_params = [user_id, *params]
+        # Each condition contains exactly one placeholder of the form $N.
+        # Bump N by 1 across the board.
+        renumbered = []
+        for i, cond in enumerate(conditions):
+            renumbered.append(cond.replace(f"${i+1}", f"${i+2}"))
+        return ["user_id = $1", *renumbered], all_params
 
     def _build_filters(self, **kwargs) -> tuple[list[str], list]:
         conditions, params = [], []
