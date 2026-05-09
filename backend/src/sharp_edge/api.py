@@ -203,6 +203,67 @@ async def get_insights(
 
 
 # ------------------------------------------------------------------
+# Batters — MLB hot-bat / BvP screen
+# ------------------------------------------------------------------
+
+def _df_to_records(df) -> list[dict]:
+    """pandas DataFrame → JSON-safe records (NaN/NaT → None)."""
+    import math
+    records = df.to_dict(orient="records")
+    for row in records:
+        for k, v in row.items():
+            if isinstance(v, float) and math.isnan(v):
+                row[k] = None
+    return records
+
+
+@app.get("/batters/screen")
+async def batter_screen(
+    min_recent_avg: float = 0.300,
+    min_recent_ab: int = 10,
+    min_bvp_avg: float = 0.400,
+    min_bvp_pa: int = 5,
+    min_hand_avg: float = 0.400,
+    min_hand_pa: int = 50,
+    min_slump_era: float = 5.00,
+    days: int = 7,
+):
+    """Today's MLB batter screen: hot bats, today's matchups, picks.
+
+    First call is slow (Statcast scrape can take minutes per season); subsequent
+    calls hit the on-disk pybaseball cache and return in ~30s.
+    """
+    try:
+        from .batters import screen_today
+    except ImportError as e:
+        raise HTTPException(
+            500,
+            f"models extras not installed (pip install -e '.[models]'): {e}",
+        )
+
+    from fastapi.concurrency import run_in_threadpool
+    res = await run_in_threadpool(
+        screen_today,
+        min_recent_avg=min_recent_avg,
+        min_recent_ab=min_recent_ab,
+        min_bvp_avg=min_bvp_avg,
+        min_bvp_pa=min_bvp_pa,
+        min_hand_avg=min_hand_avg,
+        min_hand_pa=min_hand_pa,
+        min_slump_era=min_slump_era,
+        days=days,
+        verbose=False,
+    )
+
+    hot = res.hot_bats.rename(columns={"Name": "batter", "Tm": "team"})
+    return {
+        "picks": _df_to_records(res.picks),
+        "hot_bats": _df_to_records(hot),
+        "today": _df_to_records(res.today),
+    }
+
+
+# ------------------------------------------------------------------
 # Chat
 # ------------------------------------------------------------------
 

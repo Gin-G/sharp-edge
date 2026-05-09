@@ -12,7 +12,7 @@
   {#if loading}
     <div class="h-7 w-24 bg-surface-600 rounded animate-pulse"></div>
   {:else}
-    <p class="text-2xl font-bold tabular-nums
+    <p class="text-lg sm:text-2xl font-bold tabular-nums truncate
       {trend === 'pos' ? 'text-emerald-400' : trend === 'neg' ? 'text-red-400' : 'text-slate-100'}">
       {value}
     </p>

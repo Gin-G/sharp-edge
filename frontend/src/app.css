@@ -25,7 +25,7 @@
 
 @layer components {
   .card {
-    @apply bg-surface-700 border border-border rounded-xl p-5;
+    @apply bg-surface-700 border border-border rounded-xl p-4 sm:p-5;
   }
 
   .btn {

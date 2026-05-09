@@ -1,4 +1,4 @@
-import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse } from './types';
+import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen } from './types';
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || 'http://localhost:8000';
 
@@ -40,6 +40,11 @@ export function getCalendar(since?: string, until?: string): Promise<CalendarDay
 export function getInsights(params: Record<string, string> = {}): Promise<InsightsResponse> {
   const qs = new URLSearchParams(params).toString();
   return req<InsightsResponse>(`/bets/insights${qs ? `?${qs}` : ''}`);
+}
+
+export function getBatterScreen(params: Record<string, string> = {}): Promise<BatterScreen> {
+  const qs = new URLSearchParams(params).toString();
+  return req<BatterScreen>(`/batters/screen${qs ? `?${qs}` : ''}`);
 }
 
 // --- Chat ---
