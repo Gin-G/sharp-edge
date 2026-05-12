@@ -65,6 +65,12 @@ ISO_HAND_MIN: float = 0.250        # ISO vs SP hand threshold for POWER+HAND edg
 ISO_HAND_PA_MIN: int = 50          # minimum PA vs that hand to surface ISO split
 HR9_L3_MIN: float = 1.5            # SP HR/9 over last 3 starts for POWER+HAND edge
 
+# Minimum outs (innings × 3) required before HR/9 is considered meaningful.
+# Without a floor a pitcher with 1 HR in 1 IP produces 9.00 HR/9 and fires
+# POWER+HAND on a single-inning sample (e.g. a rookie's first start).
+HR9_MIN_OUTS_L3: int = 15          # 5 IP minimum across last 3 starts
+HR9_MIN_OUTS_SEASON: int = 27      # 9 IP minimum for season HR/9
+
 BARREL_PCT_BATTER_MIN: float = 12.0   # batter barrel% for BARREL-EDGE
 BARREL_PCT_PITCHER_MIN: float = 10.0  # pitcher barrel% allowed for BARREL-EDGE
 
@@ -75,6 +81,34 @@ BVP_HR_MIN: int = 1                # BvP home runs for BVP-HR edge
 BVP_PA_MIN: int = 5                # BvP plate appearances for BVP-HR edge
 
 HR_LAST_15D_HOT: int = 2           # HR count to qualify as HOT-POP
+
+# ---------------------------------------------------------------------------
+# PICKS scoring — composite hr_score ranks candidates so PICKS stays tight
+# ---------------------------------------------------------------------------
+#
+# hr_score weights each signal independently so you can see exactly why one
+# player ranks above another.  PICKS = top TOP_N_PICKS scorers from the set
+# of HOT-POP players who also have ≥1 non-HOT-POP edge.
+#
+# Tuning guide:
+#   SCORE_PER_HR_15D   — raises players in a genuine HR hot streak
+#   SCORE_PER_EDGE     — each confirming edge adds this; a second edge adds
+#   SCORE_EDGE_BONUS     this extra bonus (rewards multi-signal confluence)
+#   SCORE_ISO_HAND     — per unit of iso_vs_hand above ISO_HAND_MIN
+#   SCORE_PITCHER_HR9  — per unit of p_hr9_l3 above HR9_L3_MIN
+#   SCORE_PARK         — per park-factor point above 100
+#   SCORE_BARREL       — per barrel-% point above 10
+
+TOP_N_PICKS: int = 5
+
+SCORE_PER_HR_15D: float = 3.0
+SCORE_HR_CAP: int = 8           # caps hr_15d contribution so outliers don't dominate
+SCORE_PER_EDGE: float = 8.0
+SCORE_EDGE_BONUS: float = 4.0   # extra per edge beyond the first
+SCORE_ISO_HAND: float = 15.0
+SCORE_PITCHER_HR9: float = 3.0
+SCORE_PARK: float = 0.2
+SCORE_BARREL: float = 0.5
 
 # pull_air% field coordinates (Statcast bird's-eye view, home plate ≈ x=125)
 PULL_HCX_LEFT: int = 100           # RHB pulls to left field (hc_x ≤ this)
@@ -126,6 +160,39 @@ _DEFAULT_PARK = {"lhb": 100, "rhb": 100, "overall": 100}
 
 def _park_for_venue(venue_name: str) -> dict[str, int]:
     return PARK_HR_FACTORS.get(venue_name, _DEFAULT_PARK)
+
+
+# ---------------------------------------------------------------------------
+# Composite HR score
+# ---------------------------------------------------------------------------
+
+def _compute_hr_score(row: dict) -> float:
+    """Weighted signal score used to rank and cap the PICKS list.
+
+    Components (all additive):
+      • Recent form    — hr_last_15d, capped at SCORE_HR_CAP
+      • Edge count     — base per edge + escalating bonus for confirmation
+      • Power/matchup  — iso_vs_hand premium above ISO_HAND_MIN
+      • Pitcher vuln   — p_hr9_l3 premium above HR9_L3_MIN
+      • Park           — park_factor premium above 100
+      • Barrel quality — barrel_pct premium above 10%
+    """
+    edge_count = sum([
+        bool(row["power_hand_edge"]),
+        bool(row["barrel_edge"]),
+        bool(row["park_boost_edge"]),
+        bool(row["bvp_hr_edge"]),
+    ])
+    return round(
+        min(int(row["hr_last_15d"]), SCORE_HR_CAP) * SCORE_PER_HR_15D
+        + edge_count * SCORE_PER_EDGE
+        + max(0, edge_count - 1) * SCORE_EDGE_BONUS
+        + max(0.0, float(row["iso_vs_hand"] or 0.0) - ISO_HAND_MIN) * SCORE_ISO_HAND
+        + max(0.0, float(row["p_hr9_l3"] or 0.0) - HR9_L3_MIN) * SCORE_PITCHER_HR9
+        + max(0.0, float(row["park_factor"]) - 100.0) * SCORE_PARK
+        + max(0.0, float(row["barrel_pct"] or 0.0) - 10.0) * SCORE_BARREL,
+        1,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -424,12 +491,20 @@ def _pitcher_hr_gamelog(pitcher_id: int, season: int) -> dict:
 
     total_outs = sum(_ip_to_outs(g["ip_str"]) for g in games)
     total_hr = sum(g["hr"] for g in games)
-    hr9_season = round(total_hr * 27 / total_outs, 2) if total_outs else None
+    hr9_season = (
+        round(total_hr * 27 / total_outs, 2)
+        if total_outs >= HR9_MIN_OUTS_SEASON
+        else None
+    )
 
     last3 = games[:3]
     l3_outs = sum(_ip_to_outs(g["ip_str"]) for g in last3)
     l3_hr = sum(g["hr"] for g in last3)
-    hr9_l3 = round(l3_hr * 27 / l3_outs, 2) if l3_outs else None
+    hr9_l3 = (
+        round(l3_hr * 27 / l3_outs, 2)
+        if l3_outs >= HR9_MIN_OUTS_L3
+        else None
+    )
 
     return {"hr9_season": hr9_season, "hr9_l3": hr9_l3, "l3_starts": len(last3)}
 
@@ -664,6 +739,10 @@ def screen_today_hr(workers: int = 12, verbose: bool = True) -> HRScreenResult:
         empty = pd.DataFrame()
         return HRScreenResult(picks=empty, hot_pop=empty, today=today_df)
 
+    today_df["hr_score"] = today_df.apply(
+        lambda r: _compute_hr_score(r.to_dict()), axis=1
+    )
+
     hot_df = (
         today_df[today_df["hot_pop"]]
         .sort_values("hr_last_15d", ascending=False)
@@ -671,10 +750,8 @@ def screen_today_hr(workers: int = 12, verbose: bool = True) -> HRScreenResult:
     )
     picks_df = (
         today_df[today_df["is_pick"]]
-        .sort_values(
-            ["hr_last_15d", "iso_vs_hand", "p_hr9_l3"],
-            ascending=[False, False, False],
-        )
+        .sort_values("hr_score", ascending=False)
+        .head(TOP_N_PICKS)
         .reset_index(drop=True)
     )
 

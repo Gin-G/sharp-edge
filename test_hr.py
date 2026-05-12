@@ -196,11 +196,13 @@ def main() -> None:
             print(bvp[cols].rename(columns=DISPLAY_RENAME).to_string(index=False))
 
     # ------------------------------------------------------------------ PICKS
-    print(f"\n=== PICKS (HOT-POP AND ≥1 edge) — {len(res.picks)} ===")
+    from sharp_edge.homers import TOP_N_PICKS
+    print(f"\n=== PICKS — top {TOP_N_PICKS} by hr_score (HOT-POP AND ≥1 edge) — {len(res.picks)} ===")
     if res.picks.empty:
         print("(none)")
     else:
         cols = [
+            "hr_score",
             "batter", "team", "opposing_pitcher", "p_hand",
             "game_time", "venue", "park_factor",
             "iso_career", "iso_vs_hand",
