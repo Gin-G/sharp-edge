@@ -27,13 +27,23 @@ backend:
   port: 8000
   resources:
     requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
+      cpu: 200m
       memory: 512Mi
+    limits:
+      # The MLB batter screen loads ~450k Statcast events into pandas;
+      # 512Mi OOM-killed reliably. 2Gi gives headroom for the scrape +
+      # the in-process daily result cache.
+      cpu: "1"
+      memory: 2Gi
   env:
     LOG_LEVEL: info
+  # Persists pybaseball's on-disk Statcast cache across pod restarts so the
+  # full 3-season scrape only ever runs once (not on every redeploy).
+  pybaseballCache:
+    enabled: true
+    size: 2Gi
+    storageClass: rook-ceph-block
+    mountPath: /root/.pybaseball_cache
 ingress:
   enabled: true
   className: traefik

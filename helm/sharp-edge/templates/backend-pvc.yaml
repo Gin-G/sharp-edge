@@ -1,0 +1,17 @@
+{{- if and .Values.backend.enabled .Values.backend.pybaseballCache.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.app.name }}-pybaseball-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sharp-edge.labels" . | nindent 4 }}
+    component: backend
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.backend.pybaseballCache.size }}
+  storageClassName: {{ .Values.backend.pybaseballCache.storageClass }}
+{{- end }}

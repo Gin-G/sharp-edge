@@ -20,15 +20,20 @@ deps: install with `pip install -e ".[models]"` (pybaseball, MLB-StatsAPI, panda
 from __future__ import annotations
 
 import functools
+import logging
 import threading
+import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
+from typing import Optional
 
 import pandas as pd
 import pybaseball as pb
 import statsapi
+
+logger = logging.getLogger(__name__)
 
 pb.cache.enable()
 
@@ -44,6 +49,88 @@ class ScreenResult:
             f"ScreenResult(picks={len(self.picks)}, "
             f"hot_bats={len(self.hot_bats)}, today={len(self.today)})"
         )
+
+
+# -----------------------------------------------------------------------------
+# Daily result cache + background warm-up
+# -----------------------------------------------------------------------------
+#
+# screen_today() is expensive: the first call after a pod restart scrapes 3
+# seasons of Statcast events (multi-minute, ~500MB of pandas memory). We don't
+# want to run it on every request, and we don't want to make users wait. So:
+#
+#   1. Module-level cache keyed by date — one scrape per day per process.
+#   2. A daemon thread runs the scrape in the background; subsequent requests
+#      either return the cached result or get a "warming" signal.
+#   3. The FastAPI lifespan kicks off warm_async() at startup so a freshly-
+#      deployed pod is usually ready by the time the first browser hits it.
+
+_state_lock = threading.Lock()
+_warm_result: Optional[ScreenResult] = None
+_warm_date: Optional[date] = None
+_warm_error: Optional[str] = None
+_warming: bool = False
+_warm_started_at: Optional[float] = None
+
+
+def get_cached() -> Optional[ScreenResult]:
+    """Return today's cached ScreenResult if present, else None."""
+    with _state_lock:
+        if _warm_result is not None and _warm_date == date.today():
+            return _warm_result
+    return None
+
+
+def warm_status() -> dict:
+    """Snapshot of cache state for diagnostics / frontend polling."""
+    with _state_lock:
+        return {
+            "warming": _warming,
+            "started_at": _warm_started_at,
+            "elapsed_seconds": (time.time() - _warm_started_at) if _warm_started_at else None,
+            "cached_date": _warm_date.isoformat() if _warm_date else None,
+            "has_cache": _warm_result is not None and _warm_date == date.today(),
+            "last_error": _warm_error,
+        }
+
+
+def _do_warm(target_date: date) -> None:
+    """Run screen_today() and stash the result. Runs in a daemon thread."""
+    global _warm_result, _warm_date, _warming, _warm_error
+    try:
+        logger.info("[batters] warm-up started for %s", target_date.isoformat())
+        result = screen_today(verbose=False)
+        with _state_lock:
+            _warm_result = result
+            _warm_date = target_date
+            _warm_error = None
+        logger.info(
+            "[batters] warm-up complete (%d picks, %d hot, %d today)",
+            len(result.picks), len(result.hot_bats), len(result.today),
+        )
+    except Exception as e:
+        logger.exception("[batters] warm-up failed")
+        with _state_lock:
+            _warm_error = f"{type(e).__name__}: {e}"
+    finally:
+        with _state_lock:
+            _warming = False
+
+
+def warm_async() -> dict:
+    """Trigger a background warm-up if cache is stale or absent. Returns the
+    current state immediately — does not block."""
+    global _warming, _warm_started_at
+    today = date.today()
+    with _state_lock:
+        if _warm_result is not None and _warm_date == today:
+            return {"status": "ready"}
+        if _warming:
+            return {"status": "warming"}
+        _warming = True
+        _warm_started_at = time.time()
+    threading.Thread(target=_do_warm, args=(today,), daemon=True).start()
+    return {"status": "warming"}
 
 
 DEAD_STATES_SUBSTRINGS = ("Postponed", "Cancelled", "Canceled", "Suspended")

@@ -1,25 +1,44 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { getBatterScreen } from '$lib/api';
+  import { onMount, onDestroy } from 'svelte';
+  import { getBatterScreen, ApiError } from '$lib/api';
   import type { BatterScreen, BatterRow, HotBatRow } from '$lib/types';
 
   let data: BatterScreen | null = null;
   let loading = true;
   let error = '';
+  let warming = false;
+  let warmingElapsed: number | null = null;
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function load() {
     loading = true;
     error = '';
     try {
       data = await getBatterScreen();
+      warming = false;
+      warmingElapsed = null;
     } catch (e) {
+      if (e instanceof ApiError && e.status === 503) {
+        warming = true;
+        // Body carries elapsed_seconds for the spinner.
+        const body = e.body as { elapsed_seconds?: number } | undefined;
+        warmingElapsed = body?.elapsed_seconds ?? null;
+        // Respect Retry-After (defaults to 15s); cap aggressively low while warming.
+        const delay = Math.min((e.retryAfter ?? 15) * 1000, 20_000);
+        pollTimer = setTimeout(load, delay);
+        return; // keep `loading` true while we wait
+      }
       error = e instanceof Error ? e.message : String(e);
+      warming = false;
     } finally {
-      loading = false;
+      if (!warming) loading = false;
     }
   }
 
   onMount(load);
+  onDestroy(() => {
+    if (pollTimer) clearTimeout(pollTimer);
+  });
 
   function fmtAvg(v: number | null): string {
     if (v === null || v === undefined) return '—';
@@ -62,8 +81,13 @@
   {/if}
 
   {#if loading && !data}
-    <div class="card text-slate-400 text-sm">
-      Loading screen — first call can take several minutes (Statcast scrape).
+    <div class="card text-slate-400 text-sm flex items-center gap-3">
+      <div class="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+      {#if warming}
+        Scraping today's MLB data{warmingElapsed != null ? ` (${Math.round(warmingElapsed)}s elapsed)` : ''}… retrying shortly.
+      {:else}
+        Loading screen…
+      {/if}
     </div>
   {:else if data}
     <!-- Picks -->

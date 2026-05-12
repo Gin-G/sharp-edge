@@ -40,6 +40,15 @@ spec:
               value: "0.0.0.0"
             - name: PORT
               value: {{ .Values.backend.port | quote }}
+            {{- if .Values.backend.pybaseballCache.enabled }}
+            - name: HOME
+              value: "/root"
+            {{- end }}
+          {{- if .Values.backend.pybaseballCache.enabled }}
+          volumeMounts:
+            - name: pybaseball-cache
+              mountPath: {{ .Values.backend.pybaseballCache.mountPath }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health
@@ -54,4 +63,10 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}
+      {{- if .Values.backend.pybaseballCache.enabled }}
+      volumes:
+        - name: pybaseball-cache
+          persistentVolumeClaim:
+            claimName: {{ .Values.app.name }}-pybaseball-cache
+      {{- end }}
 {{- end }}

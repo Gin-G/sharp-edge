@@ -2,6 +2,18 @@ import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, Insight
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || 'http://localhost:8000';
 
+export class ApiError extends Error {
+  status: number;
+  retryAfter?: number;
+  body?: unknown;
+  constructor(status: number, message: string, retryAfter?: number, body?: unknown) {
+    super(message);
+    this.status = status;
+    this.retryAfter = retryAfter;
+    this.body = body;
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     credentials: 'include',
@@ -9,8 +21,12 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!res.ok) {
-    const msg = await res.text().catch(() => res.statusText);
-    throw new Error(`${res.status}: ${msg}`);
+    const text = await res.text().catch(() => res.statusText);
+    let body: unknown;
+    try { body = JSON.parse(text); } catch { body = text; }
+    const retryHeader = res.headers.get('Retry-After');
+    const retryAfter = retryHeader ? parseInt(retryHeader, 10) : undefined;
+    throw new ApiError(res.status, `${res.status}: ${text}`, retryAfter, body);
   }
   return res.json() as Promise<T>;
 }
@@ -46,6 +62,19 @@ export function getInsights(params: Record<string, string> = {}): Promise<Insigh
 export function getBatterScreen(params: Record<string, string> = {}): Promise<BatterScreen> {
   const qs = new URLSearchParams(params).toString();
   return req<BatterScreen>(`/batters/screen${qs ? `?${qs}` : ''}`);
+}
+
+export interface BatterScreenStatus {
+  available: boolean;
+  warming?: boolean;
+  has_cache?: boolean;
+  cached_date?: string | null;
+  elapsed_seconds?: number | null;
+  last_error?: string | null;
+}
+
+export function getBatterScreenStatus(): Promise<BatterScreenStatus> {
+  return req<BatterScreenStatus>('/batters/screen/status');
 }
 
 // --- Chat ---

@@ -30,6 +30,20 @@ _fd_auth: dict[str, FanDuelAuth] = {}
 async def lifespan(app: FastAPI):
     global _db
     _db = await create_database(settings.database_url)
+
+    # Kick off the batter-screen scrape in the background so the first browser
+    # request after a pod restart doesn't have to wait several minutes. If the
+    # models extras aren't installed (lighter prod image, dev sandbox, etc.)
+    # we skip it silently — the endpoint will surface the import error itself.
+    try:
+        from .batters import warm_async
+        warm_async()
+        logger.info("batters: background warm-up scheduled")
+    except ImportError:
+        logger.info("batters: models extras not installed, skipping prewarm")
+    except Exception as e:
+        logger.warning("batters: prewarm failed to schedule: %s", e)
+
     yield
     await _db.close()
 
@@ -277,49 +291,56 @@ def _df_to_records(df) -> list[dict]:
 
 
 @app.get("/batters/screen")
-async def batter_screen(
-    min_recent_avg: float = 0.300,
-    min_recent_ab: int = 10,
-    min_bvp_avg: float = 0.400,
-    min_bvp_pa: int = 5,
-    min_hand_avg: float = 0.400,
-    min_hand_pa: int = 50,
-    min_slump_era: float = 5.00,
-    days: int = 7,
-):
+async def batter_screen():
     """Today's MLB batter screen: hot bats, today's matchups, picks.
 
-    First call is slow (Statcast scrape can take minutes per season); subsequent
-    calls hit the on-disk pybaseball cache and return in ~30s.
+    Backed by a per-day in-memory cache that's pre-warmed at pod startup.
+    If the cache isn't ready yet (cold pod, scrape still running), returns
+    503 with a Retry-After header so the frontend can poll. Once warm, every
+    subsequent call is instant for the rest of the day.
     """
     try:
-        from .batters import screen_today
+        from .batters import get_cached, warm_async, warm_status
     except ImportError as e:
         raise HTTPException(
             500,
             f"models extras not installed (pip install -r requirements.txt): {e}",
         )
 
-    from fastapi.concurrency import run_in_threadpool
-    res = await run_in_threadpool(
-        screen_today,
-        min_recent_avg=min_recent_avg,
-        min_recent_ab=min_recent_ab,
-        min_bvp_avg=min_bvp_avg,
-        min_bvp_pa=min_bvp_pa,
-        min_hand_avg=min_hand_avg,
-        min_hand_pa=min_hand_pa,
-        min_slump_era=min_slump_era,
-        days=days,
-        verbose=False,
-    )
+    cached = get_cached()
+    if cached is None:
+        state = warm_async()  # triggers a scrape if one isn't already running
+        status = warm_status()
+        if status["last_error"]:
+            raise HTTPException(500, f"warm-up failed: {status['last_error']}")
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "15"},
+            content={
+                "status": state["status"],
+                "elapsed_seconds": status["elapsed_seconds"],
+                "message": "Scraping today's MLB data — try again in a few seconds.",
+            },
+        )
 
-    hot = res.hot_bats.rename(columns={"Name": "batter", "Tm": "team"})
+    hot = cached.hot_bats.rename(columns={"Name": "batter", "Tm": "team"})
     return {
-        "picks": _df_to_records(res.picks),
+        "picks": _df_to_records(cached.picks),
         "hot_bats": _df_to_records(hot),
-        "today": _df_to_records(res.today),
+        "today": _df_to_records(cached.today),
+        "as_of": warm_status()["cached_date"],
     }
+
+
+@app.get("/batters/screen/status")
+async def batter_screen_status():
+    """Probe for the warm-up state — used by the frontend's polling loop."""
+    try:
+        from .batters import warm_status
+    except ImportError:
+        return {"available": False}
+    return {"available": True, **warm_status()}
 
 
 # ------------------------------------------------------------------
