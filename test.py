@@ -6,7 +6,6 @@ import pandas as pd
 
 from sharp_edge.batters import screen_today
 
-
 LEGEND = """\
 === COLUMN LEGEND ===
 

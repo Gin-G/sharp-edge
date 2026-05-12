@@ -23,7 +23,6 @@ import functools
 import logging
 import threading
 import time
-import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -33,9 +32,20 @@ import pandas as pd
 import pybaseball as pb
 import statsapi
 
-logger = logging.getLogger(__name__)
+from sharp_edge._data import (
+    DEAD_STATES_SUBSTRINGS,
+    _HIT_EVENTS,
+    _NON_AB_EVENTS,
+    _load_statcast,
+    _local_time_str,
+    _norm,
+    _pitcher_info,
+    _pitcher_last_3,
+    _roster_batters,
+    fetch_today_schedule,
+)
 
-pb.cache.enable()
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -133,72 +143,6 @@ def warm_async() -> dict:
     return {"status": "warming"}
 
 
-DEAD_STATES_SUBSTRINGS = ("Postponed", "Cancelled", "Canceled", "Suspended")
-
-
-def _local_time_str(iso_utc: str) -> str:
-    if not iso_utc:
-        return ""
-    try:
-        from datetime import datetime
-        dt = datetime.fromisoformat(iso_utc.replace("Z", "+00:00"))
-        return dt.astimezone().strftime("%-I:%M %p").lstrip("0")
-    except Exception:
-        return iso_utc
-
-
-def _norm(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-    return s.lower().replace(".", "").replace("'", "").replace("-", " ").strip()
-
-
-def _ip_to_outs(ip_str) -> int:
-    # MLB IP notation: '6.1' = 6 + 1/3 outs, '6.2' = 6 + 2/3 outs.
-    if ip_str in (None, ""):
-        return 0
-    s = str(ip_str)
-    if "." in s:
-        whole, frac = s.split(".")
-        return int(whole) * 3 + int(frac)
-    return int(s) * 3
-
-
-# AB = PA - (BB + HBP + SF + SH + catcher interference)
-_NON_AB_EVENTS = frozenset({
-    "walk", "intent_walk", "hit_by_pitch",
-    "sac_fly", "sac_bunt",
-    "sac_fly_double_play", "sac_bunt_double_play",
-    "catcher_interf",
-})
-_HIT_EVENTS = frozenset({"single", "double", "triple", "home_run"})
-
-_statcast_cache: pd.DataFrame | None = None
-_statcast_lock = threading.Lock()
-
-
-def _load_statcast(years_back: int = 3) -> pd.DataFrame:
-    global _statcast_cache
-    with _statcast_lock:
-        if _statcast_cache is not None:
-            return _statcast_cache
-
-        today = date.today()
-        frames = []
-        for year in range(today.year - years_back + 1, today.year + 1):
-            start_dt = f"{year}-03-15"
-            end_dt = today.isoformat() if year == today.year else f"{year}-11-30"
-            print(f"[statcast] loading {year} ({start_dt} -> {end_dt})...")
-            df = pb.statcast(start_dt=start_dt, end_dt=end_dt, verbose=False)
-            df = df[df["events"].notna()][
-                ["batter", "pitcher", "events", "game_date"]
-            ]
-            frames.append(df)
-
-        _statcast_cache = pd.concat(frames, ignore_index=True)
-        print(f"[statcast] loaded {len(_statcast_cache):,} PA-ending events")
-        return _statcast_cache
-
-
 def _bvp(batter_id: int, pitcher_id: int) -> dict | None:
     df = _load_statcast()
     pa_df = df[(df["batter"] == batter_id) & (df["pitcher"] == pitcher_id)]
@@ -233,56 +177,6 @@ def debug_bvp_raw(batter_name: str, pitcher_name: str) -> dict:
         "events": pa_df[["game_date", "events"]].to_dict(orient="records"),
         "bvp": _bvp(bid, pid),
     }
-
-
-@functools.lru_cache(maxsize=None)
-def _pitcher_info(pitcher_id: int) -> dict:
-    try:
-        data = statsapi.get("person", {"personId": pitcher_id})
-        person = (data.get("people") or [{}])[0]
-        return {
-            "hand": person.get("pitchHand", {}).get("code"),
-            "name": person.get("fullName"),
-        }
-    except Exception:
-        return {"hand": None, "name": None}
-
-
-@functools.lru_cache(maxsize=None)
-def _pitcher_last_3(pitcher_id: int, season: int) -> dict:
-    try:
-        data = statsapi.get(
-            "people",
-            {
-                "personIds": str(pitcher_id),
-                "hydrate": (
-                    f"stats(group=[pitching],type=[gameLog],"
-                    f"season={season},sportId=1)"
-                ),
-            },
-        )
-    except Exception:
-        return {"era": None, "ip": 0.0, "er": 0, "starts": 0}
-
-    games = []
-    for person in data.get("people", []):
-        for block in person.get("stats", []):
-            for split in block.get("splits", []):
-                stat = split.get("stat", {})
-                if stat.get("gamesStarted") == 1:
-                    games.append({
-                        "date": split.get("date", ""),
-                        "ip_str": stat.get("inningsPitched", "0.0"),
-                        "er": stat.get("earnedRuns", 0),
-                    })
-    games.sort(key=lambda g: g["date"], reverse=True)
-    last3 = games[:3]
-    if not last3:
-        return {"era": None, "ip": 0.0, "er": 0, "starts": 0}
-    outs = sum(_ip_to_outs(g["ip_str"]) for g in last3)
-    er = sum(g["er"] for g in last3)
-    era = round((er * 27 / outs), 2) if outs else None
-    return {"era": era, "ip": round(outs / 3, 1), "er": er, "starts": len(last3)}
 
 
 @functools.lru_cache(maxsize=None)
@@ -322,20 +216,6 @@ def _handedness_splits(batter_id: int) -> dict:
             break
 
     return out
-
-
-def _roster_batters(team_id: int) -> list[tuple[int, str]]:
-    try:
-        data = statsapi.get(
-            "team_roster", {"teamId": team_id, "rosterType": "active"}
-        )
-    except Exception:
-        return []
-    return [
-        (p["person"]["id"], p["person"]["fullName"])
-        for p in data.get("roster", [])
-        if p.get("position", {}).get("abbreviation") != "P"
-    ]
 
 
 def lookup_bvp(batter_name: str, pitcher_name: str) -> dict:
@@ -384,19 +264,10 @@ def screen_today(
         for _, row in recent.iterrows()
     }
 
-    # statsapi.schedule() omits probable pitcher IDs (only exposes names);
-    # hit the raw endpoint with explicit hydrate so we can resolve IDs.
-    raw = statsapi.get("schedule", {
-        "sportId": 1,
-        "date": today.strftime("%Y-%m-%d"),
-        "hydrate": "probablePitcher,linescore",
-    })
+    raw_games = fetch_today_schedule()
     games_kept = 0
     games_with_pp = 0
     targets = []
-    raw_games = []
-    for d in raw.get("dates", []):
-        raw_games.extend(d.get("games", []))
 
     for game in raw_games:
         status = (game.get("status", {}) or {}).get("detailedState", "") or ""
