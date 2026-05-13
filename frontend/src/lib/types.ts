@@ -85,3 +85,56 @@ export interface BatterScreen {
   hot_bats: HotBatRow[];
   today: BatterRow[];
 }
+
+export interface HomerRow {
+  batter: string;
+  team: string;
+  opposing_pitcher: string;
+  p_hand: 'R' | 'L' | null;
+  game_time: string;
+  venue: string | null;
+  park_factor: number | null;
+  iso_career: number | null;
+  iso_season: number | null;
+  iso_vs_hand: number | null;
+  barrel_pct: number | null;
+  hard_hit_pct: number | null;
+  hr_last_15d: number;
+  hr_last_30d: number;
+  pa_last_15d: number;
+  pull_air_pct: number | null;
+  p_hr9_season: number | null;
+  p_hr9_l3: number | null;
+  p_barrel_pct: number | null;
+  p_hard_hit_pct: number | null;
+  p_fb_pct: number | null;
+  p_hr9_vs_hand: number | null;
+  bvp_hr: number;
+  bvp_pa: number;
+  bvp_barrel_pct: number | null;
+  power_hand_edge: boolean;
+  barrel_edge: boolean;
+  park_boost_edge: boolean;
+  bvp_hr_edge: boolean;
+  hot_pop: boolean;
+  tags: string;
+  hr_score?: number;
+}
+
+export interface HomerHotPop {
+  batter: string;
+  team: string;
+  hr_last_15d: number;
+  hr_last_30d: number;
+  iso_career: number | null;
+  barrel_pct: number | null;
+  game_time: string;
+  opposing_pitcher: string;
+}
+
+export interface HomerScreen {
+  picks: HomerRow[];
+  hot_pop: HomerHotPop[];
+  today: HomerRow[];
+  as_of?: string;
+}

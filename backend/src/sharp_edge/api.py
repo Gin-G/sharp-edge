@@ -36,13 +36,22 @@ async def lifespan(app: FastAPI):
     # models extras aren't installed (lighter prod image, dev sandbox, etc.)
     # we skip it silently — the endpoint will surface the import error itself.
     try:
-        from .batters import warm_async
-        warm_async()
+        from .batters import warm_async as warm_batters
+        warm_batters()
         logger.info("batters: background warm-up scheduled")
     except ImportError:
         logger.info("batters: models extras not installed, skipping prewarm")
     except Exception as e:
         logger.warning("batters: prewarm failed to schedule: %s", e)
+
+    try:
+        from .homers import warm_async as warm_homers
+        warm_homers()
+        logger.info("homers: background warm-up scheduled")
+    except ImportError:
+        logger.info("homers: models extras not installed, skipping prewarm")
+    except Exception as e:
+        logger.warning("homers: prewarm failed to schedule: %s", e)
 
     yield
     await _db.close()
@@ -338,6 +347,60 @@ async def batter_screen_status():
     """Probe for the warm-up state — used by the frontend's polling loop."""
     try:
         from .batters import warm_status
+    except ImportError:
+        return {"available": False}
+    return {"available": True, **warm_status()}
+
+
+# ------------------------------------------------------------------
+# Homers — MLB home-run probability screen (not user-scoped — public data)
+# ------------------------------------------------------------------
+
+@app.get("/homers/screen")
+async def homer_screen():
+    """Today's MLB HR probability screen: picks, hot-pop, and full board.
+
+    Backed by the same per-day cache + background warm-up pattern as
+    /batters/screen — reuses the shared Statcast cache, so once that's warm
+    the HR screen is just a few more API calls on top.
+    """
+    try:
+        from .homers import get_cached, warm_async, warm_status
+    except ImportError as e:
+        raise HTTPException(
+            500,
+            f"models extras not installed (pip install -r requirements.txt): {e}",
+        )
+
+    cached = get_cached()
+    if cached is None:
+        state = warm_async()
+        status = warm_status()
+        if status["last_error"]:
+            raise HTTPException(500, f"warm-up failed: {status['last_error']}")
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "15"},
+            content={
+                "status": state["status"],
+                "elapsed_seconds": status["elapsed_seconds"],
+                "message": "Scraping today's MLB data — try again in a few seconds.",
+            },
+        )
+
+    return {
+        "picks": _df_to_records(cached.picks),
+        "hot_pop": _df_to_records(cached.hot_pop),
+        "today": _df_to_records(cached.today),
+        "as_of": warm_status()["cached_date"],
+    }
+
+
+@app.get("/homers/screen/status")
+async def homer_screen_status():
+    try:
+        from .homers import warm_status
     except ImportError:
         return {"available": False}
     return {"available": True, **warm_status()}

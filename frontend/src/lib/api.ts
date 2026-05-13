@@ -1,4 +1,4 @@
-import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen } from './types';
+import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen } from './types';
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || 'http://localhost:8000';
 
@@ -75,6 +75,15 @@ export interface BatterScreenStatus {
 
 export function getBatterScreenStatus(): Promise<BatterScreenStatus> {
   return req<BatterScreenStatus>('/batters/screen/status');
+}
+
+export function getHomerScreen(params: Record<string, string> = {}): Promise<HomerScreen> {
+  const qs = new URLSearchParams(params).toString();
+  return req<HomerScreen>(`/homers/screen${qs ? `?${qs}` : ''}`);
+}
+
+export function getHomerScreenStatus(): Promise<BatterScreenStatus> {
+  return req<BatterScreenStatus>('/homers/screen/status');
 }
 
 // --- Chat ---
