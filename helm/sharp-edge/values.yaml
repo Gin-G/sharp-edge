@@ -28,13 +28,13 @@ backend:
   resources:
     requests:
       cpu: 200m
-      memory: 512Mi
+      memory: 1Gi
     limits:
-      # The MLB batter screen loads ~450k Statcast events into pandas;
-      # 512Mi OOM-killed reliably. 2Gi gives headroom for the scrape +
-      # the in-process daily result cache.
+      # The MLB batter screen scrapes Statcast via pybaseball, which builds
+      # large intermediate DataFrames during concat. Chunked scrape + dtype
+      # downcasts help, but the first cold run still needs real headroom.
       cpu: "1"
-      memory: 2Gi
+      memory: 4Gi
   env:
     LOG_LEVEL: info
   # Persists pybaseball's on-disk Statcast cache across pod restarts so the

@@ -7,16 +7,31 @@ it's all about fetching and shaping raw data.
 from __future__ import annotations
 
 import functools
+import gc
+import logging
+import os
 import threading
 import unicodedata
-from datetime import date
+from datetime import date, timedelta
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 import pybaseball as pb
 import statsapi
 
+logger = logging.getLogger(__name__)
+
 pb.cache.enable()
+
+# Per-year filtered parquet cache. Persists across pod restarts so the
+# expensive scrape only happens once per season, not on every redeploy.
+# Defaults under HOME so it sits on the mounted PVC in prod; override with
+# SHARP_EDGE_CACHE_DIR if you want it somewhere else.
+_FILTERED_CACHE_DIR = Path(
+    os.environ.get("SHARP_EDGE_CACHE_DIR")
+    or (Path.home() / ".pybaseball_cache" / "sharp_edge_filtered")
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -48,59 +63,99 @@ _statcast_cache: Optional[pd.DataFrame] = None
 _statcast_lock = threading.Lock()
 
 
+def _downcast_filtered(df: pd.DataFrame) -> pd.DataFrame:
+    """Shrink batter/pitcher IDs to int32, batted-ball floats to float32."""
+    for col in ("launch_speed", "launch_angle", "hc_x", "hc_y"):
+        if col in df.columns:
+            df[col] = df[col].astype("float32")
+    if "barrel" in df.columns:
+        df["barrel"] = pd.to_numeric(df["barrel"], errors="coerce").astype("float32")
+    for col in ("batter", "pitcher"):
+        if col in df.columns:
+            df[col] = (
+                pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int32")
+            )
+    return df
+
+
+def _scrape_year_filtered(
+    year: int, year_end: date, chunk_days: int = 30
+) -> pd.DataFrame:
+    """Scrape a season in small windows, filter to PA-ending events, downcast
+    dtypes. Peak memory per ``pb.statcast`` call is roughly one chunk's
+    unfiltered Statcast frame instead of a whole season's worth — that's the
+    spike that OOM-killed the pod even at 2Gi."""
+    start = date(year, 3, 15)
+    chunks: list[pd.DataFrame] = []
+    cursor = start
+    while cursor <= year_end:
+        chunk_end = min(cursor + timedelta(days=chunk_days - 1), year_end)
+        raw = pb.statcast(
+            start_dt=cursor.isoformat(),
+            end_dt=chunk_end.isoformat(),
+            verbose=False,
+        )
+        if raw is not None and not raw.empty:
+            mask = raw["events"].notna()
+            keep = [c for c in _STATCAST_COLS if c in raw.columns]
+            if "barrel" in raw.columns:
+                keep.append("barrel")
+            filtered = raw.loc[mask, keep].copy()
+            del raw
+            gc.collect()
+            chunks.append(_downcast_filtered(filtered))
+        cursor = chunk_end + timedelta(days=1)
+
+    if not chunks:
+        return pd.DataFrame(columns=_STATCAST_COLS)
+    out = pd.concat(chunks, ignore_index=True)
+    del chunks
+    gc.collect()
+    return out
+
+
 def _load_statcast(years_back: int = 3) -> pd.DataFrame:
     """Load and cache ``years_back`` seasons of Statcast PA-ending events.
 
-    The returned DataFrame contains batted-ball columns (launch_speed,
-    launch_angle, hc_x, hc_y, stand, p_throws, barrel) in addition to the
-    base columns used by batters.py (batter, pitcher, events, game_date).
-    Callers that only need the base columns simply ignore the extras.
+    Per-year filtered frames are persisted as parquet on disk (PVC in prod)
+    so pod restarts don't redo the multi-minute scrape. Past seasons are
+    immutable; only the current year is re-scraped on each cold start.
     """
     global _statcast_cache
     with _statcast_lock:
         if _statcast_cache is not None:
             return _statcast_cache
 
-        import gc
+        _FILTERED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         today = date.today()
         frames: list[pd.DataFrame] = []
+
         for year in range(today.year - years_back + 1, today.year + 1):
-            start_dt = f"{year}-03-15"
-            end_dt = today.isoformat() if year == today.year else f"{year}-11-30"
-            print(f"[statcast] loading {year} ({start_dt} -> {end_dt})...")
-            raw = pb.statcast(start_dt=start_dt, end_dt=end_dt, verbose=False)
+            path = _FILTERED_CACHE_DIR / f"events_{year}.parquet"
+            is_current = year == today.year
 
-            mask = raw["events"].notna()
-            keep = [c for c in _STATCAST_COLS if c in raw.columns]
-            if "barrel" in raw.columns:
-                keep.append("barrel")
+            if path.exists() and not is_current:
+                logger.info("[statcast] loading cached %s from %s", year, path)
+                frames.append(pd.read_parquet(path))
+                continue
 
-            # .loc[mask, keep].copy() selects rows AND columns in one step so
-            # the wide full-year DataFrame (90 cols) can be freed immediately —
-            # keeping two full-year frames in RAM simultaneously caused the OOM.
-            filtered = raw.loc[mask, keep].copy()
-            del raw
+            year_end = today if is_current else date(year, 11, 30)
+            logger.info(
+                "[statcast] scraping %s (%s -> %s)",
+                year, date(year, 3, 15).isoformat(), year_end.isoformat(),
+            )
+            year_df = _scrape_year_filtered(year, year_end)
+            try:
+                year_df.to_parquet(path, index=False)
+                logger.info(
+                    "[statcast] wrote %d rows -> %s", len(year_df), path
+                )
+            except Exception as e:
+                # If pyarrow's missing we just skip persistence — the run still
+                # works, but a restart won't get the resume benefit.
+                logger.warning("[statcast] parquet write failed: %s", e)
+            frames.append(year_df)
             gc.collect()
-
-            # Downcast to cut per-year memory ~3×:
-            #   float64 → float32 for batted-ball metrics
-            #   batter/pitcher IDs → int32 (MLBAM IDs fit; max ~800K)
-            for col in ("launch_speed", "launch_angle", "hc_x", "hc_y"):
-                if col in filtered.columns:
-                    filtered[col] = filtered[col].astype("float32")
-            if "barrel" in filtered.columns:
-                filtered["barrel"] = pd.to_numeric(
-                    filtered["barrel"], errors="coerce"
-                ).astype("float32")
-            for col in ("batter", "pitcher"):
-                if col in filtered.columns:
-                    filtered[col] = (
-                        pd.to_numeric(filtered[col], errors="coerce")
-                        .fillna(0)
-                        .astype("int32")
-                    )
-
-            frames.append(filtered)
 
         _statcast_cache = pd.concat(frames, ignore_index=True)
         del frames
@@ -112,7 +167,9 @@ def _load_statcast(years_back: int = 3) -> pd.DataFrame:
         _statcast_cache["game_date"] = pd.to_datetime(
             _statcast_cache["game_date"], errors="coerce"
         )
-        print(f"[statcast] loaded {len(_statcast_cache):,} PA-ending events")
+        logger.info(
+            "[statcast] loaded %d PA-ending events total", len(_statcast_cache)
+        )
         return _statcast_cache
 
 
