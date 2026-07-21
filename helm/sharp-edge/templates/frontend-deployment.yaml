@@ -9,6 +9,7 @@ metadata:
     component: frontend
 spec:
   replicas: {{ .Values.frontend.replicas }}
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app: {{ .Values.app.name }}

@@ -9,6 +9,15 @@ metadata:
     component: backend
 spec:
   replicas: {{ .Values.backend.replicas }}
+  revisionHistoryLimit: 3
+  {{- if .Values.backend.pybaseballCache.enabled }}
+  # The pybaseball cache PVC is ReadWriteOnce; a rolling update tries to
+  # attach it to the new pod while the old pod still holds it, which fails
+  # with a Multi-Attach error whenever the pods land on different nodes.
+  # Recreate terminates the old pod (releasing the volume) first.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app: {{ .Values.app.name }}
