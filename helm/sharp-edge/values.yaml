@@ -37,6 +37,10 @@ backend:
       memory: 4Gi
   env:
     LOG_LEVEL: info
+    # FanDuel's static app key for direct login (Authorization: Basic on the
+    # /sessions call). It's a public value from their JS bundle — capture once
+    # from DevTools on the login request, without the "Basic " prefix.
+    FANDUEL_BASIC_AUTH: ""
   # Persists pybaseball's on-disk Statcast cache across pod restarts so the
   # full 3-season scrape only ever runs once (not on every redeploy).
   pybaseballCache:

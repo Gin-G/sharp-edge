@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     fanduel_password: str = ""
     fanduel_state: str = "CO"
     fanduel_api_key: str = "FhMFpcPWXMeyZxOx"
+    # Static app key from FanDuel's JS bundle, sent as "Authorization: Basic"
+    # on the /sessions login call. Capture once from DevTools (Network tab →
+    # the POST to api.fanduel.com/sessions → Authorization request header,
+    # without the "Basic " prefix). It doesn't expire like session tokens.
+    fanduel_basic_auth: str = ""
 
     # Anthropic (for chat endpoint)
     anthropic_api_key: str = ""

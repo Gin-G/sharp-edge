@@ -43,6 +43,10 @@ spec:
                   key: uri
             - name: LOG_LEVEL
               value: {{ .Values.backend.env.LOG_LEVEL | quote }}
+            {{- if .Values.backend.env.FANDUEL_BASIC_AUTH }}
+            - name: FANDUEL_BASIC_AUTH
+              value: {{ .Values.backend.env.FANDUEL_BASIC_AUTH | quote }}
+            {{- end }}
             - name: CORS_ORIGINS
               value: {{ printf "[\"https://%s\"]" .Values.frontend.fqdn | quote }}
             - name: HOST

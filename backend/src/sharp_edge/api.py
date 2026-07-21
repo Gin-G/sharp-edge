@@ -15,7 +15,11 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .config import settings
 from .db import create_database, BetDatabase
-from .fanduel.auth import FanDuelAuth
+from .fanduel.auth import (
+    FanDuelAuth,
+    FanDuelBotBlocked,
+    FanDuelMFARequired,
+)
 from .fanduel.client import FanDuelClient
 from .analysis import score_bet, generate_insights
 from .chat import chat as chat_with_claude
@@ -119,7 +123,9 @@ class ManualTokenRequest(BaseModel):
 
 @app.post("/auth/login")
 async def login(req: LoginRequest, uid: str = Depends(get_uid)):
-    auth = FanDuelAuth(req.email, req.password)
+    auth = FanDuelAuth(
+        req.email, req.password, basic_auth=settings.fanduel_basic_auth
+    )
     try:
         await auth.login()
         _fd_auth[uid] = auth
@@ -127,6 +133,34 @@ async def login(req: LoginRequest, uid: str = Depends(get_uid)):
             "status": "ok",
             "expires_in": int(auth._token_exp - __import__("time").time()),
         }
+    except FanDuelMFARequired as e:
+        # Keep the credentials so /auth/mfa can finish the login.
+        _fd_auth[uid] = auth
+        return {"status": "mfa_required", "message": str(e)}
+    except FanDuelBotBlocked as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+class MFARequest(BaseModel):
+    code: str
+
+
+@app.post("/auth/mfa")
+async def submit_mfa(req: MFARequest, uid: str = Depends(get_uid)):
+    """Finish a login that FanDuel held for new-device verification."""
+    auth = _fd_auth.get(uid)
+    if not auth or not auth.can_relogin:
+        raise HTTPException(400, "No pending login — start with /auth/login")
+    try:
+        await auth.submit_mfa_code(req.code)
+        return {
+            "status": "ok",
+            "expires_in": int(auth._token_exp - __import__("time").time()),
+        }
+    except FanDuelBotBlocked as e:
+        raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
 
@@ -153,6 +187,9 @@ async def auth_status(uid: str = Depends(get_uid)):
     return {
         "authenticated": True,
         "expired": auth.is_expired,
+        # With stored credentials an expired token renews itself on the next
+        # sync, so "expired" is only terminal for manual-token sessions.
+        "can_relogin": auth.can_relogin,
     }
 
 
@@ -176,8 +213,11 @@ async def sync_bets(
     if not auth or not auth.token:
         raise HTTPException(400, "Not authenticated with FanDuel")
 
-    token = await auth.ensure_token()
-    fd = FanDuelClient(auth_token=token, state=settings.fanduel_state)
+    try:
+        token = await auth.ensure_token()
+    except Exception as e:
+        raise HTTPException(401, str(e))
+    fd = FanDuelClient(auth_token=token, state=settings.fanduel_state, auth=auth)
     try:
         raw_bets = await fd.fetch_all_settled_bets()
         count = 0

@@ -58,17 +58,22 @@ class FanDuelClient:
     the token injection here. For now, pass the token via constructor.
     """
 
-    def __init__(self, auth_token: str, state: str = "CO"):
+    def __init__(self, auth_token: str, state: str = "CO", auth=None, transport=None):
         """
         Args:
-            auth_token: Session token from FanDuel login. Grab this from
-                        browser DevTools > Network > any api.fanduel.com
-                        request > Request Headers > Authorization or
-                        X-Auth-Token value.
+            auth_token: Session token from FanDuel login (the x-authentication
+                        value) — produced by FanDuelAuth.login() or captured
+                        manually from browser DevTools.
             state: Two-letter state code (affects which API subdomain/config).
+            auth:  Optional FanDuelAuth with stored credentials. When given,
+                   a 401 mid-request triggers one transparent re-login and
+                   retry instead of failing the sync.
+            transport: httpx transport override (tests).
         """
         self.auth_token = auth_token
         self.state = state
+        self._auth = auth
+        self._transport = transport
         self._client: Optional[httpx.AsyncClient] = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -80,12 +85,32 @@ class FanDuelClient:
                 "x-app-version": "2.140.0",
                 "x-sportsbook-region": self.state,
             }
-            self._client = httpx.AsyncClient(headers=headers, timeout=30.0)
+            self._client = httpx.AsyncClient(
+                headers=headers, timeout=30.0, transport=self._transport
+            )
         return self._client
 
     async def close(self) -> None:
         if self._client:
             await self._client.aclose()
+            self._client = None
+
+    async def _get(self, url: str, params: dict) -> httpx.Response:
+        """GET with one transparent re-login + retry on 401 when the bound
+        FanDuelAuth has credentials — a token expiring mid-sync just renews."""
+        client = await self._get_client()
+        resp = await client.get(url, params=params)
+        if (
+            resp.status_code == 401
+            and self._auth is not None
+            and self._auth.can_relogin
+        ):
+            logger.info("FanDuel 401 — re-logging in and retrying once")
+            self.auth_token = await self._auth.ensure_token(force=True)
+            await self.close()  # rebuild client with the fresh token
+            client = await self._get_client()
+            resp = await client.get(url, params=params)
+        return resp
 
     # ------------------------------------------------------------------
     # Bet History
@@ -104,7 +129,6 @@ class FanDuelClient:
             isSettled, fromRecord, toRecord, sortDir, sortParam,
             adaptiveTokenEnabled, rewardsClubEnabled, _ak
         """
-        client = await self._get_client()
         params = {
             "isSettled": str(settled).lower(),
             "fromRecord": from_record,
@@ -115,7 +139,7 @@ class FanDuelClient:
             "rewardsClubEnabled": "false",
             "_ak": FD_API_KEY,
         }
-        resp = await client.get(f"{FD_SB_API_BASE}/sbapi/fetch-my-bets", params=params)
+        resp = await self._get(f"{FD_SB_API_BASE}/sbapi/fetch-my-bets", params=params)
         resp.raise_for_status()
         return resp.json()
 

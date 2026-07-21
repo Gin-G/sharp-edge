@@ -134,10 +134,20 @@ export function getAuthStatus(): Promise<AuthStatus> {
   return req<AuthStatus>('/auth/status');
 }
 
-export function login(email: string, password: string): Promise<{ status: string; expires_in: number }> {
+export function login(
+  email: string,
+  password: string,
+): Promise<{ status: 'ok' | 'mfa_required'; expires_in?: number; message?: string }> {
   return req('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
+  });
+}
+
+export function submitMfaCode(code: string): Promise<{ status: string; expires_in: number }> {
+  return req('/auth/mfa', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
   });
 }
 

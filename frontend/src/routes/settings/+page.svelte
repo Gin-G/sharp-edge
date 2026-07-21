@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getAuthStatus, login, setManualToken, syncBets, importCsv } from '$lib/api';
+  import { getAuthStatus, login, submitMfaCode, setManualToken, syncBets, importCsv } from '$lib/api';
   import type { AuthStatus } from '$lib/types';
 
   // --- Auth state ---
@@ -48,13 +48,40 @@
     loginErr = '';
     try {
       const res = await login(loginEmail, loginPassword);
-      loginMsg = `Authenticated — token valid for ${Math.floor(res.expires_in / 60)} min`;
-      authStatus = { authenticated: true, expired: false };
-      loginPassword = '';
+      if (res.status === 'mfa_required') {
+        mfaRequired = true;
+        loginMsg = res.message ?? 'FanDuel emailed a verification code — enter it below.';
+      } else {
+        loginMsg = `Authenticated — token valid for ${Math.floor((res.expires_in ?? 0) / 60)} min`;
+        authStatus = { authenticated: true, expired: false };
+        loginPassword = '';
+      }
     } catch (e) {
       loginErr = e instanceof Error ? e.message : String(e);
     } finally {
       loginLoading = false;
+    }
+  }
+
+  let mfaRequired = false;
+  let mfaCode = '';
+  let mfaLoading = false;
+
+  async function handleMfa() {
+    if (!mfaCode.trim()) return;
+    mfaLoading = true;
+    loginErr = '';
+    try {
+      const res = await submitMfaCode(mfaCode.trim());
+      loginMsg = `Authenticated — token valid for ${Math.floor(res.expires_in / 60)} min`;
+      authStatus = { authenticated: true, expired: false };
+      mfaRequired = false;
+      mfaCode = '';
+      loginPassword = '';
+    } catch (e) {
+      loginErr = e instanceof Error ? e.message : String(e);
+    } finally {
+      mfaLoading = false;
     }
   }
 
@@ -178,6 +205,30 @@
       {#if loginMsg}<span class="text-sm text-emerald-400">{loginMsg}</span>{/if}
       {#if loginErr}<span class="text-sm text-red-400">{loginErr}</span>{/if}
     </div>
+
+    {#if mfaRequired}
+      <div class="pt-2 border-t border-border space-y-3">
+        <p class="text-xs text-slate-500">
+          FanDuel sent a verification code to your account email (new device).
+          Once verified, future logins skip this step.
+        </p>
+        <div class="flex items-center gap-3">
+          <input
+            class="input font-mono w-40"
+            placeholder="123456"
+            bind:value={mfaCode}
+            disabled={mfaLoading}
+          />
+          <button
+            class="btn-primary"
+            on:click={handleMfa}
+            disabled={mfaLoading || !mfaCode.trim()}
+          >
+            {mfaLoading ? 'Verifying…' : 'Verify'}
+          </button>
+        </div>
+      </div>
+    {/if}
   </div>
 
   <!-- Manual token -->
