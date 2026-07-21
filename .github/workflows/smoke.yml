@@ -3,6 +3,14 @@ name: Post-deploy smoke
 # Runs after "Build and bump" succeeds (ArgoCD then rolls the new images) and
 # probes the live site. The /picks/* endpoints double as a "new code is
 # actually serving" check, since a stale pod would 404 them.
+#
+# The site sits behind a Cloudflare managed challenge, which blocks CI
+# runners. For this workflow to pass, add a Cloudflare WAF custom rule that
+# skips the challenge when the X-Smoke-Key request header equals the value
+# of the SMOKE_KEY repository secret (Security → WAF → Custom rules →
+# "Skip" action for expression: http.request.headers["x-smoke-key"][0] eq
+# "<secret value>"). Until that rule exists, this fails fast with a clear
+# error instead of timing out.
 
 on:
   workflow_run:
@@ -16,26 +24,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Probe live API
+        env:
+          SMOKE_KEY: ${{ secrets.SMOKE_KEY }}
         run: |
           BASE=https://sharp-edge.nickknows.net/api
+          HDR=()
+          [ -n "$SMOKE_KEY" ] && HDR=(-H "X-Smoke-Key: $SMOKE_KEY")
+
+          probe() {  # $1 = path; body -> /tmp/b, headers -> /tmp/h
+            curl -sS --max-time 20 -D /tmp/h -o /tmp/b "${HDR[@]}" "$BASE$1" || true
+            if grep -qi '^cf-mitigated: challenge' /tmp/h; then
+              echo "::error::Cloudflare challenged the CI runner. Add a WAF skip rule keyed on the X-Smoke-Key header (see comments in smoke.yml) and set the SMOKE_KEY repo secret."
+              exit 1
+            fi
+          }
 
           # ArgoCD sync + image pull + pod rollout can take a while; retry the
           # newest endpoint until the fresh pod is serving (up to 15 min).
           ok=""
           for i in $(seq 1 30); do
-            if curl -fsS --max-time 20 "$BASE/picks/track-record?screen=hr" | grep -q '"overall"'; then
-              ok=1; break
-            fi
+            probe "/picks/track-record?screen=hr"
+            if grep -q '"overall"' /tmp/b; then ok=1; break; fi
             echo "new pod not serving yet (attempt $i/30)"; sleep 30
           done
           [ -n "$ok" ] || { echo "::error::track-record endpoint never came up"; exit 1; }
 
           echo "--- health"
-          curl -fsS --max-time 20 "$BASE/health" | grep -q '"ok"'
+          probe "/health"; grep -q '"ok"' /tmp/b
           echo "--- screen status endpoints"
-          curl -fsS --max-time 20 "$BASE/homers/screen/status"  | grep -q '"available"'
-          curl -fsS --max-time 20 "$BASE/batters/screen/status" | grep -q '"available"'
+          probe "/homers/screen/status";  grep -q '"available"' /tmp/b
+          probe "/batters/screen/status"; grep -q '"available"' /tmp/b
           echo "--- pick tracking endpoints"
-          curl -fsS --max-time 20 "$BASE/picks/track-record?screen=batter" | grep -q '"overall"'
-          curl -fsS --max-time 20 "$BASE/picks/backfill/status" | grep -q '"running"'
+          probe "/picks/track-record?screen=batter"; grep -q '"overall"' /tmp/b
+          probe "/picks/backfill/status"; grep -q '"running"' /tmp/b
           echo "smoke OK"

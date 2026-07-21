@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { getTrackRecord } from '$lib/api';
+  import { onDestroy, onMount } from 'svelte';
+  import { getTrackRecord, startBackfill, getBackfillStatus } from '$lib/api';
+  import type { BackfillStatus } from '$lib/api';
   import type { TrackRecord } from '$lib/types';
 
   export let screen: 'hr' | 'batter';
@@ -10,10 +11,13 @@
   let error = '';
   let loading = true;
   let showAll = false;
+  let backfill: BackfillStatus | null = null;
+  let backfillError = '';
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
   const PREVIEW_ROWS = 15;
 
-  onMount(async () => {
+  async function loadRecord() {
     try {
       data = await getTrackRecord(screen);
     } catch (e) {
@@ -21,6 +25,51 @@
     } finally {
       loading = false;
     }
+  }
+
+  async function pollBackfill() {
+    try {
+      backfill = await getBackfillStatus();
+    } catch {
+      backfill = null;
+      return;
+    }
+    if (backfill?.running) {
+      pollTimer = setTimeout(pollBackfill, 5000);
+    } else if (pollTimer) {
+      // A run just finished — refresh the record with the new history.
+      pollTimer = null;
+      await loadRecord();
+    }
+  }
+
+  async function runBackfill() {
+    backfillError = '';
+    const seasonStart = `${new Date().getFullYear()}-03-25`;
+    try {
+      await startBackfill(seasonStart);
+      await pollBackfill();
+    } catch (e) {
+      backfillError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  onMount(async () => {
+    await loadRecord();
+    // Surface an already-running backfill (e.g. kicked off from the other page).
+    try {
+      const s = await getBackfillStatus();
+      if (s.running) {
+        backfill = s;
+        pollTimer = setTimeout(pollBackfill, 5000);
+      }
+    } catch {
+      /* endpoint unavailable — ignore */
+    }
+  });
+
+  onDestroy(() => {
+    if (pollTimer) clearTimeout(pollTimer);
   });
 
   function fmtRate(v: number | null | undefined): string {
@@ -48,13 +97,30 @@
     {/if}
   </div>
 
+  {#if backfill?.running}
+    <div class="px-5 py-3 border-b border-border bg-indigo-950/30 text-sm text-indigo-300 flex items-center gap-3">
+      <div class="w-3.5 h-3.5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+      Backfilling {backfill.current_date ?? '…'} — day {backfill.days_done}/{backfill.days_total},
+      {backfill.picks_written} picks written
+    </div>
+  {/if}
+  {#if backfillError}
+    <div class="px-5 py-3 border-b border-border text-sm text-red-300">{backfillError}</div>
+  {/if}
+
   {#if loading}
     <div class="px-5 py-6 text-sm text-slate-500">Loading track record…</div>
   {:else if error}
     <div class="px-5 py-6 text-sm text-red-300">{error}</div>
   {:else if data && data.overall.picks === 0}
-    <div class="px-5 py-6 text-sm text-slate-500">
-      No picks recorded yet — history builds up as the daily screen runs (or after a backfill).
+    <div class="px-5 py-6 text-sm text-slate-500 flex items-center justify-between gap-4 flex-wrap">
+      <span>No picks recorded yet — history builds up as the daily screen runs, or backfill the season retroactively.</span>
+      {#if !backfill?.running}
+        <button
+          class="px-3 py-1.5 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500"
+          on:click={runBackfill}
+        >Backfill season history</button>
+      {/if}
     </div>
   {:else if data}
     <!-- Summary row -->
@@ -76,7 +142,7 @@
       <div class="bg-surface-800 px-5 py-4">
         <p class="text-xs font-medium text-slate-400 uppercase tracking-wider">Voids</p>
         <p class="text-2xl font-bold tabular-nums text-slate-100">{data.overall.voids}</p>
-        <p class="text-xs text-slate-500">didn't play</p>
+        <p class="text-xs text-slate-500">didn't start — bet voids</p>
       </div>
       <div class="bg-surface-800 px-5 py-4">
         <p class="text-xs font-medium text-slate-400 uppercase tracking-wider">Pending</p>

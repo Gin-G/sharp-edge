@@ -327,16 +327,19 @@ def fetch_today_schedule() -> list[dict]:
 
 @functools.lru_cache(maxsize=None)
 def _boxscore_summary(game_pk: int) -> dict:
-    """Per-side batters (non-pitchers) and starting pitcher for a played game.
+    """Per-side batters (non-pitchers), lineup starters, and starting pitcher
+    for a played game.
 
     Used by historical screens, where "today's active roster" doesn't exist:
     the players who actually dressed for the game are the candidate pool, and
     the first pitcher in the appearance list is the actual starter (fallback
-    when no probable pitcher was recorded). Only the small extracted summary
-    is cached — full boxscore payloads would blow up memory over a season
-    backfill.
+    when no probable pitcher was recorded). "starters" are the batters who
+    were in the starting lineup (battingOrder slot X00) — outcome resolution
+    voids picks on players who didn't start, mirroring sportsbook settlement.
+    Only the small extracted summary is cached — full boxscore payloads would
+    blow up memory over a season backfill.
     """
-    empty_side = {"batters": (), "starter": None}
+    empty_side = {"batters": (), "starters": (), "starter": None}
     try:
         data = statsapi.get("game_boxscore", {"gamePk": game_pk})
     except Exception:
@@ -347,16 +350,25 @@ def _boxscore_summary(game_pk: int) -> dict:
         team = (data.get("teams") or {}).get(side) or {}
         players = team.get("players") or {}
         batters = []
+        starters = []
         for p in players.values():
             person = p.get("person") or {}
             pos = (p.get("position") or {}).get("abbreviation")
             if person.get("id") and pos and pos != "P":
                 batters.append((person["id"], person.get("fullName", "")))
+            # Starting lineup slots are 100..900; substitutes get 101, 401, …
+            order = str(p.get("battingOrder") or "")
+            if person.get("id") and order.endswith("00"):
+                starters.append(person["id"])
         starter = None
         pitcher_ids = team.get("pitchers") or []
         if pitcher_ids:
             sp_person = (players.get(f"ID{pitcher_ids[0]}") or {}).get("person") or {}
             if sp_person.get("id"):
                 starter = (sp_person["id"], sp_person.get("fullName", ""))
-        out[side] = {"batters": tuple(batters), "starter": starter}
+        out[side] = {
+            "batters": tuple(batters),
+            "starters": tuple(starters),
+            "starter": starter,
+        }
     return out

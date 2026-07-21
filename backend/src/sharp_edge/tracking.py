@@ -22,6 +22,7 @@ at startup.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import json
 import math
@@ -35,7 +36,14 @@ import numpy as np
 import pandas as pd
 import pybaseball as pb
 
-from sharp_edge._data import _HIT_EVENTS, _load_statcast, statcast_loaded_on
+from sharp_edge._data import (
+    DEAD_STATES_SUBSTRINGS,
+    _HIT_EVENTS,
+    _boxscore_summary,
+    _load_statcast,
+    fetch_schedule,
+    statcast_loaded_on,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,11 +167,37 @@ def _events_for_date(d: date) -> pd.DataFrame:
     return out
 
 
+@functools.lru_cache(maxsize=512)
+def _starters_for_date(dstr: str) -> frozenset:
+    """MLBAM ids of every batter who was in a starting lineup on a date.
+
+    Lineups are final for past dates, so caching by date is safe. Returns an
+    empty set on API failure — resolution then falls back to the PA-based
+    rule rather than voiding everything."""
+    starters: set[int] = set()
+    try:
+        games = fetch_schedule(date.fromisoformat(dstr))
+    except Exception:
+        return frozenset()
+    for game in games:
+        status = (game.get("status", {}) or {}).get("detailedState", "") or ""
+        if any(bad in status for bad in DEAD_STATES_SUBSTRINGS):
+            continue
+        box = _boxscore_summary(game.get("gamePk", 0))
+        for side in ("away", "home"):
+            starters.update(box[side]["starters"])
+    return frozenset(starters)
+
+
 def resolve_pending() -> dict:
     """Settle every unresolved pick from before today against what actually
-    happened. HR picks win on ≥1 home run, batter picks on ≥1 hit; a pick
-    whose player recorded no plate appearance (benched, postponed) is VOID
-    and excluded from the hit rate."""
+    happened. HR picks win on ≥1 home run, batter picks on ≥1 hit.
+
+    Sportsbook settlement rules for voids: a pick on a player who was not in
+    the starting lineup is VOID — even if they pinch-hit — as is a starter
+    with no plate appearance (data gap / abandoned game). Voids are excluded
+    from the hit rate. If lineup data is unavailable for a date, "recorded a
+    plate appearance" stands in for "started"."""
     with _resolve_lock:
         today_iso = date.today().isoformat()
         summary: dict = {}
@@ -177,13 +211,15 @@ def resolve_pending() -> dict:
             resolved = 0
             for dstr in sorted(by_date):
                 ev = _events_for_date(date.fromisoformat(dstr))
+                starters = _starters_for_date(dstr)
                 results = []
                 for r in by_date[dstr]:
                     sub = ev[ev["batter"] == r["batter_id"]]
                     pa = int(len(sub))
                     hr = int((sub["events"] == "home_run").sum()) if pa else 0
                     hits = int(sub["events"].isin(_HIT_EVENTS).sum()) if pa else 0
-                    if pa == 0:
+                    started = r["batter_id"] in starters if starters else pa > 0
+                    if not started or pa == 0:
                         outcome = "VOID"
                     elif screen == "hr":
                         outcome = "WIN" if hr >= 1 else "LOSS"

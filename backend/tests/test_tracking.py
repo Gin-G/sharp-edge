@@ -25,6 +25,7 @@ def _synthetic_statcast() -> pd.DataFrame:
     for d, batter, events in [
         (TWO_DAYS_AGO, 111, ["home_run", "strikeout", "single"]),  # HR + hit
         (TWO_DAYS_AGO, 222, ["field_out", "walk"]),                # no hit
+        (TWO_DAYS_AGO, 444, ["home_run"]),                         # pinch-hit HR
         (YESTERDAY, 111, ["double", "field_out"]),                 # hit, no HR
     ]:
         for ev in events:
@@ -40,9 +41,13 @@ def _synthetic_statcast() -> pd.DataFrame:
 @pytest.fixture()
 def tracked_db(tmp_path, monkeypatch):
     """Tracking configured against a temp SQLite db and a synthetic Statcast
-    cache, with the app-style background event loop."""
+    cache, with the app-style background event loop. Batters 111/222 are
+    lineup starters; 444 is a bench player (pinch hitter)."""
     monkeypatch.setattr(_data, "_statcast_cache", _synthetic_statcast())
     monkeypatch.setattr(_data, "_statcast_loaded_on", date.today())
+    monkeypatch.setattr(
+        tracking, "_starters_for_date", lambda dstr: frozenset({111, 222})
+    )
 
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, daemon=True)
@@ -107,6 +112,40 @@ def test_resolve_outcomes(tracked_db):
 
     # NaN metrics must survive the JSON round-trip as null.
     assert json.loads(by_id[333]["metrics"])["barrel_pct"] is None
+
+
+def test_non_starter_voids_even_with_events(tracked_db):
+    """Sportsbook rule: player not in the starting lineup → bet void, even if
+    they pinch-hit a home run."""
+    db, loop = tracked_db
+    picks = pd.DataFrame([
+        {"batter": "Pinch Hitter", "batter_id": 444, "team": "Test Team",
+         "opposing_pitcher": "Test Pitcher", "pitcher_id": 999,
+         "venue": "Test Park", "hr_score": 18.0, "tags": "HOT-POP"},
+    ])
+    tracking.persist_screen_result("hr", picks, TWO_DAYS_AGO)
+    tracking.resolve_pending()
+
+    rows = asyncio.run_coroutine_threadsafe(db.list_picks("hr"), loop).result(30)
+    assert rows[0]["result"] == "VOID"
+    assert rows[0]["hr_actual"] == 1  # the HR is still recorded for reference
+
+
+def test_pa_fallback_when_no_lineup_data(tracked_db, monkeypatch):
+    """If lineup data is unavailable, 'recorded a PA' stands in for
+    'started' instead of voiding the whole slate."""
+    db, loop = tracked_db
+    monkeypatch.setattr(tracking, "_starters_for_date", lambda dstr: frozenset())
+    picks = pd.DataFrame([
+        {"batter": "Pinch Hitter", "batter_id": 444, "team": "Test Team",
+         "opposing_pitcher": "Test Pitcher", "pitcher_id": 999,
+         "venue": "Test Park", "hr_score": 18.0, "tags": "HOT-POP"},
+    ])
+    tracking.persist_screen_result("hr", picks, TWO_DAYS_AGO)
+    tracking.resolve_pending()
+
+    rows = asyncio.run_coroutine_threadsafe(db.list_picks("hr"), loop).result(30)
+    assert rows[0]["result"] == "WIN"
 
 
 def test_track_record_aggregation(tracked_db):

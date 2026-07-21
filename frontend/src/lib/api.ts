@@ -92,6 +92,30 @@ export function getTrackRecord(screen: 'hr' | 'batter', since?: string): Promise
   return req<TrackRecord>(`/picks/track-record?${p.toString()}`);
 }
 
+export interface BackfillStatus {
+  running: boolean;
+  start: string | null;
+  end: string | null;
+  current_date: string | null;
+  days_done: number;
+  days_total: number;
+  picks_written: number;
+  errors: string[];
+  last_error: string | null;
+  elapsed_seconds?: number;
+}
+
+export function startBackfill(start: string, end?: string): Promise<{ status: string }> {
+  return req('/picks/backfill', {
+    method: 'POST',
+    body: JSON.stringify({ start, end, screens: ['hr', 'batter'] }),
+  });
+}
+
+export function getBackfillStatus(): Promise<BackfillStatus> {
+  return req<BackfillStatus>('/picks/backfill/status');
+}
+
 // --- Chat ---
 
 export function sendChat(
