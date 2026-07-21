@@ -36,13 +36,14 @@ from sharp_edge._data import (
     DEAD_STATES_SUBSTRINGS,
     _HIT_EVENTS,
     _NON_AB_EVENTS,
+    _boxscore_summary,
     _load_statcast,
     _local_time_str,
     _norm,
     _pitcher_info,
     _pitcher_last_3,
     _roster_batters,
-    fetch_today_schedule,
+    fetch_schedule,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,14 @@ def _do_warm(target_date: date) -> None:
             "[batters] warm-up complete (%d picks, %d hot, %d today)",
             len(result.picks), len(result.hot_bats), len(result.today),
         )
+        # Persist today's picks and settle prior unresolved ones. Tracking
+        # failures must never take down the screen itself.
+        try:
+            from sharp_edge import tracking
+            tracking.persist_screen_result("batter", result.picks, target_date)
+            tracking.resolve_pending()
+        except Exception:
+            logger.exception("[batters] pick tracking failed")
     except Exception as e:
         logger.exception("[batters] warm-up failed")
         with _state_lock:
@@ -143,8 +152,10 @@ def warm_async() -> dict:
     return {"status": "warming"}
 
 
-def _bvp(batter_id: int, pitcher_id: int) -> dict | None:
-    df = _load_statcast()
+def _bvp(
+    batter_id: int, pitcher_id: int, sc_df: Optional[pd.DataFrame] = None
+) -> dict | None:
+    df = sc_df if sc_df is not None else _load_statcast()
     pa_df = df[(df["batter"] == batter_id) & (df["pitcher"] == pitcher_id)]
     if pa_df.empty:
         return None
@@ -247,10 +258,52 @@ def screen_today(
     workers: int = 12,
     verbose: bool = True,
 ) -> ScreenResult:
-    today = date.today()
+    return screen_for_date(
+        date.today(),
+        min_recent_avg=min_recent_avg,
+        min_recent_ab=min_recent_ab,
+        min_bvp_avg=min_bvp_avg,
+        min_bvp_pa=min_bvp_pa,
+        min_hand_avg=min_hand_avg,
+        min_hand_pa=min_hand_pa,
+        min_slump_era=min_slump_era,
+        days=days,
+        workers=workers,
+        verbose=verbose,
+    )
+
+
+def screen_for_date(
+    target_date: date,
+    min_recent_avg: float = 0.300,
+    min_recent_ab: int = 10,
+    min_bvp_avg: float = 0.400,
+    min_bvp_pa: int = 5,
+    min_hand_avg: float = 0.400,
+    min_hand_pa: int = 50,
+    min_slump_era: float = 5.00,
+    days: int = 7,
+    workers: int = 12,
+    verbose: bool = True,
+) -> ScreenResult:
+    """Run the batter screen for an arbitrary slate date.
+
+    For today this is the live screen (active rosters + probable pitchers).
+    For past dates the slate comes from that day's schedule and boxscores,
+    and BvP / pitcher form are computed as-of that morning. Known limitation
+    of the historical mode: handedness splits are the player's career line
+    as of now, not as of the target date — career splits move slowly, so the
+    lookahead is small.
+    """
+    today = target_date
     end = today - timedelta(days=1)
     start = end - timedelta(days=days - 1)
     season = today.year
+    is_live = today >= date.today()
+    as_of = today.isoformat()
+
+    sc_df = _load_statcast()
+    sc_df = sc_df[sc_df["game_date"] < pd.Timestamp(today)]
 
     recent = pb.batting_stats_range(start.isoformat(), end.isoformat())
     cols = ["Name", "Tm", "BA", "AB", "H", "HR", "OBP", "OPS"]
@@ -264,7 +317,7 @@ def screen_today(
         for _, row in recent.iterrows()
     }
 
-    raw_games = fetch_today_schedule()
+    raw_games = fetch_schedule(today)
     games_kept = 0
     games_with_pp = 0
     targets = []
@@ -287,18 +340,30 @@ def screen_today(
         away_pp_id, away_pp_name = away_pp.get("id"), away_pp.get("fullName", "")
         home_pp_id, home_pp_name = home_pp.get("id"), home_pp.get("fullName", "")
 
+        box = None if is_live else _boxscore_summary(game.get("gamePk", 0))
+        if box is not None:
+            # Historical: actual starter fills a missing probable pitcher.
+            if not home_pp_id and box["home"]["starter"]:
+                home_pp_id, home_pp_name = box["home"]["starter"]
+            if not away_pp_id and box["away"]["starter"]:
+                away_pp_id, away_pp_name = box["away"]["starter"]
+
         if away_pp_id or home_pp_id:
             games_with_pp += 1
 
         gtime = game.get("gameDate", "")
 
-        for batting_team_id, batting_team, opp_pid, opp_pname in (
-            (away_team_id, away_team_name, home_pp_id, home_pp_name),
-            (home_team_id, home_team_name, away_pp_id, away_pp_name),
+        for side, batting_team_id, batting_team, opp_pid, opp_pname in (
+            ("away", away_team_id, away_team_name, home_pp_id, home_pp_name),
+            ("home", home_team_id, home_team_name, away_pp_id, away_pp_name),
         ):
             if not opp_pid:
                 continue
-            for bid, bname in _roster_batters(batting_team_id):
+            batter_list = (
+                _roster_batters(batting_team_id) if box is None
+                else box[side]["batters"]
+            )
+            for bid, bname in batter_list:
                 targets.append((bid, bname, batting_team, opp_pid, opp_pname, gtime))
 
     if verbose:
@@ -311,10 +376,10 @@ def screen_today(
         bid, _, _, ppid, _, _ = t
         return {
             "target": t,
-            "bvp": _bvp(bid, ppid),
+            "bvp": _bvp(bid, ppid, sc_df),
             "hand": _handedness_splits(bid),
             "pinfo": _pitcher_info(ppid),
-            "p_l3": _pitcher_last_3(ppid, season),
+            "p_l3": _pitcher_last_3(ppid, season, before=as_of),
         }
 
     if targets:
@@ -371,8 +436,10 @@ def screen_today(
 
         rows.append({
             "batter": bname,
+            "batter_id": bid,
             "team": team,
             "opposing_pitcher": ppname,
+            "pitcher_id": ppid,
             "p_hand": p_hand,
             "recent_avg": round(recent_avg, 3) if recent_avg is not None else None,
             "recent_ab": recent_ab,

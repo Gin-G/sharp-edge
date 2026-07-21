@@ -23,7 +23,6 @@ deps: install with `pip install -e ".[models]"` (pybaseball, MLB-StatsAPI, panda
 
 from __future__ import annotations
 
-import functools
 import logging
 import threading
 import time
@@ -33,17 +32,18 @@ from datetime import date, timedelta
 from typing import Optional
 
 import pandas as pd
-import statsapi
 
 from sharp_edge._data import (
     DEAD_STATES_SUBSTRINGS,
     _NON_AB_EVENTS,
+    _boxscore_summary,
     _ip_to_outs,
     _load_statcast,
     _local_time_str,
+    _pitcher_gamelog_starts,
     _pitcher_info,
     _roster_batters,
-    fetch_today_schedule,
+    fetch_schedule,
 )
 
 logger = logging.getLogger(__name__)
@@ -252,6 +252,14 @@ def _do_warm(target_date: date) -> None:
             "[homers] warm-up complete (%d picks, %d hot, %d today)",
             len(result.picks), len(result.hot_pop), len(result.today),
         )
+        # Persist today's picks and settle prior unresolved ones. Tracking
+        # failures must never take down the screen itself.
+        try:
+            from sharp_edge import tracking
+            tracking.persist_screen_result("hr", result.picks, target_date)
+            tracking.resolve_pending()
+        except Exception:
+            logger.exception("[homers] pick tracking failed")
     except Exception as e:
         logger.exception("[homers] warm-up failed")
         with _state_lock:
@@ -458,36 +466,19 @@ def _pitcher_statcast_metrics(pitcher_id: int, sc_df: pd.DataFrame) -> dict:
 # Pitcher HR/9 from official game log
 # ---------------------------------------------------------------------------
 
-@functools.lru_cache(maxsize=None)
-def _pitcher_hr_gamelog(pitcher_id: int, season: int) -> dict:
-    """Season HR/9 and last-3-starts HR/9 from the official StatsAPI game log."""
-    try:
-        data = statsapi.get(
-            "people",
-            {
-                "personIds": str(pitcher_id),
-                "hydrate": (
-                    f"stats(group=[pitching],type=[gameLog],"
-                    f"season={season},sportId=1)"
-                ),
-            },
-        )
-    except Exception:
-        return {"hr9_season": None, "hr9_l3": None, "l3_starts": 0}
+def _pitcher_hr_gamelog(
+    pitcher_id: int, season: int, before: Optional[str] = None
+) -> dict:
+    """Season HR/9 and last-3-starts HR/9 from the official StatsAPI game log.
 
-    games = []
-    for person in data.get("people", []):
-        for block in person.get("stats", []):
-            for split in block.get("splits", []):
-                stat = split.get("stat", {})
-                if stat.get("gamesStarted") == 1:
-                    games.append({
-                        "date": split.get("date", ""),
-                        "ip_str": stat.get("inningsPitched", "0.0"),
-                        "hr": int(stat.get("homeRuns", 0) or 0),
-                    })
-
-    games.sort(key=lambda g: g["date"], reverse=True)
+    ``before`` (ISO date) restricts the log to starts strictly before that
+    date, so historical screens see only what was known that morning. The raw
+    game log itself is cached in _data._pitcher_gamelog_starts.
+    """
+    games = [
+        g for g in _pitcher_gamelog_starts(pitcher_id, season)
+        if not before or g["date"] < before
+    ]
 
     total_outs = sum(_ip_to_outs(g["ip_str"]) for g in games)
     total_hr = sum(g["hr"] for g in games)
@@ -547,11 +538,29 @@ def screen_today_hr(workers: int = 12, verbose: bool = True) -> HRScreenResult:
       - today    : all batters facing a probable pitcher, with full metrics
       - picks    : HOT-POP batters with ≥1 power edge
     """
-    today = date.today()
+    return screen_hr_for_date(date.today(), workers=workers, verbose=verbose)
+
+
+def screen_hr_for_date(
+    target_date: date, workers: int = 12, verbose: bool = True
+) -> HRScreenResult:
+    """Run the HR screen for an arbitrary slate date.
+
+    For today this is the live screen: active rosters + probable pitchers.
+    For past dates the slate is reconstructed from that day's schedule and
+    boxscores — candidates are the players who actually dressed, and the
+    actual starter fills in when no probable pitcher was recorded. Every
+    stat is computed as-of that morning: Statcast events strictly before
+    the date, pitcher game logs restricted to earlier starts.
+    """
+    today = target_date
     season = today.year
+    is_live = today >= date.today()
+    as_of = today.isoformat()
 
     sc_df = _load_statcast()
-    raw_games = fetch_today_schedule()
+    sc_df = sc_df[sc_df["game_date"] < pd.Timestamp(today)]
+    raw_games = fetch_schedule(today)
 
     # Build (batter_id, batter_name, team, pitcher_id, pitcher_name, game_time, venue) tuples
     targets: list[tuple] = []
@@ -579,18 +588,30 @@ def screen_today_hr(workers: int = 12, verbose: bool = True) -> HRScreenResult:
         away_pp_name = away_pp.get("fullName", "")
         home_pp_name = home_pp.get("fullName", "")
 
+        box = None if is_live else _boxscore_summary(game.get("gamePk", 0))
+        if box is not None:
+            # Historical: actual starter fills a missing probable pitcher.
+            if not home_pp_id and box["home"]["starter"]:
+                home_pp_id, home_pp_name = box["home"]["starter"]
+            if not away_pp_id and box["away"]["starter"]:
+                away_pp_id, away_pp_name = box["away"]["starter"]
+
         if away_pp_id or home_pp_id:
             games_with_pp += 1
 
         gtime = game.get("gameDate", "")
 
-        for batting_team_id, batting_team, opp_pid, opp_pname in (
-            (away_team_id, away_team_name, home_pp_id, home_pp_name),
-            (home_team_id, home_team_name, away_pp_id, away_pp_name),
+        for side, batting_team_id, batting_team, opp_pid, opp_pname in (
+            ("away", away_team_id, away_team_name, home_pp_id, home_pp_name),
+            ("home", home_team_id, home_team_name, away_pp_id, away_pp_name),
         ):
             if not opp_pid:
                 continue
-            for bid, bname in _roster_batters(batting_team_id):
+            batter_list = (
+                _roster_batters(batting_team_id) if box is None
+                else box[side]["batters"]
+            )
+            for bid, bname in batter_list:
                 targets.append((bid, bname, batting_team, opp_pid, opp_pname, gtime, venue_name))
 
     if verbose:
@@ -607,7 +628,7 @@ def screen_today_hr(workers: int = 12, verbose: bool = True) -> HRScreenResult:
     pitcher_ids = {t[3] for t in targets}
     p_info_map = {pid: _pitcher_info(pid) for pid in pitcher_ids}
     p_sc_map = {pid: _pitcher_statcast_metrics(pid, sc_df) for pid in pitcher_ids}
-    p_hr_map = {pid: _pitcher_hr_gamelog(pid, season) for pid in pitcher_ids}
+    p_hr_map = {pid: _pitcher_hr_gamelog(pid, season, before=as_of) for pid in pitcher_ids}
 
     def _scan_batter(t: tuple) -> dict:
         bid, bname, team, ppid, ppname, gtime, venue_name = t
@@ -696,6 +717,7 @@ def screen_today_hr(workers: int = 12, verbose: bool = True) -> HRScreenResult:
             "batter_id": bid,
             "team": team,
             "opposing_pitcher": ppname,
+            "pitcher_id": ppid,
             "p_hand": p_hand,
             "game_time": _local_time_str(gtime),
             "venue": venue_name,

@@ -138,3 +138,38 @@ export interface HomerScreen {
   today: HomerRow[];
   as_of?: string;
 }
+
+export interface TrackRecordBucket {
+  picks: number;
+  wins: number;
+  losses: number;
+  voids: number;
+  pending: number;
+  decided: number;
+  hit_rate: number | null;
+}
+
+export interface TrackRecordPick {
+  pick_date: string;
+  batter: string;
+  team: string | null;
+  opposing_pitcher: string | null;
+  venue: string | null;
+  score: number | null;
+  rank: number | null;
+  tags: string | null;
+  source: string;
+  result: 'WIN' | 'LOSS' | 'VOID' | null;
+  hr_actual: number | null;
+  hits_actual: number | null;
+  pa_actual: number | null;
+}
+
+export interface TrackRecord {
+  screen: string;
+  overall: TrackRecordBucket;
+  by_tag: ({ tag: string } & TrackRecordBucket)[];
+  by_source: ({ source: string } & TrackRecordBucket)[];
+  daily: ({ date: string } & TrackRecordBucket)[];
+  picks: TrackRecordPick[];
+}

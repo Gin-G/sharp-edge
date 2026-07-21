@@ -1,0 +1,41 @@
+name: Post-deploy smoke
+
+# Runs after "Build and bump" succeeds (ArgoCD then rolls the new images) and
+# probes the live site. The /picks/* endpoints double as a "new code is
+# actually serving" check, since a stale pod would 404 them.
+
+on:
+  workflow_run:
+    workflows: ["Build and bump"]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe live API
+        run: |
+          BASE=https://sharp-edge.nickknows.net/api
+
+          # ArgoCD sync + image pull + pod rollout can take a while; retry the
+          # newest endpoint until the fresh pod is serving (up to 15 min).
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 20 "$BASE/picks/track-record?screen=hr" | grep -q '"overall"'; then
+              ok=1; break
+            fi
+            echo "new pod not serving yet (attempt $i/30)"; sleep 30
+          done
+          [ -n "$ok" ] || { echo "::error::track-record endpoint never came up"; exit 1; }
+
+          echo "--- health"
+          curl -fsS --max-time 20 "$BASE/health" | grep -q '"ok"'
+          echo "--- screen status endpoints"
+          curl -fsS --max-time 20 "$BASE/homers/screen/status"  | grep -q '"available"'
+          curl -fsS --max-time 20 "$BASE/batters/screen/status" | grep -q '"available"'
+          echo "--- pick tracking endpoints"
+          curl -fsS --max-time 20 "$BASE/picks/track-record?screen=batter" | grep -q '"overall"'
+          curl -fsS --max-time 20 "$BASE/picks/backfill/status" | grep -q '"running"'
+          echo "smoke OK"

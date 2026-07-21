@@ -49,6 +49,30 @@ CREATE TABLE IF NOT EXISTS sync_state (
     updated_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, key)
 );
+CREATE TABLE IF NOT EXISTS model_picks (
+    screen TEXT NOT NULL,
+    pick_date TEXT NOT NULL,
+    batter_id INTEGER NOT NULL,
+    batter TEXT,
+    team TEXT,
+    pitcher_id INTEGER,
+    opposing_pitcher TEXT,
+    venue TEXT,
+    score REAL,
+    rank INTEGER,
+    tags TEXT,
+    metrics TEXT,
+    source TEXT DEFAULT 'live',
+    result TEXT,
+    hr_actual INTEGER,
+    hits_actual INTEGER,
+    pa_actual INTEGER,
+    created_at TEXT DEFAULT (datetime('now')),
+    resolved_at TEXT,
+    PRIMARY KEY (screen, pick_date, batter_id)
+);
+CREATE INDEX IF NOT EXISTS idx_model_picks_screen_date ON model_picks(screen, pick_date);
+CREATE INDEX IF NOT EXISTS idx_model_picks_result ON model_picks(result);
 CREATE INDEX IF NOT EXISTS idx_bets_user_id ON bets(user_id);
 CREATE INDEX IF NOT EXISTS idx_bets_status ON bets(status);
 CREATE INDEX IF NOT EXISTS idx_bets_league ON bets(league);
@@ -261,6 +285,65 @@ class SQLiteDatabase(BetDatabase):
                 })
                 count += 1
         return count
+
+    async def insert_picks(self, rows: list[dict]) -> int:
+        inserted = 0
+        for r in rows:
+            cursor = await self._db.execute(
+                """INSERT INTO model_picks (
+                    screen, pick_date, batter_id, batter, team, pitcher_id,
+                    opposing_pitcher, venue, score, rank, tags, metrics, source
+                ) VALUES (
+                    :screen, :pick_date, :batter_id, :batter, :team, :pitcher_id,
+                    :opposing_pitcher, :venue, :score, :rank, :tags, :metrics, :source
+                ) ON CONFLICT(screen, pick_date, batter_id) DO NOTHING""",
+                r,
+            )
+            inserted += cursor.rowcount if cursor.rowcount > 0 else 0
+        await self._db.commit()
+        return inserted
+
+    async def list_picks(
+        self,
+        screen: str,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        unresolved_only: bool = False,
+    ) -> list[dict]:
+        conditions = ["screen = ?"]
+        params: list = [screen]
+        if since:
+            conditions.append("pick_date >= ?")
+            params.append(since)
+        if until:
+            conditions.append("pick_date <= ?")
+            params.append(until)
+        if unresolved_only:
+            conditions.append("result IS NULL")
+        cursor = await self._db.execute(
+            f"SELECT * FROM model_picks WHERE {' AND '.join(conditions)} "
+            "ORDER BY pick_date DESC, rank ASC",
+            params,
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def update_pick_results(
+        self, screen: str, pick_date: str, results: list[dict]
+    ) -> int:
+        updated = 0
+        for r in results:
+            cursor = await self._db.execute(
+                "UPDATE model_picks SET result = ?, hr_actual = ?, hits_actual = ?, "
+                "pa_actual = ?, resolved_at = datetime('now') "
+                "WHERE screen = ? AND pick_date = ? AND batter_id = ?",
+                (
+                    r["result"], r.get("hr_actual"), r.get("hits_actual"),
+                    r.get("pa_actual"), screen, pick_date, r["batter_id"],
+                ),
+            )
+            updated += cursor.rowcount
+        await self._db.commit()
+        return updated
 
     def _build_filters(self, **kwargs) -> tuple[list[str], list]:
         conditions, params = [], []

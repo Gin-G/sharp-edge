@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { getHomerScreen, ApiError } from '$lib/api';
   import type { HomerScreen } from '$lib/types';
+  import PickTrackRecord from '$lib/components/PickTrackRecord.svelte';
 
   let data: HomerScreen | null = null;
   let loading = true;
@@ -90,6 +91,8 @@
   {#if error}
     <div class="card border-red-800 bg-red-950/30 text-red-300 text-sm">{error}</div>
   {/if}
+
+  <PickTrackRecord screen="hr" winLabel="HR" />
 
   {#if loading && !data}
     <div class="card text-slate-400 text-sm flex items-center gap-3">

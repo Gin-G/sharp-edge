@@ -1,8 +1,10 @@
 """FastAPI application — REST API for the Sharp Edge frontend."""
 
+import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from datetime import date, timedelta
 from typing import Optional
 
 import uvicorn
@@ -30,6 +32,17 @@ _fd_auth: dict[str, FanDuelAuth] = {}
 async def lifespan(app: FastAPI):
     global _db
     _db = await create_database(settings.database_url)
+
+    # Wire pick tracking (persistence + outcome resolution) to the db and
+    # event loop so the screens' warm-up threads can record their picks.
+    try:
+        from . import tracking
+        tracking.configure(_db, asyncio.get_running_loop())
+        logger.info("tracking: configured")
+    except ImportError:
+        logger.info("tracking: models extras not installed, skipping")
+    except Exception as e:
+        logger.warning("tracking: configure failed: %s", e)
 
     # Kick off the batter-screen scrape in the background so the first browser
     # request after a pod restart doesn't have to wait several minutes. If the
@@ -404,6 +417,76 @@ async def homer_screen_status():
     except ImportError:
         return {"available": False}
     return {"available": True, **warm_status()}
+
+
+# ------------------------------------------------------------------
+# Picks tracking — persisted screen picks vs actual outcomes (public)
+# ------------------------------------------------------------------
+
+def _get_tracking():
+    try:
+        from . import tracking
+        return tracking
+    except ImportError as e:
+        raise HTTPException(
+            500,
+            f"models extras not installed (pip install -r requirements.txt): {e}",
+        )
+
+
+@app.get("/picks/track-record")
+async def picks_track_record(
+    screen: str = "hr",
+    since: Optional[str] = None,
+    db: BetDatabase = Depends(get_db),
+):
+    """Hit-rate summary for a screen's persisted picks: overall, per edge
+    tag, per source (live vs backfill), per day, plus the pick list itself
+    with WIN / LOSS / VOID outcomes."""
+    tracking = _get_tracking()
+    if screen not in tracking.SCREENS:
+        raise HTTPException(400, f"screen must be one of {tracking.SCREENS}")
+    rows = await db.list_picks(screen=screen, since=since)
+    return tracking.build_track_record(screen, rows)
+
+
+@app.post("/picks/resolve")
+async def picks_resolve():
+    """Settle any unresolved picks from before today against actual results.
+    Also runs automatically after each daily screen warm-up."""
+    tracking = _get_tracking()
+    return await asyncio.to_thread(tracking.resolve_pending)
+
+
+class BackfillRequest(BaseModel):
+    start: str
+    end: Optional[str] = None
+    screens: list[str] = ["hr", "batter"]
+
+
+@app.post("/picks/backfill")
+async def picks_backfill(req: BackfillRequest):
+    """Retroactively generate and settle picks for a past date range using
+    as-of stats. Runs in a background thread; poll /picks/backfill/status."""
+    tracking = _get_tracking()
+    try:
+        start = date.fromisoformat(req.start)
+        end = date.fromisoformat(req.end) if req.end else date.today() - timedelta(days=1)
+    except ValueError as e:
+        raise HTTPException(400, f"bad date: {e}")
+    end = min(end, date.today() - timedelta(days=1))
+    if start > end:
+        raise HTTPException(400, "start must be on or before end (and before today)")
+    bad = [s for s in req.screens if s not in tracking.SCREENS]
+    if bad:
+        raise HTTPException(400, f"unknown screens: {bad}")
+    return tracking.start_backfill(start, end, req.screens)
+
+
+@app.get("/picks/backfill/status")
+async def picks_backfill_status():
+    tracking = _get_tracking()
+    return tracking.backfill_status()
 
 
 # ------------------------------------------------------------------

@@ -61,6 +61,28 @@ CREATE TABLE IF NOT EXISTS sync_state (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (user_id, key)
 );
+CREATE TABLE IF NOT EXISTS model_picks (
+    screen TEXT NOT NULL,
+    pick_date DATE NOT NULL,
+    batter_id INTEGER NOT NULL,
+    batter TEXT,
+    team TEXT,
+    pitcher_id INTEGER,
+    opposing_pitcher TEXT,
+    venue TEXT,
+    score DOUBLE PRECISION,
+    rank INTEGER,
+    tags TEXT,
+    metrics JSONB,
+    source TEXT DEFAULT 'live',
+    result TEXT,
+    hr_actual INTEGER,
+    hits_actual INTEGER,
+    pa_actual INTEGER,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ,
+    PRIMARY KEY (screen, pick_date, batter_id)
+);
 """
 
 INDEXES = [
@@ -72,6 +94,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_bets_bet_type ON bets(bet_type)",
     "CREATE INDEX IF NOT EXISTS idx_bankroll_user_id ON bankroll_log(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_bets_tags ON bets USING gin(to_tsvector('english', coalesce(tags, '')))",
+    "CREATE INDEX IF NOT EXISTS idx_model_picks_screen_date ON model_picks(screen, pick_date)",
+    "CREATE INDEX IF NOT EXISTS idx_model_picks_result ON model_picks(result)",
 ]
 
 
@@ -290,6 +314,79 @@ class PostgresDatabase(BetDatabase):
                 })
                 count += 1
         return count
+
+    async def insert_picks(self, rows: list[dict]) -> int:
+        from datetime import date as _date
+        inserted = 0
+        async with self._pool.acquire() as conn:
+            for r in rows:
+                status = await conn.execute(
+                    """INSERT INTO model_picks (
+                        screen, pick_date, batter_id, batter, team, pitcher_id,
+                        opposing_pitcher, venue, score, rank, tags, metrics, source
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                    ON CONFLICT (screen, pick_date, batter_id) DO NOTHING""",
+                    r["screen"], _date.fromisoformat(r["pick_date"]), r["batter_id"],
+                    r.get("batter"), r.get("team"), r.get("pitcher_id"),
+                    r.get("opposing_pitcher"), r.get("venue"), r.get("score"),
+                    r.get("rank"), r.get("tags"), r.get("metrics"),
+                    r.get("source", "live"),
+                )
+                # asyncpg returns e.g. "INSERT 0 1"; 0 rows means conflict-skipped
+                inserted += int(status.rsplit(" ", 1)[-1])
+        return inserted
+
+    async def list_picks(
+        self,
+        screen: str,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        unresolved_only: bool = False,
+    ) -> list[dict]:
+        from datetime import date as _date
+        conditions = ["screen = $1"]
+        params: list = [screen]
+        idx = 2
+        if since:
+            conditions.append(f"pick_date >= ${idx}")
+            params.append(_date.fromisoformat(since))
+            idx += 1
+        if until:
+            conditions.append(f"pick_date <= ${idx}")
+            params.append(_date.fromisoformat(until))
+            idx += 1
+        if unresolved_only:
+            conditions.append("result IS NULL")
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT * FROM model_picks WHERE {' AND '.join(conditions)} "
+                "ORDER BY pick_date DESC, rank ASC",
+                *params,
+            )
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["pick_date"] = d["pick_date"].isoformat()
+            out.append(d)
+        return out
+
+    async def update_pick_results(
+        self, screen: str, pick_date: str, results: list[dict]
+    ) -> int:
+        from datetime import date as _date
+        updated = 0
+        pd_date = _date.fromisoformat(pick_date)
+        async with self._pool.acquire() as conn:
+            for r in results:
+                status = await conn.execute(
+                    "UPDATE model_picks SET result = $1, hr_actual = $2, "
+                    "hits_actual = $3, pa_actual = $4, resolved_at = NOW() "
+                    "WHERE screen = $5 AND pick_date = $6 AND batter_id = $7",
+                    r["result"], r.get("hr_actual"), r.get("hits_actual"),
+                    r.get("pa_actual"), screen, pd_date, r["batter_id"],
+                )
+                updated += int(status.rsplit(" ", 1)[-1])
+        return updated
 
     def _renumber(self, user_id: str, conditions: list[str], params: list) -> tuple[list[str], list]:
         """Take filter conditions that use $1.. numbering and renumber them to
