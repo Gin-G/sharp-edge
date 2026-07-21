@@ -27,9 +27,46 @@ from .chat import chat as chat_with_claude
 logger = logging.getLogger(__name__)
 
 # Per-user FanDuel auth, keyed by session uid. Replaces the old singleton so
-# different visitors can each log in to their own FanDuel account.
+# different visitors can each log in to their own FanDuel account. The in-
+# memory map is a cache over the DB-persisted session (sync_state), so a pod
+# restart rehydrates the session (and its refresh token) instead of forcing
+# a fresh login.
 _db: Optional[BetDatabase] = None
 _fd_auth: dict[str, FanDuelAuth] = {}
+_FD_SESSION_KEY = "fanduel_session"
+
+
+async def _persist_fd_auth(uid: str, auth: FanDuelAuth) -> None:
+    """Save a user's FanDuel session (token + refresh token, no password)."""
+    import json
+    try:
+        await _db.set_sync_state(uid, _FD_SESSION_KEY, json.dumps(auth.to_state()))
+    except Exception as e:
+        logger.warning("failed to persist FanDuel session: %s", e)
+
+
+async def _load_fd_auth(uid: str) -> Optional[FanDuelAuth]:
+    """Return the user's FanDuel auth, rehydrating from the DB if the in-
+    memory cache was lost to a restart."""
+    auth = _fd_auth.get(uid)
+    if auth is not None:
+        return auth
+    import json
+    try:
+        raw = await _db.get_sync_state(uid, _FD_SESSION_KEY)
+    except Exception:
+        raw = None
+    if not raw:
+        return None
+    try:
+        auth = FanDuelAuth.from_state(
+            json.loads(raw), basic_auth=settings.fanduel_basic_auth
+        )
+    except Exception as e:
+        logger.warning("failed to rehydrate FanDuel session: %s", e)
+        return None
+    _fd_auth[uid] = auth
+    return auth
 
 
 @asynccontextmanager
@@ -129,6 +166,7 @@ async def login(req: LoginRequest, uid: str = Depends(get_uid)):
     try:
         await auth.login()
         _fd_auth[uid] = auth
+        await _persist_fd_auth(uid, auth)
         return {
             "status": "ok",
             "expires_in": int(auth._token_exp - __import__("time").time()),
@@ -155,6 +193,7 @@ async def submit_mfa(req: MFARequest, uid: str = Depends(get_uid)):
         raise HTTPException(400, "No pending login — start with /auth/login")
     try:
         await auth.submit_mfa_code(req.code)
+        await _persist_fd_auth(uid, auth)
         return {
             "status": "ok",
             "expires_in": int(auth._token_exp - __import__("time").time()),
@@ -181,15 +220,16 @@ async def set_manual_token(req: ManualTokenRequest, uid: str = Depends(get_uid))
 
 @app.get("/auth/status")
 async def auth_status(uid: str = Depends(get_uid)):
-    auth = _fd_auth.get(uid)
+    auth = await _load_fd_auth(uid)
     if not auth or not auth.token:
         return {"authenticated": False}
     return {
         "authenticated": True,
         "expired": auth.is_expired,
-        # With stored credentials an expired token renews itself on the next
-        # sync, so "expired" is only terminal for manual-token sessions.
-        "can_relogin": auth.can_relogin,
+        # A stale token renews silently on the next sync when we hold a
+        # refresh token or stored credentials, so "expired" is only terminal
+        # for a bare manual-token session.
+        "can_renew": auth.can_renew,
     }
 
 
@@ -197,6 +237,10 @@ async def auth_status(uid: str = Depends(get_uid)):
 async def logout(request: Request, uid: str = Depends(get_uid)):
     """Clear FanDuel auth for this session and rotate the session id."""
     _fd_auth.pop(uid, None)
+    try:
+        await _db.set_sync_state(uid, _FD_SESSION_KEY, "")
+    except Exception:
+        pass
     request.session.clear()
     return {"status": "ok"}
 
@@ -209,7 +253,7 @@ async def logout(request: Request, uid: str = Depends(get_uid)):
 async def sync_bets(
     uid: str = Depends(get_uid), db: BetDatabase = Depends(get_db)
 ):
-    auth = _fd_auth.get(uid)
+    auth = await _load_fd_auth(uid)
     if not auth or not auth.token:
         raise HTTPException(400, "Not authenticated with FanDuel")
 
@@ -217,6 +261,8 @@ async def sync_bets(
         token = await auth.ensure_token()
     except Exception as e:
         raise HTTPException(401, str(e))
+    # Persist any renewed token/refresh token so the next restart reuses it.
+    await _persist_fd_auth(uid, auth)
     fd = FanDuelClient(auth_token=token, state=settings.fanduel_state, auth=auth)
     try:
         raw_bets = await fd.fetch_all_settled_bets()
@@ -227,6 +273,7 @@ async def sync_bets(
             count += 1
         return {"status": "ok", "bets_synced": count}
     finally:
+        await _persist_fd_auth(uid, auth)  # client may have refreshed on a 401
         await fd.close()
 
 

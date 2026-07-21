@@ -88,12 +88,21 @@
 </script>
 
 <section class="card overflow-hidden p-0">
-  <div class="px-5 py-4 border-b border-border flex items-baseline justify-between">
-    <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Track Record</h2>
-    {#if data}
-      <span class="text-xs text-slate-500">
-        {data.overall.picks} picks · voids excluded from hit rate
-      </span>
+  <div class="px-5 py-4 border-b border-border flex items-center justify-between gap-3">
+    <div class="flex items-baseline gap-3">
+      <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Track Record</h2>
+      {#if data}
+        <span class="text-xs text-slate-500">
+          {data.overall.picks} picks · voids excluded from hit rate
+        </span>
+      {/if}
+    </div>
+    {#if data && !backfill?.running}
+      <button
+        class="px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-500 whitespace-nowrap"
+        on:click={runBackfill}
+        title="Regenerate and settle picks for the whole season using as-of stats"
+      >{data.overall.picks === 0 ? 'Backfill season history' : 'Rebuild history'}</button>
     {/if}
   </div>
 
@@ -113,14 +122,9 @@
   {:else if error}
     <div class="px-5 py-6 text-sm text-red-300">{error}</div>
   {:else if data && data.overall.picks === 0}
-    <div class="px-5 py-6 text-sm text-slate-500 flex items-center justify-between gap-4 flex-wrap">
-      <span>No picks recorded yet — history builds up as the daily screen runs, or backfill the season retroactively.</span>
-      {#if !backfill?.running}
-        <button
-          class="px-3 py-1.5 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500"
-          on:click={runBackfill}
-        >Backfill season history</button>
-      {/if}
+    <div class="px-5 py-6 text-sm text-slate-500">
+      No picks recorded yet — history builds up as the daily screen runs, or use
+      “Backfill season history” above to generate it retroactively.
     </div>
   {:else if data}
     <!-- Summary row -->

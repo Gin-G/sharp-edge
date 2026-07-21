@@ -128,6 +128,66 @@ def test_ensure_token_relogins_when_expired():
     assert _run(flow()) and not auth.is_expired
 
 
+def test_login_captures_refresh_token():
+    def handler(request):
+        return httpx.Response(
+            201, json={"sessions": [{"id": _jwt(), "refreshToken": "R-1"}]}
+        )
+
+    auth = _auth(handler)
+    _run(auth.login())
+    assert auth.can_refresh and auth._refresh_token == "R-1"
+
+
+def test_ensure_token_prefers_refresh_over_relogin():
+    """A stale token renews from the refresh token without touching
+    /sessions (so no credentials, no MFA)."""
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith("/refresh"):
+            assert json.loads(request.content)["refreshToken"] == "R-1"
+            return httpx.Response(200, json={"token": _jwt(3600), "refreshToken": "R-2"})
+        return httpx.Response(201, json={"sessions": [{"id": _jwt(-100), "refreshToken": "R-1"}]})
+
+    auth = _auth(handler)
+    _run(auth.login())
+    assert auth.is_expired
+    _run(auth.ensure_token())
+    assert paths == ["/sessions", "/sessions/refresh"]
+    assert auth._refresh_token == "R-2" and not auth.is_expired  # rotated
+
+
+def test_ensure_token_falls_back_to_relogin_when_refresh_fails():
+    def handler(request):
+        if request.url.path.endswith("/refresh"):
+            return httpx.Response(401, json={"error": "refresh_expired"})
+        return httpx.Response(201, json={"sessions": [{"id": _jwt(3600), "refreshToken": "R-x"}]})
+
+    auth = _auth(handler)
+    auth._token = _jwt(-100)
+    auth._refresh_token = "stale-refresh"
+    _run(auth.ensure_token())
+    assert not auth.is_expired  # credential re-login succeeded
+
+
+def test_state_roundtrip_preserves_refresh_token_not_password():
+    def handler(request):
+        return httpx.Response(201, json={"sessions": [{"id": _jwt(), "refreshToken": "R-9"}]})
+
+    auth = _auth(handler)
+    _run(auth.login())
+    state = auth.to_state()
+    assert "password" not in state and state["refresh_token"] == "R-9"
+
+    restored = FanDuelAuth.from_state(
+        state, basic_auth="x", transport=httpx.MockTransport(handler)
+    )
+    assert restored.can_refresh and restored.token == auth.token
+    assert not restored.can_relogin  # password intentionally not persisted
+
+
 def test_ensure_token_without_credentials_raises():
     auth = FanDuelAuth("", "")
     auth.set_manual_token(_jwt(-100))

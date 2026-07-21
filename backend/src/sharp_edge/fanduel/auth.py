@@ -1,5 +1,11 @@
 """FanDuel session authentication — direct login, new-device MFA, refresh.
 
+Modeled on the token flow that worked for the Hydrow integration: log in
+once with username/password, keep the returned refresh token, and mint new
+access tokens from it so credentials (and MFA) are never needed again until
+the refresh token itself expires. The whole session serializes to/from the
+database so a pod restart reuses it instead of bouncing back to login.
+
 Login flow (matches the browser's calls to api.fanduel.com):
 
   1. POST /sessions with email/password/product and the static app key from
@@ -8,17 +14,25 @@ Login flow (matches the browser's calls to api.fanduel.com):
      request; unlike session tokens it does not expire).
   2. On success the session token comes back in the body (or an
      x-authentication response header) and is sent as ``x-authentication``
-     on subsequent requests. The JWT's exp claim is ~1 hour out.
+     on subsequent requests. The JWT's exp claim is ~1 hour out. A refresh
+     token, when present, is stored for step 4.
   3. If FanDuel doesn't recognize the device it demands a verification code
      (emailed to the account) — surfaced here as FanDuelMFARequired; submit
      the code via submit_mfa_code() and login is retried. Once the device
      is verified, later logins skip the code.
-  4. ensure_token() re-logins automatically with the stored credentials
-     whenever the token is stale, so the hourly expiry never surfaces.
+  4. ensure_token() renews a stale token from the refresh token first
+     (POST /sessions/refresh), falling back to a full credential re-login,
+     so the hourly expiry never surfaces to the user.
 
 If FanDuel's bot protection (PerimeterX) rejects the request outright,
 FanDuelBotBlocked is raised — that layer can't be negotiated with from a
 plain HTTP client, and the manual-token path remains the fallback.
+
+NOTE: the /sessions and /sessions/refresh response shapes are parsed
+defensively across the field names FanDuel and community clients have used
+(token / accessToken / sessionToken / sessions[].id; refresh under
+refreshToken / refresh_token). One DevTools capture of the real login
+response confirms which apply — see _extract_tokens for the union handled.
 """
 
 import logging
@@ -27,6 +41,8 @@ from typing import Optional
 
 import httpx
 import jwt
+
+FD_REFRESH_URL = "https://api.fanduel.com/sessions/refresh"
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +94,7 @@ class FanDuelAuth:
         self._transport = transport  # injected in tests
         self._token: Optional[str] = None
         self._token_exp: float = 0
+        self._refresh_token: Optional[str] = None
 
     @property
     def token(self) -> Optional[str]:
@@ -86,6 +103,15 @@ class FanDuelAuth:
     @property
     def can_relogin(self) -> bool:
         return bool(self.email and self.password)
+
+    @property
+    def can_refresh(self) -> bool:
+        return bool(self._refresh_token)
+
+    @property
+    def can_renew(self) -> bool:
+        """True when a stale token can be renewed without user input."""
+        return self.can_refresh or self.can_relogin
 
     @property
     def is_expired(self) -> bool:
@@ -148,15 +174,7 @@ class FanDuelAuth:
         except ValueError:
             data = {}
 
-        sessions = data.get("sessions") or []
-        token = (
-            resp.headers.get("x-authentication")
-            or resp.headers.get("x-auth-token")
-            or data.get("token")
-            or data.get("accessToken")
-            or data.get("sessionToken")
-            or (sessions[0].get("id") if sessions else None)
-        )
+        token, refresh = self._extract_tokens(resp, data)
         if not token:
             logger.error(
                 "No token in login response. Status=%s keys=%s headers=%s",
@@ -167,8 +185,61 @@ class FanDuelAuth:
                 f"response (keys: {list(data.keys())})"
             )
 
-        self._set_token(token)
-        logger.info("FanDuel login successful")
+        self._set_token(token, refresh)
+        logger.info("FanDuel login successful (refresh_token=%s)", bool(refresh))
+        return token
+
+    @staticmethod
+    def _extract_tokens(resp: httpx.Response, data: dict) -> tuple[Optional[str], Optional[str]]:
+        """Pull (session_token, refresh_token) from a /sessions-style
+        response, tolerating the field names FanDuel and community clients
+        have variously used."""
+        sessions = data.get("sessions") or []
+        first = sessions[0] if sessions else {}
+        token = (
+            resp.headers.get("x-authentication")
+            or resp.headers.get("x-auth-token")
+            or data.get("token")
+            or data.get("accessToken")
+            or data.get("sessionToken")
+            or first.get("id")
+            or first.get("token")
+        )
+        refresh = (
+            data.get("refreshToken")
+            or data.get("refresh_token")
+            or first.get("refreshToken")
+            or first.get("refresh_token")
+        )
+        return token, refresh
+
+    async def refresh(self) -> str:
+        """Mint a fresh session token from the stored refresh token — no
+        credentials, no MFA. Raises FanDuelAuthError if there's no refresh
+        token or FanDuel rejects it (caller falls back to credential login)."""
+        if not self._refresh_token:
+            raise FanDuelAuthError("No refresh token available")
+        async with httpx.AsyncClient(timeout=30.0, transport=self._transport) as client:
+            resp = await client.post(
+                FD_REFRESH_URL,
+                json={"refreshToken": self._refresh_token, "product": self.product},
+                headers=self._headers(),
+            )
+        if not resp.is_success:
+            raise FanDuelAuthError(
+                f"Token refresh failed ({resp.status_code}): {resp.text[:200]}"
+            )
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        token, refresh = self._extract_tokens(resp, data)
+        if not token:
+            raise FanDuelAuthError("Refresh succeeded but returned no token")
+        # FanDuel may or may not rotate the refresh token; keep the old one
+        # if the response doesn't carry a new one.
+        self._set_token(token, refresh or self._refresh_token)
+        logger.info("FanDuel token refreshed")
         return token
 
     async def submit_mfa_code(self, code: str) -> str:
@@ -195,23 +266,70 @@ class FanDuelAuth:
         return await self.login()
 
     async def ensure_token(self, force: bool = False) -> str:
-        """Get a valid token, re-logging in when stale (or forced)."""
-        if force or self.is_expired:
-            if not self.can_relogin:
-                raise FanDuelAuthError(
-                    "Session token expired and no stored credentials to "
-                    "re-login — log in with email/password or paste a fresh "
-                    "token."
-                )
+        """Get a valid token, renewing when stale (or forced).
+
+        Prefers the refresh token (silent, MFA-free) and falls back to a
+        full credential re-login. Raises FanDuelAuthError only when neither
+        renewal path is available."""
+        if not (force or self.is_expired):
+            return self._token
+        if self.can_refresh:
+            try:
+                return await self.refresh()
+            except FanDuelAuthError as e:
+                logger.info("refresh failed (%s); trying credential login", e)
+        if self.can_relogin:
             await self.login()
-        return self._token
+            return self._token
+        raise FanDuelAuthError(
+            "Session token expired and can't be renewed — log in with "
+            "email/password or paste a fresh token."
+        )
+
+    # ------------------------------------------------------------------
+    # Serialization — persist the session across restarts (no password)
+    # ------------------------------------------------------------------
+
+    def to_state(self) -> dict:
+        """Serialize the session for storage. Excludes the password; the
+        refresh token is what enables MFA-free renewal after a restart."""
+        return {
+            "email": self.email,
+            "token": self._token,
+            "token_exp": self._token_exp,
+            "refresh_token": self._refresh_token,
+            "product": self.product,
+            "state": None,
+        }
+
+    @classmethod
+    def from_state(
+        cls,
+        state: dict,
+        password: str = "",
+        basic_auth: str = "",
+        transport: Optional[httpx.AsyncBaseTransport] = None,
+    ) -> "FanDuelAuth":
+        auth = cls(
+            state.get("email", ""),
+            password,
+            basic_auth=basic_auth,
+            product=state.get("product", "SB"),
+            transport=transport,
+        )
+        auth._token = state.get("token")
+        auth._token_exp = state.get("token_exp", 0) or 0
+        auth._refresh_token = state.get("refresh_token")
+        return auth
 
     def set_manual_token(self, token: str) -> None:
         """Set a manually-captured token (from browser DevTools)."""
         self._set_token(token)
 
-    def _set_token(self, token: str) -> None:
+    def _set_token(self, token: str, refresh: Optional[str] = None) -> None:
         self._token = token
+        if refresh is not None:
+            self._refresh_token = refresh
         try:
             # Decode without verification to read exp claim
             payload = jwt.decode(token, options={"verify_signature": False})
