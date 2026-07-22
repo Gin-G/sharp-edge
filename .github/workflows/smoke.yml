@@ -1,25 +1,19 @@
 name: Post-deploy smoke
 
 # Runs after "Build and bump" succeeds (ArgoCD then rolls the new images) and
-# probes the live site. The /picks/* endpoints double as a "new code is
+# probes the live API. The /picks/* endpoints double as a "new code is
 # actually serving" check, since a stale pod would 404 them.
 #
-# The site sits behind a Cloudflare managed challenge, which blocks CI
-# runners outright. Two things are needed to let this workflow through, and
-# until BOTH exist the probe is skipped rather than failed — a check that
-# cannot reach its target is noise, not a signal:
+# The public DNS record is proxied through Cloudflare, whose managed
+# challenge blocks CI runners outright (403 + cf-mitigated: challenge) — it
+# keys on client reputation, not User-Agent, so there is nothing to spoof.
+# Rather than punch a hole in the WAF, the probe pins the hostname straight
+# to the ingress with curl --resolve. The hostname stays in SNI and the Host
+# header, so Traefik still routes by host and cert validation is unchanged;
+# only Cloudflare is skipped.
 #
-#   1. A SMOKE_KEY repository secret (Settings → Secrets and variables →
-#      Actions). Any long random string: openssl rand -hex 32
-#   2. A Cloudflare WAF custom rule on the sharp-edge.nickknows.net zone
-#      (Security → WAF → Custom rules), action "Skip" → "All remaining
-#      custom rules" + "Managed rules", with expression:
-#        (http.host eq "sharp-edge.nickknows.net"
-#         and starts_with(http.request.uri.path, "/api/")
-#         and http.request.headers["x-smoke-key"][0] eq "<same value>")
-#
-# Scoping the rule to /api/ keeps the bypass off the HTML app, so a leaked
-# key exposes only the same public endpoints the smoke test reads.
+# ORIGIN must match the external-dns target on helm/sharp-edge/templates/
+# ingress.yaml. If the cluster's public IP changes, update both.
 
 on:
   workflow_run:
@@ -33,25 +27,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Probe live API
-        env:
-          SMOKE_KEY: ${{ secrets.SMOKE_KEY }}
         run: |
-          if [ -z "$SMOKE_KEY" ]; then
-            echo "::notice::SMOKE_KEY is not set, so Cloudflare would challenge this runner before it reached the API. Skipping the live probe — see the setup notes at the top of smoke.yml to enable it."
-            exit 0
-          fi
-
-          BASE=https://sharp-edge.nickknows.net/api
+          HOST=sharp-edge.nickknows.net
+          ORIGIN=8.44.158.127
+          BASE="https://$HOST/api"
 
           # Truncate both files first: on a timeout curl may never write, and a
           # stale body from an earlier probe would then satisfy the next grep.
           # That reads as a pass for an endpoint that never answered.
           probe() {  # $1 = path; body -> /tmp/b, status -> $code
             : > /tmp/b; : > /tmp/h
-            code=$(curl -sS --max-time 20 -D /tmp/h -o /tmp/b -w '%{http_code}' \
-                     -H "X-Smoke-Key: $SMOKE_KEY" "$BASE$1" || echo 000)
+            code=$(curl -sS --max-time 20 --resolve "$HOST:443:$ORIGIN" \
+                     -D /tmp/h -o /tmp/b -w '%{http_code}' "$BASE$1" || echo 000)
             if grep -qi '^cf-mitigated: challenge' /tmp/h; then
-              echo "::error::Cloudflare challenged the runner despite SMOKE_KEY being set — the WAF skip rule is missing or its key does not match the secret. See smoke.yml."
+              echo "::error::Cloudflare answered instead of the origin — the --resolve pin is not taking effect, or $ORIGIN is stale (check the external-dns target in ingress.yaml)."
               exit 1
             fi
           }

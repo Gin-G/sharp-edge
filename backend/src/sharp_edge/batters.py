@@ -273,6 +273,27 @@ def screen_today(
     )
 
 
+_RECENT_COLS = ["Name", "Tm", "BA", "AB", "H", "HR", "OBP", "OPS"]
+
+
+def _batting_stats_range(start: date, end: date) -> pd.DataFrame:
+    """Recent batting lines, tolerating a window with no games played.
+
+    pybaseball parses an HTML table and indexes [0] into the result, so a
+    window Baseball-Reference has no rows for raises IndexError rather than
+    returning an empty frame. Every date in the first week of a season has
+    that problem, since its trailing window sits in the pre-season.
+    """
+    try:
+        return pb.batting_stats_range(start.isoformat(), end.isoformat())
+    except (IndexError, ValueError) as e:
+        logger.warning(
+            "[batters] no batting lines for %s..%s (%s: %s) — treating as empty",
+            start.isoformat(), end.isoformat(), type(e).__name__, e,
+        )
+        return pd.DataFrame(columns=_RECENT_COLS)
+
+
 def screen_for_date(
     target_date: date,
     min_recent_avg: float = 0.300,
@@ -302,10 +323,19 @@ def screen_for_date(
     is_live = today >= date.today()
     as_of = today.isoformat()
 
+    # Settle the slate before doing any real work. A date with no games — the
+    # pre-season window, an off-day, the All-Star break — has nothing to
+    # screen, and both the Statcast copy below and the range query are
+    # expensive enough to be worth skipping outright.
+    raw_games = fetch_schedule(today)
+    if not raw_games:
+        empty = pd.DataFrame()
+        return ScreenResult(picks=empty, hot_bats=empty.copy(), today=empty.copy())
+
     sc_df = _load_statcast()
     sc_df = sc_df[sc_df["game_date"] < pd.Timestamp(today)]
 
-    recent = pb.batting_stats_range(start.isoformat(), end.isoformat())
+    recent = _batting_stats_range(start, end)
     cols = ["Name", "Tm", "BA", "AB", "H", "HR", "OBP", "OPS"]
     hot_df = recent[
         (recent["AB"] >= min_recent_ab) & (recent["BA"] >= min_recent_avg)
@@ -317,7 +347,6 @@ def screen_for_date(
         for _, row in recent.iterrows()
     }
 
-    raw_games = fetch_schedule(today)
     games_kept = 0
     games_with_pp = 0
     targets = []

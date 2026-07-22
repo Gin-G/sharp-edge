@@ -202,6 +202,22 @@ def test_catchup_reports_up_to_date_when_nothing_missing(tracked_db):
     assert result["status"] == "up-to-date"
 
 
+def test_batting_stats_range_tolerates_a_window_with_no_games(monkeypatch):
+    """pybaseball indexes [0] into a parsed HTML table, so a window with no
+    games raises IndexError instead of returning an empty frame. Every date
+    in the season's first week has that problem — its trailing window sits in
+    the pre-season — and an unhandled raise means the day never records a
+    run, so the catch-up retries it on every restart forever."""
+    from sharp_edge import batters
+
+    def boom(*a, **kw):
+        raise IndexError("list index out of range")
+
+    monkeypatch.setattr(batters.pb, "batting_stats_range", boom)
+    out = batters._batting_stats_range(TWO_DAYS_AGO, YESTERDAY)
+    assert out.empty and "AB" in out.columns  # filterable, not fatal
+
+
 def test_screen_rows_carry_ids():
     """The persistence layer keys on batter_id/pitcher_id — both screens must
     emit them. Guards against a refactor dropping the columns silently."""
