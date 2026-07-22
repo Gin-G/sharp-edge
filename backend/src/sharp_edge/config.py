@@ -17,10 +17,12 @@ class Settings(BaseSettings):
     fanduel_state: str = "CO"
     fanduel_api_key: str = "FhMFpcPWXMeyZxOx"
     # Static app key from FanDuel's JS bundle, sent as "Authorization: Basic"
-    # on the /sessions login call. Capture once from DevTools (Network tab →
-    # the POST to api.fanduel.com/sessions → Authorization request header,
-    # without the "Basic " prefix). It doesn't expire like session tokens.
-    fanduel_basic_auth: str = ""
+    # on the /sessions login call. Public (it ships to every browser that
+    # loads the login page) and it doesn't expire like session tokens, so it
+    # is defaulted rather than configured. Decodes to a client id with an
+    # empty secret. Override via FANDUEL_BASIC_AUTH if FanDuel rotates it —
+    # recapture from DevTools on the POST to api.fanduel.com/sessions.
+    fanduel_basic_auth: str = "ODc2YmQzOTE3ZWE3NjYwMjZhNjg5YzY2MTE5OGQxMmU6"
 
     # Anthropic (for chat endpoint)
     anthropic_api_key: str = ""

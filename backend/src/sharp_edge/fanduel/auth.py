@@ -8,18 +8,23 @@ database so a pod restart reuses it instead of bouncing back to login.
 
 Login flow (matches the browser's calls to api.fanduel.com):
 
-  1. POST /sessions with email/password/product and the static app key from
-     FanDuel's JS bundle sent as ``Authorization: Basic <key>`` (configure
-     via FANDUEL_BASIC_AUTH — capture it once from DevTools on the login
-     request; unlike session tokens it does not expire).
+  1. POST /sessions with email/password/product/location, the static app key
+     from FanDuel's JS bundle sent as ``Authorization: Basic <key>``, and the
+     browser's routing headers (vendor Accept type, X-Brand, X-Product-Region,
+     X-Installation-Id, per-state Origin/Referer). All of these come from a
+     capture of the real login — the plain application/json shape FanDuel's
+     older DFS API accepted is not what the sportsbook client sends.
   2. On success the session token comes back in the body (or an
      x-authentication response header) and is sent as ``x-authentication``
      on subsequent requests. The JWT's exp claim is ~1 hour out. A refresh
      token, when present, is stored for step 4.
   3. If FanDuel doesn't recognize the device it demands a verification code
-     (emailed to the account) — surfaced here as FanDuelMFARequired; submit
-     the code via submit_mfa_code() and login is retried. Once the device
-     is verified, later logins skip the code.
+     (emailed to the account) — surfaced here as FanDuelMFARequired. The
+     challenge response carries a short-lived new_device_token; submit the
+     code via submit_mfa_code() and it goes back to /sessions together with
+     that token, which is what returns the real session. Verification is
+     keyed to X-Installation-Id, so keeping that id stable is what stops
+     FanDuel asking again on every login.
   4. ensure_token() renews a stale token from the refresh token first
      (POST /sessions/refresh), falling back to a full credential re-login,
      so the hourly expiry never surfaces to the user.
@@ -28,15 +33,22 @@ If FanDuel's bot protection (PerimeterX) rejects the request outright,
 FanDuelBotBlocked is raised — that layer can't be negotiated with from a
 plain HTTP client, and the manual-token path remains the fallback.
 
-NOTE: the /sessions and /sessions/refresh response shapes are parsed
-defensively across the field names FanDuel and community clients have used
-(token / accessToken / sessionToken / sessions[].id; refresh under
-refreshToken / refresh_token). One DevTools capture of the real login
-response confirms which apply — see _extract_tokens for the union handled.
+NOTE: the request shapes here are confirmed against a real capture, but the
+*response* shapes are not — they are parsed defensively across the field
+names FanDuel and community clients have used (token / accessToken /
+sessionToken / sessions[].id; refresh under refreshToken / refresh_token;
+see _extract_tokens and _extract_device_token for the union handled). One
+capture of a login response would let this be narrowed.
+
+Unresolved: the browser also sends an x-px-context PerimeterX token, which
+cannot be minted outside a real browser session. Whether FanDuel enforces
+it on /sessions is untested — if it does, FanDuelBotBlocked is raised and
+the manual-token path remains the fallback.
 """
 
 import logging
 import time
+import uuid
 from typing import Optional
 
 import httpx
@@ -47,17 +59,24 @@ FD_REFRESH_URL = "https://api.fanduel.com/sessions/refresh"
 logger = logging.getLogger(__name__)
 
 FD_SESSION_URL = "https://api.fanduel.com/sessions"
-FD_MFA_URL = "https://api.fanduel.com/users/mfa/new-device"
 
+# The browser's login page is per-state: account.co.sportsbook.fanduel.com
+# for Colorado, .nj. for New Jersey, and so on. Origin/Referer have to match
+# or the request looks cross-site.
+FD_ACCOUNT_ORIGIN = "https://account.{state}.sportsbook.fanduel.com"
+
+# Captured from a real login. The vendor Accept type selects the trimmed user
+# payload the web client asks for; x-brand / x-product-region are required
+# routing headers.
 BROWSER_HEADERS = {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
+    "Accept": "application/vnd.fanduel.reduced_user_view+json",
+    "Content-Type": "application/json;charset=UTF-8",
     "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
     ),
-    "Origin": "https://sportsbook.fanduel.com",
-    "Referer": "https://sportsbook.fanduel.com/",
+    "X-Brand": "FANDUEL",
+    "X-Geo-Region": "",
 }
 
 _MFA_MARKERS = ("mfa", "new-device", "new_device", "verification", "verify")
@@ -85,16 +104,26 @@ class FanDuelAuth:
         password: str,
         basic_auth: str = "",
         product: str = "SB",
+        state: str = "CO",
+        installation_id: Optional[str] = None,
         transport: Optional[httpx.AsyncBaseTransport] = None,
     ):
         self.email = email
         self.password = password
         self.basic_auth = basic_auth.removeprefix("Basic ").strip()
         self.product = product
+        self.state = (state or "CO").upper()
+        # Identifies this "device" to FanDuel. It has to stay stable across
+        # logins — that's what makes a verified device stay verified, so it
+        # is persisted with the session rather than regenerated per process.
+        self.installation_id = installation_id or str(uuid.uuid4())
         self._transport = transport  # injected in tests
         self._token: Optional[str] = None
         self._token_exp: float = 0
         self._refresh_token: Optional[str] = None
+        # Short-lived (~5 min) challenge token handed back when FanDuel wants
+        # a device-verification code; posted back alongside the code.
+        self._device_token: Optional[str] = None
 
     @property
     def token(self) -> Optional[str]:
@@ -109,6 +138,11 @@ class FanDuelAuth:
         return bool(self._refresh_token)
 
     @property
+    def mfa_pending(self) -> bool:
+        """True between a device-verification challenge and its code."""
+        return bool(self._device_token)
+
+    @property
     def can_renew(self) -> bool:
         """True when a stale token can be renewed without user input."""
         return self.can_refresh or self.can_relogin
@@ -121,7 +155,14 @@ class FanDuelAuth:
         return time.time() > (self._token_exp - 300)
 
     def _headers(self) -> dict:
+        origin = FD_ACCOUNT_ORIGIN.format(state=self.state.lower())
         headers = dict(BROWSER_HEADERS)
+        headers.update({
+            "Origin": origin,
+            "Referer": f"{origin}/",
+            "X-Installation-Id": self.installation_id,
+            "X-Product-Region": self.state,
+        })
         if self.basic_auth:
             headers["Authorization"] = f"Basic {self.basic_auth}"
         return headers
@@ -140,6 +181,7 @@ class FanDuelAuth:
                     "email": self.email,
                     "password": self.password,
                     "product": self.product,
+                    "location": self.state,
                 },
                 headers=self._headers(),
             )
@@ -148,6 +190,16 @@ class FanDuelAuth:
     def _handle_login_response(self, resp: httpx.Response) -> str:
         body_text = resp.text[:2000]
         lowered = body_text.lower()
+
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        # The MFA challenge carries the device token we have to echo back
+        # with the code, so capture it before the error branches below.
+        device = self._extract_device_token(data)
+        if device:
+            self._device_token = device
 
         if resp.status_code == 403 and any(m in lowered for m in _BOT_MARKERS):
             raise FanDuelBotBlocked(
@@ -168,11 +220,6 @@ class FanDuelAuth:
             raise FanDuelAuthError(
                 f"Login failed ({resp.status_code}): {body_text[:300]}"
             )
-
-        try:
-            data = resp.json()
-        except ValueError:
-            data = {}
 
         token, refresh = self._extract_tokens(resp, data)
         if not token:
@@ -213,6 +260,18 @@ class FanDuelAuth:
         )
         return token, refresh
 
+    @staticmethod
+    def _extract_device_token(data: dict) -> Optional[str]:
+        sessions = data.get("sessions") or []
+        first = sessions[0] if sessions else {}
+        error = data.get("error") if isinstance(data.get("error"), dict) else {}
+        return (
+            data.get("new_device_token")
+            or data.get("newDeviceToken")
+            or first.get("new_device_token")
+            or error.get("new_device_token")
+        )
+
     async def refresh(self) -> str:
         """Mint a fresh session token from the stored refresh token — no
         credentials, no MFA. Raises FanDuelAuthError if there's no refresh
@@ -243,27 +302,32 @@ class FanDuelAuth:
         return token
 
     async def submit_mfa_code(self, code: str) -> str:
-        """Verify this device with the emailed code, then retry login.
+        """Finish a held login by posting the emailed code.
 
-        The request shape mirrors the captured new-device endpoint; if
-        FanDuel rejects it, the response body is included in the error so
-        one DevTools capture of the browser's MFA POST is enough to adjust.
+        Verification is not a separate endpoint: the code goes back to
+        /sessions along with the new_device_token from the challenge, and
+        that call returns the real session token. The device token is only
+        valid for about five minutes, so a slow user has to start over.
         """
+        if not self._device_token:
+            raise FanDuelAuthError(
+                "No pending device verification — log in again to request a "
+                "new code."
+            )
         async with httpx.AsyncClient(timeout=30.0, transport=self._transport) as client:
             resp = await client.post(
-                FD_MFA_URL,
+                FD_SESSION_URL,
                 json={
-                    "email": self.email,
                     "code": code.strip(),
+                    "new_device_token": self._device_token,
                     "product": self.product,
+                    "location": self.state,
                 },
                 headers=self._headers(),
             )
-        if not resp.is_success:
-            raise FanDuelAuthError(
-                f"MFA verification failed ({resp.status_code}): {resp.text[:300]}"
-            )
-        return await self.login()
+        token = self._handle_login_response(resp)
+        self._device_token = None
+        return token
 
     async def ensure_token(self, force: bool = False) -> str:
         """Get a valid token, renewing when stale (or forced).
@@ -299,7 +363,8 @@ class FanDuelAuth:
             "token_exp": self._token_exp,
             "refresh_token": self._refresh_token,
             "product": self.product,
-            "state": None,
+            "state": self.state,
+            "installation_id": self.installation_id,
         }
 
     @classmethod
@@ -315,6 +380,8 @@ class FanDuelAuth:
             password,
             basic_auth=basic_auth,
             product=state.get("product", "SB"),
+            state=state.get("state") or "CO",
+            installation_id=state.get("installation_id"),
             transport=transport,
         )
         auth._token = state.get("token")

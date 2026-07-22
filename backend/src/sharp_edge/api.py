@@ -62,6 +62,7 @@ async def _load_fd_auth(uid: str) -> Optional[FanDuelAuth]:
         auth = FanDuelAuth.from_state(
             json.loads(raw), basic_auth=settings.fanduel_basic_auth
         )
+        auth.state = auth.state or settings.fanduel_state
     except Exception as e:
         logger.warning("failed to rehydrate FanDuel session: %s", e)
         return None
@@ -165,8 +166,14 @@ class ManualTokenRequest(BaseModel):
 
 @app.post("/auth/login")
 async def login(req: LoginRequest, uid: str = Depends(get_uid)):
+    # Reuse the stored installation id when there is one: FanDuel keys device
+    # verification to it, so a new id means a new MFA code every login.
+    prior = await _load_fd_auth(uid)
     auth = FanDuelAuth(
-        req.email, req.password, basic_auth=settings.fanduel_basic_auth
+        req.email, req.password,
+        basic_auth=settings.fanduel_basic_auth,
+        state=settings.fanduel_state,
+        installation_id=prior.installation_id if prior else None,
     )
     try:
         await auth.login()
@@ -194,7 +201,7 @@ class MFARequest(BaseModel):
 async def submit_mfa(req: MFARequest, uid: str = Depends(get_uid)):
     """Finish a login that FanDuel held for new-device verification."""
     auth = _fd_auth.get(uid)
-    if not auth or not auth.can_relogin:
+    if not auth or not auth.mfa_pending:
         raise HTTPException(400, "No pending login — start with /auth/login")
     try:
         await auth.submit_mfa_code(req.code)

@@ -52,6 +52,25 @@ def test_login_success_sessions_shape():
     assert token and not auth.is_expired
     assert seen["auth_header"] == "Basic c3RhdGljLWtleQ=="
     assert seen["body"]["email"] == "user@example.com"
+    assert seen["body"]["location"] == "CO"
+
+
+def test_login_sends_captured_browser_headers():
+    """The sportsbook client's routing headers, from a real capture. Plain
+    application/json is the older DFS shape and is not what's sent."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(request.headers)
+        return httpx.Response(201, json={"sessions": [{"id": _jwt()}]})
+
+    auth = _auth(handler, state="NJ")
+    _run(auth.login())
+    assert seen["accept"] == "application/vnd.fanduel.reduced_user_view+json"
+    assert seen["x-brand"] == "FANDUEL"
+    assert seen["x-product-region"] == "NJ"
+    assert seen["x-installation-id"] == auth.installation_id
+    assert seen["origin"] == "https://account.nj.sportsbook.fanduel.com"
 
 
 def test_login_success_header_token():
@@ -71,14 +90,17 @@ def test_login_opaque_token_gets_default_expiry():
     assert not auth.is_expired  # assumed 1h lifetime
 
 
-def test_login_mfa_required():
+def test_login_mfa_required_captures_device_token():
     def handler(request):
-        return httpx.Response(
-            401, json={"error": "new_device_verification_required"}
-        )
+        return httpx.Response(401, json={
+            "error": "new_device_verification_required",
+            "new_device_token": "D-1",
+        })
 
+    auth = _auth(handler)
     with pytest.raises(FanDuelMFARequired):
-        _run(_auth(handler).login())
+        _run(auth.login())
+    assert auth.mfa_pending and auth._device_token == "D-1"
 
 
 def test_login_bot_blocked():
@@ -97,19 +119,36 @@ def test_login_bad_credentials():
         _run(_auth(handler).login())
 
 
-def test_mfa_code_then_login():
+def test_mfa_code_posts_back_to_sessions_with_device_token():
+    """Verification isn't a separate endpoint — the code and the challenge's
+    new_device_token go to /sessions, and that call returns the session."""
     calls = []
 
     def handler(request):
         calls.append(request.url.path)
-        if "mfa" in request.url.path:
-            assert json.loads(request.content)["code"] == "123456"
-            return httpx.Response(200, json={})
-        return httpx.Response(201, json={"sessions": [{"id": _jwt()}]})
+        body = json.loads(request.content)
+        if "code" in body:
+            assert body["code"] == "123456" and body["new_device_token"] == "D-1"
+            return httpx.Response(201, json={"sessions": [{"id": _jwt()}]})
+        return httpx.Response(401, json={
+            "error": "new_device_verification_required",
+            "new_device_token": "D-1",
+        })
 
     auth = _auth(handler)
+    with pytest.raises(FanDuelMFARequired):
+        _run(auth.login())
     token = _run(auth.submit_mfa_code("123456 "))
-    assert token and calls == ["/users/mfa/new-device", "/sessions"]
+    assert token and calls == ["/sessions", "/sessions"]
+    assert not auth.mfa_pending  # consumed
+
+
+def test_mfa_without_pending_challenge_raises():
+    def handler(request):  # pragma: no cover - must not be reached
+        raise AssertionError("no request should be made")
+
+    with pytest.raises(FanDuelAuthError, match="No pending device"):
+        _run(_auth(handler).submit_mfa_code("123456"))
 
 
 def test_ensure_token_relogins_when_expired():
@@ -186,6 +225,9 @@ def test_state_roundtrip_preserves_refresh_token_not_password():
     )
     assert restored.can_refresh and restored.token == auth.token
     assert not restored.can_relogin  # password intentionally not persisted
+    # A new installation id would make FanDuel treat the pod as a new device
+    # and demand a code on every restart.
+    assert restored.installation_id == auth.installation_id
 
 
 def test_ensure_token_without_credentials_raises():
