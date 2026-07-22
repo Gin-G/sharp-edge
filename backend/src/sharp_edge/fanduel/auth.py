@@ -132,6 +132,8 @@ class FanDuelAuth:
         # from the token above so a challenge we couldn't parse still lets
         # the user submit their code.
         self._mfa_required: bool = False
+        # True when _token_exp is a 1h guess rather than a real exp claim.
+        self._exp_assumed: bool = False
 
     @property
     def token(self) -> Optional[str]:
@@ -144,6 +146,15 @@ class FanDuelAuth:
     @property
     def can_refresh(self) -> bool:
         return bool(self._refresh_token)
+
+    @property
+    def expiry_assumed(self) -> bool:
+        """True when the countdown is a 1h default, not FanDuel's own exp."""
+        return self._exp_assumed
+
+    @property
+    def expires_in(self) -> int:
+        return max(0, int(self._token_exp - time.time()))
 
     @property
     def mfa_pending(self) -> bool:
@@ -402,6 +413,7 @@ class FanDuelAuth:
             "product": self.product,
             "state": self.state,
             "installation_id": self.installation_id,
+            "exp_assumed": self._exp_assumed,
         }
 
     @classmethod
@@ -424,6 +436,7 @@ class FanDuelAuth:
         auth._token = state.get("token")
         auth._token_exp = state.get("token_exp", 0) or 0
         auth._refresh_token = state.get("refresh_token")
+        auth._exp_assumed = bool(state.get("exp_assumed"))
         return auth
 
     def set_manual_token(self, token: str) -> None:
@@ -437,11 +450,23 @@ class FanDuelAuth:
         try:
             # Decode without verification to read exp claim
             payload = jwt.decode(token, options={"verify_signature": False})
-            self._token_exp = payload.get("exp", time.time() + 3600)
+        except jwt.DecodeError:
+            payload = None
+        exp = payload.get("exp") if payload else None
+        if exp:
+            self._token_exp = float(exp)
+            self._exp_assumed = False
             logger.info(
-                "Token expires at %s (%ds)",
+                "Token expires at %s (%ds, from exp claim)",
                 self._token_exp, int(self._token_exp - time.time()),
             )
-        except jwt.DecodeError:
-            # Opaque (non-JWT) session id — assume the usual 1h lifetime.
+        else:
+            # Opaque session id, or a JWT carrying no exp — assume the usual
+            # 1h lifetime. Flagged so the countdown isn't shown as fact: the
+            # real token may die sooner, and the first 401 is how we'd learn.
             self._token_exp = time.time() + 3600
+            self._exp_assumed = True
+            logger.info(
+                "Session token has no exp claim (jwt=%s) — assuming 1h",
+                payload is not None,
+            )

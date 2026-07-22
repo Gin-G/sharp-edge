@@ -134,24 +134,34 @@ export function getAuthStatus(): Promise<AuthStatus> {
   return req<AuthStatus>('/auth/status');
 }
 
+/** expiry_assumed: the countdown is a 1h default because FanDuel's token
+ *  carried no exp claim. can_refresh: renewal survives a pod restart, since
+ *  the password itself is never persisted. */
+export interface SessionInfo {
+  status: string;
+  expires_in?: number;
+  expiry_assumed?: boolean;
+  can_refresh?: boolean;
+}
+
 export function login(
   email: string,
   password: string,
-): Promise<{ status: 'ok' | 'mfa_required'; expires_in?: number; message?: string }> {
+): Promise<SessionInfo & { status: 'ok' | 'mfa_required'; message?: string }> {
   return req('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   });
 }
 
-export function submitMfaCode(code: string): Promise<{ status: string; expires_in: number }> {
+export function submitMfaCode(code: string): Promise<SessionInfo> {
   return req('/auth/mfa', {
     method: 'POST',
     body: JSON.stringify({ code }),
   });
 }
 
-export function setManualToken(token: string): Promise<{ status: string; expires_in: number }> {
+export function setManualToken(token: string): Promise<SessionInfo> {
   return req('/auth/token', {
     method: 'POST',
     body: JSON.stringify({ token }),

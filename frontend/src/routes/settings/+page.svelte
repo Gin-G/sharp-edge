@@ -52,7 +52,7 @@
         mfaRequired = true;
         loginMsg = res.message ?? 'FanDuel emailed a verification code — enter it below.';
       } else {
-        loginMsg = `Authenticated — token valid for ${Math.floor((res.expires_in ?? 0) / 60)} min`;
+        loginMsg = sessionSummary(res);
         authStatus = { authenticated: true, expired: false };
         loginPassword = '';
       }
@@ -61,6 +61,27 @@
     } finally {
       loginLoading = false;
     }
+  }
+
+  /** Describe a new session without overstating what we know.
+   *
+   * FanDuel doesn't always put an exp claim on the session token; when it
+   * doesn't, the backend assumes an hour, so presenting that as fact would
+   * be inventing a number. And because the password is never persisted, a
+   * session with no refresh token dies on the next pod restart — worth
+   * saying up front rather than discovering at the next sync. */
+  function sessionSummary(
+    res: { expires_in?: number; expiry_assumed?: boolean; can_refresh?: boolean },
+    prefix = 'Authenticated',
+  ): string {
+    const mins = Math.floor((res.expires_in ?? 0) / 60);
+    const life = res.expiry_assumed
+      ? `assuming ~${mins} min (FanDuel sent no expiry)`
+      : `valid for ${mins} min`;
+    const renew = res.can_refresh
+      ? 'renews itself in the background'
+      : 'no refresh token — you will need to log in again after a restart';
+    return `${prefix} — ${life}; ${renew}.`;
   }
 
   let mfaRequired = false;
@@ -73,7 +94,7 @@
     loginErr = '';
     try {
       const res = await submitMfaCode(mfaCode.trim());
-      loginMsg = `Authenticated — token valid for ${Math.floor(res.expires_in / 60)} min`;
+      loginMsg = sessionSummary(res);
       authStatus = { authenticated: true, expired: false };
       mfaRequired = false;
       mfaCode = '';
@@ -92,7 +113,7 @@
     tokenErr = '';
     try {
       const res = await setManualToken(manualToken.trim());
-      tokenMsg = `Token accepted — valid for ${Math.floor(res.expires_in / 60)} min`;
+      tokenMsg = sessionSummary(res, 'Token accepted');
       authStatus = { authenticated: true, expired: false };
       manualToken = '';
     } catch (e) {

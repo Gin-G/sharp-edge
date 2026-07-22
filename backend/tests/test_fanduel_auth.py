@@ -88,6 +88,30 @@ def test_login_opaque_token_gets_default_expiry():
     auth = _auth(handler)
     _run(auth.login())
     assert not auth.is_expired  # assumed 1h lifetime
+    # Flagged, so the UI doesn't present a guess as FanDuel's own number.
+    assert auth.expiry_assumed
+
+
+def test_jwt_exp_is_reported_as_known():
+    def handler(request):
+        return httpx.Response(201, json={"sessions": [{"id": _jwt(1800)}]})
+
+    auth = _auth(handler)
+    _run(auth.login())
+    assert not auth.expiry_assumed
+    assert 1700 < auth.expires_in <= 1800  # from the claim, not the default
+
+
+def test_assumed_expiry_survives_a_restart():
+    """to_state/from_state is the pod-restart path; losing the flag there
+    would turn a guess into an assertion after every redeploy."""
+    def handler(request):
+        return httpx.Response(201, json={"sessions": [{"id": "not-a-jwt"}]})
+
+    auth = _auth(handler)
+    _run(auth.login())
+    restored = FanDuelAuth.from_state(auth.to_state(), basic_auth="x")
+    assert restored.expiry_assumed
 
 
 def test_login_mfa_required_captures_device_token():

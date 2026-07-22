@@ -164,6 +164,22 @@ class ManualTokenRequest(BaseModel):
     token: str
 
 
+def _session_payload(auth: FanDuelAuth) -> dict:
+    """What the UI needs to describe a session honestly.
+
+    expiry_assumed matters: without an exp claim the countdown is a 1h
+    guess, so a confident "valid for 60 min" would be made up. can_refresh
+    matters because the password is deliberately never persisted — after a
+    pod restart a session with no refresh token cannot renew itself.
+    """
+    return {
+        "status": "ok",
+        "expires_in": auth.expires_in,
+        "expiry_assumed": auth.expiry_assumed,
+        "can_refresh": auth.can_refresh,
+    }
+
+
 @app.post("/auth/login")
 async def login(req: LoginRequest, uid: str = Depends(get_uid)):
     # Reuse the stored installation id when there is one: FanDuel keys device
@@ -179,10 +195,7 @@ async def login(req: LoginRequest, uid: str = Depends(get_uid)):
         await auth.login()
         _fd_auth[uid] = auth
         await _persist_fd_auth(uid, auth)
-        return {
-            "status": "ok",
-            "expires_in": int(auth._token_exp - __import__("time").time()),
-        }
+        return _session_payload(auth)
     except FanDuelMFARequired as e:
         # Keep the credentials so /auth/mfa can finish the login.
         _fd_auth[uid] = auth
@@ -206,10 +219,7 @@ async def submit_mfa(req: MFARequest, uid: str = Depends(get_uid)):
     try:
         await auth.submit_mfa_code(req.code)
         await _persist_fd_auth(uid, auth)
-        return {
-            "status": "ok",
-            "expires_in": int(auth._token_exp - __import__("time").time()),
-        }
+        return _session_payload(auth)
     except FanDuelBotBlocked as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
@@ -224,10 +234,7 @@ async def set_manual_token(req: ManualTokenRequest, uid: str = Depends(get_uid))
         auth = FanDuelAuth("", "")
         _fd_auth[uid] = auth
     auth.set_manual_token(req.token)
-    return {
-        "status": "ok",
-        "expires_in": int(auth._token_exp - __import__("time").time()),
-    }
+    return _session_payload(auth)
 
 
 @app.get("/auth/status")
@@ -242,6 +249,12 @@ async def auth_status(uid: str = Depends(get_uid)):
         # refresh token or stored credentials, so "expired" is only terminal
         # for a bare manual-token session.
         "can_renew": auth.can_renew,
+        # can_renew is true whenever the password is still in memory, which
+        # hides whether renewal survives a restart. can_refresh is the part
+        # that does, since the password is never persisted.
+        "can_refresh": auth.can_refresh,
+        "expires_in": auth.expires_in,
+        "expiry_assumed": auth.expiry_assumed,
     }
 
 
