@@ -5,12 +5,21 @@ name: Post-deploy smoke
 # actually serving" check, since a stale pod would 404 them.
 #
 # The site sits behind a Cloudflare managed challenge, which blocks CI
-# runners. For this workflow to pass, add a Cloudflare WAF custom rule that
-# skips the challenge when the X-Smoke-Key request header equals the value
-# of the SMOKE_KEY repository secret (Security → WAF → Custom rules →
-# "Skip" action for expression: http.request.headers["x-smoke-key"][0] eq
-# "<secret value>"). Until that rule exists, this fails fast with a clear
-# error instead of timing out.
+# runners outright. Two things are needed to let this workflow through, and
+# until BOTH exist the probe is skipped rather than failed — a check that
+# cannot reach its target is noise, not a signal:
+#
+#   1. A SMOKE_KEY repository secret (Settings → Secrets and variables →
+#      Actions). Any long random string: openssl rand -hex 32
+#   2. A Cloudflare WAF custom rule on the sharp-edge.nickknows.net zone
+#      (Security → WAF → Custom rules), action "Skip" → "All remaining
+#      custom rules" + "Managed rules", with expression:
+#        (http.host eq "sharp-edge.nickknows.net"
+#         and starts_with(http.request.uri.path, "/api/")
+#         and http.request.headers["x-smoke-key"][0] eq "<same value>")
+#
+# Scoping the rule to /api/ keeps the bypass off the HTML app, so a leaked
+# key exposes only the same public endpoints the smoke test reads.
 
 on:
   workflow_run:
@@ -27,16 +36,35 @@ jobs:
         env:
           SMOKE_KEY: ${{ secrets.SMOKE_KEY }}
         run: |
-          BASE=https://sharp-edge.nickknows.net/api
-          HDR=()
-          [ -n "$SMOKE_KEY" ] && HDR=(-H "X-Smoke-Key: $SMOKE_KEY")
+          if [ -z "$SMOKE_KEY" ]; then
+            echo "::notice::SMOKE_KEY is not set, so Cloudflare would challenge this runner before it reached the API. Skipping the live probe — see the setup notes at the top of smoke.yml to enable it."
+            exit 0
+          fi
 
-          probe() {  # $1 = path; body -> /tmp/b, headers -> /tmp/h
-            curl -sS --max-time 20 -D /tmp/h -o /tmp/b "${HDR[@]}" "$BASE$1" || true
+          BASE=https://sharp-edge.nickknows.net/api
+
+          # Truncate both files first: on a timeout curl may never write, and a
+          # stale body from an earlier probe would then satisfy the next grep.
+          # That reads as a pass for an endpoint that never answered.
+          probe() {  # $1 = path; body -> /tmp/b, status -> $code
+            : > /tmp/b; : > /tmp/h
+            code=$(curl -sS --max-time 20 -D /tmp/h -o /tmp/b -w '%{http_code}' \
+                     -H "X-Smoke-Key: $SMOKE_KEY" "$BASE$1" || echo 000)
             if grep -qi '^cf-mitigated: challenge' /tmp/h; then
-              echo "::error::Cloudflare challenged the CI runner. Add a WAF skip rule keyed on the X-Smoke-Key header (see comments in smoke.yml) and set the SMOKE_KEY repo secret."
+              echo "::error::Cloudflare challenged the runner despite SMOKE_KEY being set — the WAF skip rule is missing or its key does not match the secret. See smoke.yml."
               exit 1
             fi
+          }
+
+          expect() {  # $1 = path, $2 = string the body must contain
+            probe "$1"
+            if [ "$code" != "200" ]; then
+              echo "::error::$1 returned HTTP $code"; exit 1
+            fi
+            if ! grep -q "$2" /tmp/b; then
+              echo "::error::$1 did not contain $2"; head -c 300 /tmp/b; exit 1
+            fi
+            echo "ok  $1"
           }
 
           # ArgoCD sync + image pull + pod rollout can take a while; retry the
@@ -44,17 +72,14 @@ jobs:
           ok=""
           for i in $(seq 1 30); do
             probe "/picks/track-record?screen=hr"
-            if grep -q '"overall"' /tmp/b; then ok=1; break; fi
-            echo "new pod not serving yet (attempt $i/30)"; sleep 30
+            if [ "$code" = "200" ] && grep -q '"overall"' /tmp/b; then ok=1; break; fi
+            echo "new pod not serving yet (attempt $i/30, HTTP $code)"; sleep 30
           done
           [ -n "$ok" ] || { echo "::error::track-record endpoint never came up"; exit 1; }
 
-          echo "--- health"
-          probe "/health"; grep -q '"ok"' /tmp/b
-          echo "--- screen status endpoints"
-          probe "/homers/screen/status";  grep -q '"available"' /tmp/b
-          probe "/batters/screen/status"; grep -q '"available"' /tmp/b
-          echo "--- pick tracking endpoints"
-          probe "/picks/track-record?screen=batter"; grep -q '"overall"' /tmp/b
-          probe "/picks/backfill/status"; grep -q '"running"' /tmp/b
+          expect "/health" '"ok"'
+          expect "/homers/screen/status" '"available"'
+          expect "/batters/screen/status" '"available"'
+          expect "/picks/track-record?screen=batter" '"overall"'
+          expect "/picks/backfill/status" '"running"'
           echo "smoke OK"
