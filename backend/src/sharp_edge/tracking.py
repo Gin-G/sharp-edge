@@ -116,9 +116,27 @@ def persist_screen_result(
 ) -> int:
     """Write a picks frame to model_picks. Existing (screen, date, batter)
     rows are left untouched, so calling this twice for the same day — or
-    backfilling a day the live screen already recorded — is safe."""
-    if picks_df is None or picks_df.empty or "batter_id" not in picks_df.columns:
-        return 0
+    backfilling a day the live screen already recorded — is safe.
+
+    The run itself is always logged, even when the frame is empty: a day
+    with no picks writes no rows, and without that marker a catch-up would
+    treat it as never screened and redo it on every restart."""
+    empty = (
+        picks_df is None or picks_df.empty or "batter_id" not in picks_df.columns
+    )
+    rows = [] if empty else _pick_rows(screen, picks_df, pick_date, source)
+    inserted = _run_db(_db.insert_picks(rows)) if rows else 0
+    _run_db(_db.record_screen_run(screen, pick_date.isoformat(), len(rows)))
+    logger.info(
+        "[tracking] %s %s: %d picks persisted (%d new, source=%s)",
+        screen, pick_date.isoformat(), len(rows), inserted, source,
+    )
+    return inserted
+
+
+def _pick_rows(
+    screen: str, picks_df: pd.DataFrame, pick_date: date, source: str
+) -> list[dict]:
     rows = []
     for rank, rec in enumerate(picks_df.to_dict(orient="records"), start=1):
         metrics = {k: _json_safe(v) for k, v in rec.items()}
@@ -139,12 +157,7 @@ def persist_screen_result(
             "metrics": json.dumps(metrics),
             "source": source,
         })
-    inserted = _run_db(_db.insert_picks(rows))
-    logger.info(
-        "[tracking] %s %s: %d picks persisted (%d new, source=%s)",
-        screen, pick_date.isoformat(), len(rows), inserted, source,
-    )
-    return inserted
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -275,8 +288,8 @@ def _full_plan(start: date, end: date, screens: list[str]) -> dict[date, list[st
 
 
 def _missing_plan(start: date, end: date, screens: list[str]) -> dict[date, list[str]]:
-    """Same range, minus the (date, screen) pairs already in the database."""
-    have = {s: _run_db(_db.pick_dates(s)) for s in screens}
+    """Same range, minus the (date, screen) pairs already screened."""
+    have = {s: _run_db(_db.screened_dates(s)) for s in screens}
     out = {}
     d = start
     while d <= end:

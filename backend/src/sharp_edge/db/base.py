@@ -106,9 +106,19 @@ class BetDatabase(ABC):
         dominates the row size."""
 
     @abstractmethod
-    async def pick_dates(self, screen: str) -> set[str]:
-        """Every pick_date that already has at least one row for a screen —
-        lets a catch-up run skip days it has already generated."""
+    async def record_screen_run(self, screen: str, pick_date: str, picks: int) -> None:
+        """Mark a (screen, date) as screened, whatever it produced.
+
+        Days that yield no picks — the pre-season window, off-days, the
+        All-Star break, a slate that filtered to nothing — write no
+        model_picks rows. Without a marker of its own, a catch-up sees those
+        days as missing on every restart and re-screens them forever."""
+
+    @abstractmethod
+    async def screened_dates(self, screen: str) -> set[str]:
+        """Dates a catch-up can skip: everything record_screen_run has
+        logged, plus any date that already has picks — history written
+        before the runs table existed still counts as done."""
 
     @abstractmethod
     async def update_pick_results(

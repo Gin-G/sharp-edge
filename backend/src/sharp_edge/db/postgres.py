@@ -83,6 +83,13 @@ CREATE TABLE IF NOT EXISTS model_picks (
     resolved_at TIMESTAMPTZ,
     PRIMARY KEY (screen, pick_date, batter_id)
 );
+CREATE TABLE IF NOT EXISTS screen_runs (
+    screen TEXT NOT NULL,
+    pick_date DATE NOT NULL,
+    picks INTEGER NOT NULL DEFAULT 0,
+    ran_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (screen, pick_date)
+);
 """
 
 INDEXES = [
@@ -372,10 +379,24 @@ class PostgresDatabase(BetDatabase):
             out.append(d)
         return out
 
-    async def pick_dates(self, screen: str) -> set[str]:
+    async def record_screen_run(self, screen: str, pick_date: str, picks: int) -> None:
+        from datetime import date as _date
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO screen_runs (screen, pick_date, picks)
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT (screen, pick_date)
+                   DO UPDATE SET picks = EXCLUDED.picks, ran_at = NOW()""",
+                screen, _date.fromisoformat(pick_date), picks,
+            )
+
+    async def screened_dates(self, screen: str) -> set[str]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT DISTINCT pick_date FROM model_picks WHERE screen = $1", screen
+                """SELECT pick_date FROM screen_runs WHERE screen = $1
+                   UNION
+                   SELECT DISTINCT pick_date FROM model_picks WHERE screen = $1""",
+                screen,
             )
         return {row["pick_date"].isoformat() for row in rows}
 

@@ -186,6 +186,16 @@ def test_catchup_plan_skips_days_already_recorded(tracked_db):
     }
 
 
+def test_catchup_skips_days_that_screened_to_nothing(tracked_db):
+    """A day with no games writes no picks. It still has to count as done —
+    otherwise every restart re-screens the pre-season window, the All-Star
+    break, and every empty slate, and the catch-up never converges."""
+    tracking.persist_screen_result("hr", pd.DataFrame(), TWO_DAYS_AGO, "backfill")
+
+    plan = tracking._missing_plan(TWO_DAYS_AGO, TWO_DAYS_AGO, ["hr", "batter"])
+    assert plan == {TWO_DAYS_AGO: ["batter"]}  # hr is done, despite zero rows
+
+
 def test_catchup_reports_up_to_date_when_nothing_missing(tracked_db):
     tracking.persist_screen_result("hr", _hr_picks(), YESTERDAY, "backfill")
     result = tracking.start_catchup(YESTERDAY, YESTERDAY, ["hr"])

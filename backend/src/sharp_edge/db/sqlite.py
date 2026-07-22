@@ -71,6 +71,13 @@ CREATE TABLE IF NOT EXISTS model_picks (
     resolved_at TEXT,
     PRIMARY KEY (screen, pick_date, batter_id)
 );
+CREATE TABLE IF NOT EXISTS screen_runs (
+    screen TEXT NOT NULL,
+    pick_date TEXT NOT NULL,
+    picks INTEGER NOT NULL DEFAULT 0,
+    ran_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (screen, pick_date)
+);
 CREATE INDEX IF NOT EXISTS idx_model_picks_screen_date ON model_picks(screen, pick_date);
 CREATE INDEX IF NOT EXISTS idx_model_picks_result ON model_picks(result);
 CREATE INDEX IF NOT EXISTS idx_bets_user_id ON bets(user_id);
@@ -329,9 +336,22 @@ class SQLiteDatabase(BetDatabase):
         )
         return [dict(row) for row in await cursor.fetchall()]
 
-    async def pick_dates(self, screen: str) -> set[str]:
+    async def record_screen_run(self, screen: str, pick_date: str, picks: int) -> None:
+        await self._db.execute(
+            """INSERT INTO screen_runs (screen, pick_date, picks)
+               VALUES (?, ?, ?)
+               ON CONFLICT (screen, pick_date)
+               DO UPDATE SET picks = excluded.picks, ran_at = datetime('now')""",
+            (screen, pick_date, picks),
+        )
+        await self._db.commit()
+
+    async def screened_dates(self, screen: str) -> set[str]:
         cursor = await self._db.execute(
-            "SELECT DISTINCT pick_date FROM model_picks WHERE screen = ?", (screen,)
+            """SELECT pick_date FROM screen_runs WHERE screen = ?
+               UNION
+               SELECT DISTINCT pick_date FROM model_picks WHERE screen = ?""",
+            (screen, screen),
         )
         return {row[0] for row in await cursor.fetchall()}
 
