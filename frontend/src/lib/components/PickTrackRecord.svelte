@@ -1,15 +1,21 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { getTrackRecord, startBackfill, getBackfillStatus } from '$lib/api';
+  import { cached, invalidate, peek } from '$lib/cache';
   import type { BackfillStatus } from '$lib/api';
   import type { TrackRecord } from '$lib/types';
 
   export let screen: 'hr' | 'batter';
   export let winLabel = 'HR';
 
-  let data: TrackRecord | null = null;
+  const cacheKey = `track-record:${screen}`;
+
+  // This panel renders on both the batters and homers pages, so it remounts on
+  // every switch between them — without the cache that's a full-season query
+  // against Postgres each time.
+  let data: TrackRecord | null = peek<TrackRecord>(cacheKey);
   let error = '';
-  let loading = true;
+  let loading = data === null;
   let showAll = false;
   let backfill: BackfillStatus | null = null;
   let backfillError = '';
@@ -17,9 +23,9 @@
 
   const PREVIEW_ROWS = 15;
 
-  async function loadRecord() {
+  async function loadRecord(force = false) {
     try {
-      data = await getTrackRecord(screen);
+      data = await cached(cacheKey, () => getTrackRecord(screen), { force });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -37,9 +43,11 @@
     if (backfill?.running) {
       pollTimer = setTimeout(pollBackfill, 5000);
     } else if (pollTimer) {
-      // A run just finished — refresh the record with the new history.
+      // A run just finished — it writes both screens, so drop every cached
+      // record, not just this panel's.
       pollTimer = null;
-      await loadRecord();
+      invalidate('track-record:');
+      await loadRecord(true);
     }
   }
 

@@ -1,21 +1,26 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { getBatterScreen, ApiError } from '$lib/api';
+  import { cached, peek } from '$lib/cache';
   import type { BatterScreen, BatterRow, HotBatRow } from '$lib/types';
   import PickTrackRecord from '$lib/components/PickTrackRecord.svelte';
 
-  let data: BatterScreen | null = null;
-  let loading = true;
+  const CACHE_KEY = 'batters:screen';
+
+  // Seed from the module cache so switching back to this tab paints the board
+  // immediately rather than re-running the whole fetch-and-spin cycle.
+  let data: BatterScreen | null = peek<BatterScreen>(CACHE_KEY);
+  let loading = data === null;
   let error = '';
   let warming = false;
   let warmingElapsed: number | null = null;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
-  async function load() {
+  async function load(force = false) {
     loading = true;
     error = '';
     try {
-      data = await getBatterScreen();
+      data = await cached(CACHE_KEY, getBatterScreen, { force });
       warming = false;
       warmingElapsed = null;
     } catch (e) {
@@ -72,7 +77,7 @@
     </div>
     <button
       class="px-3 py-1.5 rounded-lg text-sm font-medium bg-surface-700 text-slate-300 hover:bg-surface-600 disabled:opacity-50"
-      on:click={load}
+      on:click={() => load(true)}
       disabled={loading}
     >{loading ? 'Loading…' : 'Refresh'}</button>
   </div>

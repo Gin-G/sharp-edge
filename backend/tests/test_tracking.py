@@ -110,8 +110,16 @@ def test_resolve_outcomes(tracked_db):
     bat_rows = asyncio.run_coroutine_threadsafe(db.list_picks("batter"), loop).result(30)
     assert bat_rows[0]["result"] == "WIN" and bat_rows[0]["hits_actual"] == 1
 
+    # The default projection omits the metrics blob — nothing in the app reads
+    # it back, and it dominates row size over a full season.
+    assert "metrics" not in hr_rows[0]
+
     # NaN metrics must survive the JSON round-trip as null.
-    assert json.loads(by_id[333]["metrics"])["barrel_pct"] is None
+    with_metrics = asyncio.run_coroutine_threadsafe(
+        db.list_picks("hr", include_metrics=True), loop
+    ).result(30)
+    blob = {r["batter_id"]: r["metrics"] for r in with_metrics}
+    assert json.loads(blob[333])["barrel_pct"] is None
 
 
 def test_non_starter_voids_even_with_events(tracked_db):

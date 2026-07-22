@@ -7,7 +7,7 @@ from typing import Optional
 
 import aiosqlite
 
-from .base import BetDatabase
+from .base import PICK_COLUMNS, BetDatabase
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bets (
@@ -309,6 +309,7 @@ class SQLiteDatabase(BetDatabase):
         since: Optional[str] = None,
         until: Optional[str] = None,
         unresolved_only: bool = False,
+        include_metrics: bool = False,
     ) -> list[dict]:
         conditions = ["screen = ?"]
         params: list = [screen]
@@ -320,8 +321,9 @@ class SQLiteDatabase(BetDatabase):
             params.append(until)
         if unresolved_only:
             conditions.append("result IS NULL")
+        cols = "*" if include_metrics else PICK_COLUMNS
         cursor = await self._db.execute(
-            f"SELECT * FROM model_picks WHERE {' AND '.join(conditions)} "
+            f"SELECT {cols} FROM model_picks WHERE {' AND '.join(conditions)} "
             "ORDER BY pick_date DESC, rank ASC",
             params,
         )

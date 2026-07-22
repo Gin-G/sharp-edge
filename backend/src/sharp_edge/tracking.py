@@ -57,6 +57,8 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 
 _resolve_lock = threading.Lock()
 
+_BACKFILL_PAUSE_SECONDS = 0.5
+
 _backfill_lock = threading.Lock()
 _backfill_state: dict = {
     "running": False,
@@ -404,6 +406,11 @@ def _do_backfill(plan: dict[date, list[str]]) -> None:
                             )
             with _backfill_lock:
                 _backfill_state["days_done"] += 1
+            # The pod is capped at 1 CPU and serves the site from this same
+            # process. Yielding between days keeps a long catch-up from
+            # starving request handlers; it only stretches a ~120-day run by
+            # about a minute.
+            time.sleep(_BACKFILL_PAUSE_SECONDS)
 
         resolve_pending()
     except Exception as e:

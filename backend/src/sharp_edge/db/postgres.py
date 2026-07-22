@@ -7,7 +7,7 @@ from typing import Optional
 
 import asyncpg
 
-from .base import BetDatabase
+from .base import PICK_COLUMNS, BetDatabase
 
 
 def _to_dt(v):
@@ -342,6 +342,7 @@ class PostgresDatabase(BetDatabase):
         since: Optional[str] = None,
         until: Optional[str] = None,
         unresolved_only: bool = False,
+        include_metrics: bool = False,
     ) -> list[dict]:
         from datetime import date as _date
         conditions = ["screen = $1"]
@@ -359,7 +360,8 @@ class PostgresDatabase(BetDatabase):
             conditions.append("result IS NULL")
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT * FROM model_picks WHERE {' AND '.join(conditions)} "
+                f"SELECT {'*' if include_metrics else PICK_COLUMNS} FROM model_picks "
+                f"WHERE {' AND '.join(conditions)} "
                 "ORDER BY pick_date DESC, rank ASC",
                 *params,
             )

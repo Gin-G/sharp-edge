@@ -8,6 +8,13 @@ it via the get_uid dependency.
 from abc import ABC, abstractmethod
 from typing import Optional
 
+# Every model_picks column except `metrics` — see BetDatabase.list_picks.
+PICK_COLUMNS = (
+    "screen, pick_date, batter_id, batter, team, pitcher_id, opposing_pitcher, "
+    "venue, score, rank, tags, source, result, hr_actual, hits_actual, "
+    "pa_actual, created_at, resolved_at"
+)
+
 
 class BetDatabase(ABC):
     @abstractmethod
@@ -91,7 +98,12 @@ class BetDatabase(ABC):
         since: Optional[str] = None,
         until: Optional[str] = None,
         unresolved_only: bool = False,
-    ) -> list[dict]: ...
+        include_metrics: bool = False,
+    ) -> list[dict]:
+        """Picks for a screen, newest first. ``metrics`` is a per-pick JSON
+        blob that nothing in the app reads back — it's kept for later model
+        analysis — so it is omitted unless asked for; over a full season it
+        dominates the row size."""
 
     @abstractmethod
     async def pick_dates(self, screen: str) -> set[str]:
