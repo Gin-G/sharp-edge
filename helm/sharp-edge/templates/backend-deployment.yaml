@@ -47,6 +47,22 @@ spec:
             - name: FANDUEL_BASIC_AUTH
               value: {{ .Values.backend.env.FANDUEL_BASIC_AUTH | quote }}
             {{- end }}
+            {{- if .Values.backend.existingSecret }}
+            # Rotating SESSION_SECRET invalidates every issued cookie. Each
+            # visitor gets a new uid, and any FanDuel session stored under the
+            # old uid is orphaned — expect to log in again after a change.
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.existingSecret }}
+                  key: SESSION_SECRET
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.existingSecret }}
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            {{- end }}
             - name: CORS_ORIGINS
               value: {{ printf "[\"https://%s\"]" .Values.frontend.fqdn | quote }}
             - name: HOST

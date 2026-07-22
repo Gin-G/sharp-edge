@@ -80,6 +80,10 @@ BROWSER_HEADERS = {
 }
 
 _MFA_MARKERS = ("mfa", "new-device", "new_device", "verification", "verify")
+_DEVICE_TOKEN_KEYS = (
+    "new_device_token", "newdevicetoken", "device_token", "devicetoken",
+    "verification_token", "verificationtoken", "challenge_token",
+)
 _BOT_MARKERS = ("perimeterx", "px-captcha", "_px", "captcha", "blockscript")
 
 
@@ -124,6 +128,10 @@ class FanDuelAuth:
         # Short-lived (~5 min) challenge token handed back when FanDuel wants
         # a device-verification code; posted back alongside the code.
         self._device_token: Optional[str] = None
+        # Set when FanDuel holds a login for verification. Tracked separately
+        # from the token above so a challenge we couldn't parse still lets
+        # the user submit their code.
+        self._mfa_required: bool = False
 
     @property
     def token(self) -> Optional[str]:
@@ -140,7 +148,7 @@ class FanDuelAuth:
     @property
     def mfa_pending(self) -> bool:
         """True between a device-verification challenge and its code."""
-        return bool(self._device_token)
+        return self._mfa_required
 
     @property
     def can_renew(self) -> bool:
@@ -210,6 +218,17 @@ class FanDuelAuth:
         if resp.status_code in (401, 403, 409, 428) and any(
             m in lowered for m in _MFA_MARKERS
         ):
+            # Mark the challenge independently of the token. FanDuel has
+            # already emailed the code by this point, so refusing the code
+            # later just because the token wasn't where we looked would
+            # strand the login with no way forward.
+            self._mfa_required = True
+            if not self._device_token:
+                logger.error(
+                    "MFA challenge with no device token found — submitting "
+                    "the code without it. status=%s body=%s",
+                    resp.status_code, body_text[:1000],
+                )
             raise FanDuelMFARequired(
                 "FanDuel emailed a verification code to this account "
                 "(new device). Submit it to finish logging in."
@@ -261,16 +280,28 @@ class FanDuelAuth:
         return token, refresh
 
     @staticmethod
-    def _extract_device_token(data: dict) -> Optional[str]:
-        sessions = data.get("sessions") or []
-        first = sessions[0] if sessions else {}
-        error = data.get("error") if isinstance(data.get("error"), dict) else {}
-        return (
-            data.get("new_device_token")
-            or data.get("newDeviceToken")
-            or first.get("new_device_token")
-            or error.get("new_device_token")
-        )
+    def _extract_device_token(data) -> Optional[str]:
+        """Find the new-device challenge token anywhere in the payload.
+
+        FanDuel's challenge envelope isn't documented and the token has been
+        reported at the top level, inside sessions[], and inside error, so
+        this walks the whole structure for a key that names a device token
+        rather than guessing one path. Missing it is not a cosmetic failure:
+        the token has to be echoed back with the code.
+        """
+        stack = [data]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    flat = key.replace("-", "_").replace(" ", "").lower()
+                    if isinstance(value, str) and value and flat in _DEVICE_TOKEN_KEYS:
+                        return value
+                    if isinstance(value, (dict, list)):
+                        stack.append(value)
+            elif isinstance(node, list):
+                stack.extend(node)
+        return None
 
     async def refresh(self) -> str:
         """Mint a fresh session token from the stored refresh token — no
@@ -308,25 +339,31 @@ class FanDuelAuth:
         /sessions along with the new_device_token from the challenge, and
         that call returns the real session token. The device token is only
         valid for about five minutes, so a slow user has to start over.
+
+        If the challenge came back in a shape we couldn't parse the token
+        out of, the code is sent on its own rather than refusing outright —
+        FanDuel has already emailed it, and a rejected attempt gives a far
+        better error than "no pending login".
         """
-        if not self._device_token:
+        if not self._mfa_required:
             raise FanDuelAuthError(
                 "No pending device verification — log in again to request a "
                 "new code."
             )
+        body = {
+            "code": code.strip(),
+            "product": self.product,
+            "location": self.state,
+        }
+        if self._device_token:
+            body["new_device_token"] = self._device_token
         async with httpx.AsyncClient(timeout=30.0, transport=self._transport) as client:
             resp = await client.post(
-                FD_SESSION_URL,
-                json={
-                    "code": code.strip(),
-                    "new_device_token": self._device_token,
-                    "product": self.product,
-                    "location": self.state,
-                },
-                headers=self._headers(),
+                FD_SESSION_URL, json=body, headers=self._headers()
             )
         token = self._handle_login_response(resp)
         self._device_token = None
+        self._mfa_required = False
         return token
 
     async def ensure_token(self, force: bool = False) -> str:

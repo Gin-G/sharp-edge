@@ -143,6 +143,48 @@ def test_mfa_code_posts_back_to_sessions_with_device_token():
     assert not auth.mfa_pending  # consumed
 
 
+def test_device_token_found_when_nested():
+    """The challenge envelope's shape isn't documented, so the token is
+    searched for rather than read from one fixed path."""
+    def handler(request):
+        return httpx.Response(401, json={
+            "error": {"code": "new_device_verification_required",
+                      "details": {"newDeviceToken": "D-NESTED"}},
+        })
+
+    auth = _auth(handler)
+    with pytest.raises(FanDuelMFARequired):
+        _run(auth.login())
+    assert auth._device_token == "D-NESTED"
+
+
+def test_mfa_code_submits_even_when_device_token_was_not_parsed():
+    """FanDuel emails the code as soon as it challenges, so a token we
+    couldn't parse must not strand the login — the user has a code in hand
+    and no way to use it. Reproduces a 400 "No pending login" from the live
+    site: the challenge was detected, the token was not, and mfa_pending
+    used to key off the token."""
+    sent = {}
+
+    def handler(request):
+        body = json.loads(request.content)
+        if "code" in body:
+            sent.update(body)
+            return httpx.Response(201, json={"sessions": [{"id": _jwt()}]})
+        # Challenge with the token somewhere we do not look.
+        return httpx.Response(401, json={"error": "new_device_verification_required",
+                                         "mystery_field": "D-?"})
+
+    auth = _auth(handler)
+    with pytest.raises(FanDuelMFARequired):
+        _run(auth.login())
+    assert auth.mfa_pending and auth._device_token is None
+
+    assert _run(auth.submit_mfa_code("123456"))
+    assert "new_device_token" not in sent  # omitted, not sent as null
+    assert not auth.mfa_pending
+
+
 def test_mfa_without_pending_challenge_raises():
     def handler(request):  # pragma: no cover - must not be reached
         raise AssertionError("no request should be made")

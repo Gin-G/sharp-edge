@@ -35,6 +35,16 @@ backend:
       # downcasts help, but the first cold run still needs real headroom.
       cpu: "1"
       memory: 4Gi
+  # Name of an existing Secret holding the genuinely-sensitive values —
+  # intended to be produced by an ExternalSecret synced from OpenBao. Keys:
+  #   SESSION_SECRET     required. Signs the session cookie that scopes every
+  #                      visitor's data. Without it the app falls back to the
+  #                      literal default in config.py, which is public.
+  #                      Generate with: openssl rand -hex 32
+  #   ANTHROPIC_API_KEY  optional. Only the /chat endpoint needs it.
+  # Left empty the deployment starts with the dev defaults — fine locally,
+  # not fine in production.
+  existingSecret: ""
   env:
     LOG_LEVEL: info
     # FanDuel's static app key for direct login (Authorization: Basic on the
