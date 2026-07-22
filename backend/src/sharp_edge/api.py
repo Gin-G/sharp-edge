@@ -445,12 +445,18 @@ async def batter_screen():
             },
         )
 
+    status = warm_status()
+    if status.get("stale"):
+        # Serving fallback data — kick a non-blocking refresh (cooldown-guarded)
+        # so the screen self-heals once upstream recovers.
+        warm_async()
     hot = cached.hot_bats.rename(columns={"Name": "batter", "Tm": "team"})
     return {
         "picks": _df_to_records(cached.picks),
         "hot_bats": _df_to_records(hot),
         "today": _df_to_records(cached.today),
-        "as_of": warm_status()["cached_date"],
+        "as_of": status["cached_date"],
+        "stale": bool(status.get("stale")),
     }
 
 
@@ -501,11 +507,17 @@ async def homer_screen():
             },
         )
 
+    status = warm_status()
+    if status.get("stale"):
+        # Serving fallback data — kick a non-blocking refresh (cooldown-guarded)
+        # so the screen self-heals once upstream recovers.
+        warm_async()
     return {
         "picks": _df_to_records(cached.picks),
         "hot_pop": _df_to_records(cached.hot_pop),
         "today": _df_to_records(cached.today),
-        "as_of": warm_status()["cached_date"],
+        "as_of": status["cached_date"],
+        "stale": bool(status.get("stale")),
     }
 
 

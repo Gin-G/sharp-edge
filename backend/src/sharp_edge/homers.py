@@ -44,6 +44,7 @@ from sharp_edge._data import (
     _pitcher_info,
     _roster_batters,
     fetch_schedule,
+    statcast_is_stale,
 )
 
 logger = logging.getLogger(__name__)
@@ -218,6 +219,14 @@ _warm_date: Optional[date] = None
 _warm_error: Optional[str] = None
 _warming: bool = False
 _warm_started_at: Optional[float] = None
+# Whether the current _warm_result was built from degraded (stale parquet)
+# Statcast data. When True, warm_async re-warms after a cooldown so the screen
+# self-heals once upstream recovers, instead of serving stale data all day.
+_warm_stale: bool = False
+
+# Minimum gap between re-warm attempts while serving stale data, so a sustained
+# upstream outage isn't hammered on every request.
+_STALE_REWARM_COOLDOWN = 300.0
 
 
 def get_cached() -> Optional[HRScreenResult]:
@@ -236,11 +245,12 @@ def warm_status() -> dict:
             "cached_date": _warm_date.isoformat() if _warm_date else None,
             "has_cache": _warm_result is not None and _warm_date == date.today(),
             "last_error": _warm_error,
+            "stale": _warm_stale,
         }
 
 
 def _do_warm(target_date: date) -> None:
-    global _warm_result, _warm_date, _warming, _warm_error
+    global _warm_result, _warm_date, _warming, _warm_error, _warm_stale
     try:
         logger.info("[homers] warm-up started for %s", target_date.isoformat())
         result = screen_today_hr(verbose=False)
@@ -248,15 +258,22 @@ def _do_warm(target_date: date) -> None:
             _warm_result = result
             _warm_date = target_date
             _warm_error = None
+            _warm_stale = statcast_is_stale()
         logger.info(
-            "[homers] warm-up complete (%d picks, %d hot, %d today)",
+            "[homers] warm-up complete (%d picks, %d hot, %d today)%s",
             len(result.picks), len(result.hot_pop), len(result.today),
+            " [STALE]" if _warm_stale else "",
         )
-        # Persist today's picks and settle prior unresolved ones. Tracking
-        # failures must never take down the screen itself.
+        # Persist today's picks and settle prior unresolved ones. Skip the
+        # persist on a stale (degraded) load: persist_screen_result is
+        # insert-once and marks the day screened, so recording degraded picks
+        # would pin them for good and block the catch-up from redoing the day.
+        # Leaving it unrecorded lets the re-warm / catch-up record it once a
+        # fresh scrape lands. Tracking failures must never take down the screen.
         try:
             from sharp_edge import tracking
-            tracking.persist_screen_result("hr", result.picks, target_date)
+            if not _warm_stale:
+                tracking.persist_screen_result("hr", result.picks, target_date)
             tracking.resolve_pending()
         except Exception:
             logger.exception("[homers] pick tracking failed")
@@ -270,14 +287,26 @@ def _do_warm(target_date: date) -> None:
 
 
 def warm_async() -> dict:
-    """Trigger background warm-up if stale/absent. Non-blocking."""
+    """Trigger background warm-up if stale/absent. Non-blocking.
+
+    A fresh result for today short-circuits. A *stale* result (built from
+    fallback parquet) still serves, but triggers a background re-warm once the
+    cooldown has elapsed so the screen refreshes itself when upstream recovers.
+    """
     global _warming, _warm_started_at
     today = date.today()
     with _state_lock:
-        if _warm_result is not None and _warm_date == today:
+        have_today = _warm_result is not None and _warm_date == today
+        if have_today and not _warm_stale:
             return {"status": "ready"}
         if _warming:
             return {"status": "warming"}
+        # Stale-but-usable: only re-warm after the cooldown to avoid hammering
+        # an upstream that's still down.
+        if have_today and _warm_stale and _warm_started_at is not None and (
+            time.time() - _warm_started_at < _STALE_REWARM_COOLDOWN
+        ):
+            return {"status": "ready", "stale": True}
         _warming = True
         _warm_started_at = time.time()
     threading.Thread(target=_do_warm, args=(today,), daemon=True).start()

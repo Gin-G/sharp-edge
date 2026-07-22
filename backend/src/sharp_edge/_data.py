@@ -63,6 +63,17 @@ _statcast_cache: Optional[pd.DataFrame] = None
 _statcast_loaded_on: Optional[date] = None
 _statcast_lock = threading.Lock()
 
+# True when the most recent load had to fall back to on-disk parquet (or skip a
+# year) because a live scrape failed — e.g. an upstream outage or a DNS blip.
+# The data is still usable, just not freshly scraped. Surfaced to the API so the
+# UI can flag "may be stale" instead of the endpoint 500ing.
+_statcast_stale: bool = False
+
+
+def statcast_is_stale() -> bool:
+    """Whether the currently-served Statcast data came from a degraded load."""
+    return _statcast_stale
+
 
 def statcast_loaded_on() -> Optional[date]:
     """Date the in-memory Statcast cache was loaded. The current-year scrape
@@ -130,7 +141,7 @@ def _load_statcast(years_back: int = 3) -> pd.DataFrame:
     so pod restarts don't redo the multi-minute scrape. Past seasons are
     immutable; only the current year is re-scraped on each cold start.
     """
-    global _statcast_cache, _statcast_loaded_on
+    global _statcast_cache, _statcast_loaded_on, _statcast_stale
     with _statcast_lock:
         if _statcast_cache is not None:
             return _statcast_cache
@@ -138,6 +149,7 @@ def _load_statcast(years_back: int = 3) -> pd.DataFrame:
         _FILTERED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         today = date.today()
         frames: list[pd.DataFrame] = []
+        stale = False
 
         for year in range(today.year - years_back + 1, today.year + 1):
             path = _FILTERED_CACHE_DIR / f"events_{year}.parquet"
@@ -153,7 +165,27 @@ def _load_statcast(years_back: int = 3) -> pd.DataFrame:
                 "[statcast] scraping %s (%s -> %s)",
                 year, date(year, 3, 15).isoformat(), year_end.isoformat(),
             )
-            year_df = _scrape_year_filtered(year, year_end)
+            try:
+                year_df = _scrape_year_filtered(year, year_end)
+            except Exception as e:
+                # Live scrape failed (upstream outage, DNS blip, rate-limit).
+                # Fall back to the last good parquet for this year if we have
+                # one; otherwise skip the year. Either way we serve degraded
+                # data instead of 500ing the whole screen.
+                stale = True
+                if path.exists():
+                    logger.warning(
+                        "[statcast] scrape of %s failed (%s); serving cached "
+                        "parquet %s", year, e, path,
+                    )
+                    frames.append(pd.read_parquet(path))
+                else:
+                    logger.warning(
+                        "[statcast] scrape of %s failed (%s); no cached parquet, "
+                        "skipping year", year, e,
+                    )
+                continue
+
             try:
                 year_df.to_parquet(path, index=False)
                 logger.info(
@@ -166,21 +198,38 @@ def _load_statcast(years_back: int = 3) -> pd.DataFrame:
             frames.append(year_df)
             gc.collect()
 
-        _statcast_cache = pd.concat(frames, ignore_index=True)
+        if not frames:
+            # Every scrape failed and nothing was on disk — genuinely can't
+            # serve. Let this propagate so the endpoint reports the outage.
+            raise RuntimeError(
+                "statcast unavailable: live scrape failed and no cached "
+                "parquet on disk"
+            )
+
+        result = pd.concat(frames, ignore_index=True)
         del frames
         gc.collect()
 
-        if "barrel" not in _statcast_cache.columns:
-            _statcast_cache["barrel"] = float("nan")
+        if "barrel" not in result.columns:
+            result["barrel"] = float("nan")
 
-        _statcast_cache["game_date"] = pd.to_datetime(
-            _statcast_cache["game_date"], errors="coerce"
+        result["game_date"] = pd.to_datetime(
+            result["game_date"], errors="coerce"
         )
-        _statcast_loaded_on = today
         logger.info(
-            "[statcast] loaded %d PA-ending events total", len(_statcast_cache)
+            "[statcast] loaded %d PA-ending events total%s",
+            len(result), " (STALE — degraded load)" if stale else "",
         )
-        return _statcast_cache
+
+        _statcast_stale = stale
+        # Only pin the process cache on a clean load. When degraded, leave it
+        # unset (and don't advance _statcast_loaded_on) so a later call retries
+        # the live scrape once upstream recovers, and so the tracking catch-up
+        # doesn't assume today's games are covered when they may not be.
+        if not stale:
+            _statcast_cache = result
+            _statcast_loaded_on = today
+        return result
 
 
 # ---------------------------------------------------------------------------
