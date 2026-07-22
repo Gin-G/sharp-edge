@@ -94,6 +94,11 @@ class BetDatabase(ABC):
     ) -> list[dict]: ...
 
     @abstractmethod
+    async def pick_dates(self, screen: str) -> set[str]:
+        """Every pick_date that already has at least one row for a screen —
+        lets a catch-up run skip days it has already generated."""
+
+    @abstractmethod
     async def update_pick_results(
         self, screen: str, pick_date: str, results: list[dict]
     ) -> int:

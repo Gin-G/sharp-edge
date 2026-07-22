@@ -327,6 +327,12 @@ class SQLiteDatabase(BetDatabase):
         )
         return [dict(row) for row in await cursor.fetchall()]
 
+    async def pick_dates(self, screen: str) -> set[str]:
+        cursor = await self._db.execute(
+            "SELECT DISTINCT pick_date FROM model_picks WHERE screen = ?", (screen,)
+        )
+        return {row[0] for row in await cursor.fetchall()}
+
     async def update_pick_results(
         self, screen: str, pick_date: str, results: list[dict]
     ) -> int:

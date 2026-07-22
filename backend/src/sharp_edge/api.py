@@ -79,7 +79,12 @@ async def lifespan(app: FastAPI):
     try:
         from . import tracking
         tracking.configure(_db, asyncio.get_running_loop())
-        logger.info("tracking: configured")
+        # Build the season's pick history without anyone having to press a
+        # button: once the Statcast cache is warm, generate + settle any day
+        # that isn't recorded yet. Already-recorded days are skipped, so a
+        # restart costs one query.
+        tracking.schedule_catchup()
+        logger.info("tracking: configured, catch-up scheduled")
     except ImportError:
         logger.info("tracking: models extras not installed, skipping")
     except Exception as e:

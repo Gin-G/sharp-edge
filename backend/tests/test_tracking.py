@@ -166,6 +166,24 @@ def test_track_record_aggregation(tracked_db):
     assert len(tr["picks"]) == 2 and "metrics" not in tr["picks"][0]
 
 
+def test_catchup_plan_skips_days_already_recorded(tracked_db):
+    """The startup catch-up only regenerates (day, screen) pairs that have no
+    picks yet, so a pod restart costs one query instead of a rescreen."""
+    tracking.persist_screen_result("hr", _hr_picks(), TWO_DAYS_AGO, "backfill")
+
+    plan = tracking._missing_plan(TWO_DAYS_AGO, YESTERDAY, ["hr", "batter"])
+    assert plan == {
+        TWO_DAYS_AGO: ["batter"],
+        YESTERDAY: ["hr", "batter"],
+    }
+
+
+def test_catchup_reports_up_to_date_when_nothing_missing(tracked_db):
+    tracking.persist_screen_result("hr", _hr_picks(), YESTERDAY, "backfill")
+    result = tracking.start_catchup(YESTERDAY, YESTERDAY, ["hr"])
+    assert result["status"] == "up-to-date"
+
+
 def test_screen_rows_carry_ids():
     """The persistence layer keys on batter_id/pitcher_id — both screens must
     emit them. Guards against a refactor dropping the columns silently."""

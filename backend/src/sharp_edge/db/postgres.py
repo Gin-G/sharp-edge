@@ -370,6 +370,13 @@ class PostgresDatabase(BetDatabase):
             out.append(d)
         return out
 
+    async def pick_dates(self, screen: str) -> set[str]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT pick_date FROM model_picks WHERE screen = $1", screen
+            )
+        return {row["pick_date"].isoformat() for row in rows}
+
     async def update_pick_results(
         self, screen: str, pick_date: str, results: list[dict]
     ) -> int:

@@ -8,9 +8,12 @@ module closes the loop:
                           (called from each screen's warm-up thread)
   resolve_pending       — settle past picks against actual Statcast
                           outcomes: WIN / LOSS / VOID (didn't play)
-  start_backfill        — regenerate historical picks with as-of stats so
-                          the track record extends back before persistence
-                          existed, then resolve them
+  start_catchup         — generate + settle any day of the season that has
+                          no picks yet, using as-of stats. Runs itself at
+                          startup, so the history builds once and then
+                          persists; restarts find nothing left to do.
+  start_backfill        — same machinery, but regenerates a date range
+                          unconditionally (manual re-runs)
   build_track_record    — aggregate hit rate overall / per edge / per day
 
 Everything here runs in worker threads (warm-up daemons, the backfill
@@ -255,9 +258,100 @@ def backfill_status() -> dict:
         return state
 
 
+def season_start(year: Optional[int] = None) -> date:
+    """Conventional start of the regular season. Screening a date with no
+    games is a no-op, so this only has to be early enough."""
+    return date((year or date.today().year), 3, 20)
+
+
+def _full_plan(start: date, end: date, screens: list[str]) -> dict[date, list[str]]:
+    out, d = {}, start
+    while d <= end:
+        out[d] = list(screens)
+        d += timedelta(days=1)
+    return out
+
+
+def _missing_plan(start: date, end: date, screens: list[str]) -> dict[date, list[str]]:
+    """Same range, minus the (date, screen) pairs already in the database."""
+    have = {s: _run_db(_db.pick_dates(s)) for s in screens}
+    out = {}
+    d = start
+    while d <= end:
+        todo = [s for s in screens if d.isoformat() not in have[s]]
+        if todo:
+            out[d] = todo
+        d += timedelta(days=1)
+    return out
+
+
 def start_backfill(start: date, end: date, screens: list[str]) -> dict:
-    """Kick off a background backfill of picks for [start, end]. One at a
-    time; returns immediately with the current state."""
+    """Kick off a background backfill of picks for [start, end], regenerating
+    every day in the range. One at a time; returns immediately."""
+    return _launch(_full_plan(start, end, screens), start, end, screens)
+
+
+def start_catchup(
+    start: Optional[date] = None,
+    end: Optional[date] = None,
+    screens: Optional[list[str]] = None,
+) -> dict:
+    """Fill in only the days that have no picks yet, then settle them.
+
+    Called at startup so the season's history builds itself once and then
+    persists — no button to press, and a restart re-runs nothing because
+    every day already recorded is skipped.
+    """
+    start = start or season_start()
+    end = end or (date.today() - timedelta(days=1))
+    screens = screens or list(SCREENS)
+    if end < start:
+        return {"status": "nothing-to-do", "days": 0}
+    try:
+        plan = _missing_plan(start, end, screens)
+    except Exception as e:
+        logger.warning("[tracking] catch-up planning failed: %s", e)
+        return {"status": "error", "error": str(e)}
+    if not plan:
+        logger.info("[tracking] catch-up: history complete through %s", end)
+        # Days already recorded may still be unsettled (picked yesterday,
+        # resolved today), so always sweep for pending outcomes.
+        threading.Thread(target=_safe_resolve, daemon=True).start()
+        return {"status": "up-to-date", "days": 0}
+    logger.info("[tracking] catch-up: %d day(s) missing between %s and %s",
+                len(plan), start, end)
+    return _launch(plan, start, end, screens)
+
+
+def schedule_catchup(max_wait_seconds: int = 3600) -> None:
+    """Run the catch-up once the shared Statcast cache is warm.
+
+    Deferring keeps the season's regeneration from competing with the
+    startup warm-up that today's screens are waiting on — by the time the
+    cache is loaded the per-day work is mostly cheap API lookups.
+    """
+    def _wait_then_run() -> None:
+        deadline = time.time() + max_wait_seconds
+        while statcast_loaded_on() is None and time.time() < deadline:
+            time.sleep(15)
+        try:
+            start_catchup()
+        except Exception:
+            logger.exception("[tracking] catch-up failed to start")
+
+    threading.Thread(target=_wait_then_run, daemon=True).start()
+
+
+def _safe_resolve() -> None:
+    try:
+        resolve_pending()
+    except Exception:
+        logger.exception("[tracking] resolve sweep failed")
+
+
+def _launch(
+    plan: dict[date, list[str]], start: date, end: date, screens: list[str]
+) -> dict:
     with _backfill_lock:
         if _backfill_state["running"]:
             return {"status": "already-running", **backfill_status()}
@@ -270,19 +364,17 @@ def start_backfill(start: date, end: date, screens: list[str]) -> dict:
             "screens": list(screens),
             "current_date": None,
             "days_done": 0,
-            "days_total": (end - start).days + 1,
+            "days_total": len(plan),
             "picks_written": 0,
             "errors": [],
             "last_error": None,
         })
-    threading.Thread(
-        target=_do_backfill, args=(start, end, list(screens)), daemon=True
-    ).start()
+    threading.Thread(target=_do_backfill, args=(plan,), daemon=True).start()
     return {"status": "started", "start": start.isoformat(), "end": end.isoformat(),
-            "screens": list(screens)}
+            "screens": list(screens), "days": len(plan)}
 
 
-def _do_backfill(start: date, end: date, screens: list[str]) -> None:
+def _do_backfill(plan: dict[date, list[str]]) -> None:
     from sharp_edge import batters, homers
     from sharp_edge._data import _pitcher_gamelog_starts
 
@@ -291,11 +383,10 @@ def _do_backfill(start: date, end: date, screens: list[str]) -> None:
         # stale log would hide recent starts from the as-of filter.
         _pitcher_gamelog_starts.cache_clear()
 
-        d = start
-        while d <= end:
+        for d in sorted(plan):
             with _backfill_lock:
                 _backfill_state["current_date"] = d.isoformat()
-            for screen in screens:
+            for screen in plan[d]:
                 try:
                     if screen == "hr":
                         result = homers.screen_hr_for_date(d, verbose=False)
@@ -313,7 +404,6 @@ def _do_backfill(start: date, end: date, screens: list[str]) -> None:
                             )
             with _backfill_lock:
                 _backfill_state["days_done"] += 1
-            d += timedelta(days=1)
 
         resolve_pending()
     except Exception as e:
