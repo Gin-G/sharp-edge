@@ -1,17 +1,19 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { sendChat } from '$lib/api';
+  import { claudeKey } from '$lib/claudeKey';
   import type { ChatMessage } from '$lib/types';
 
   const MODELS = [
-    { id: 'claude-sonnet-4-20250514', label: 'Sonnet 4' },
-    { id: 'claude-opus-4-20250514',   label: 'Opus 4' },
-    { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+    { id: 'claude-sonnet-5', label: 'Sonnet 5' },
+    { id: 'claude-opus-4-8', label: 'Opus 4.8' },
+    { id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
   ] as const;
 
   let messages: ChatMessage[] = [];
   let input = '';
   let model = MODELS[0].id;
+  $: connected = !!$claudeKey;
   let thinking = false;
   let error = '';
   let msgList: HTMLElement;
@@ -28,6 +30,10 @@
   async function send() {
     const text = input.trim();
     if (!text || thinking) return;
+    if (!$claudeKey) {
+      error = 'Connect your Anthropic API key in Settings to use chat.';
+      return;
+    }
     input = '';
     error = '';
 
@@ -39,7 +45,7 @@
     try {
       // Send all messages except the static welcome
       const history = messages.filter((m) => m !== WELCOME);
-      const result = await sendChat(history, model);
+      const result = await sendChat(history, $claudeKey, model);
       // Replace messages with server-returned history (includes tool call turns)
       messages = [WELCOME, ...result.messages];
     } catch (e) {
@@ -101,6 +107,14 @@
     </div>
   </div>
 
+  {#if !connected}
+    <div class="card border-amber-800 bg-amber-950/30 text-amber-200 text-sm mb-4 flex-shrink-0">
+      Chat runs on your own Anthropic account.
+      <a href="/settings" class="underline font-medium">Connect your API key in Settings</a>
+      to start — it stays in this browser and is never stored on the server.
+    </div>
+  {/if}
+
   {#if error}
     <div class="card border-red-800 bg-red-950/30 text-red-300 text-sm mb-4 flex-shrink-0">
       {error}
@@ -161,17 +175,17 @@
       <textarea
         bind:value={input}
         on:keydown={onKeydown}
-        placeholder="Ask about your bets, a potential wager, league breakdown…"
+        placeholder={connected ? 'Ask about your bets, a potential wager, league breakdown…' : 'Connect your Anthropic key in Settings to chat'}
         rows="2"
         class="input resize-none pr-12 py-3 leading-relaxed"
-        disabled={thinking}
+        disabled={thinking || !connected}
       ></textarea>
       <div class="absolute right-3 bottom-3 text-xs text-slate-600">⏎ send</div>
     </div>
     <button
       class="btn-primary flex-shrink-0 h-[52px] px-5"
       on:click={send}
-      disabled={thinking || !input.trim()}
+      disabled={thinking || !input.trim() || !connected}
     >
       {#if thinking}
         <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">

@@ -56,12 +56,6 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.backend.existingSecret }}
                   key: SESSION_SECRET
-            - name: ANTHROPIC_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.backend.existingSecret }}
-                  key: ANTHROPIC_API_KEY
-                  optional: true
             {{- end }}
             - name: CORS_ORIGINS
               value: {{ printf "[\"https://%s\"]" .Values.frontend.fqdn | quote }}

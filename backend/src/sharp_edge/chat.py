@@ -130,14 +130,37 @@ async def handle_tool_call(
     return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
 
+DEFAULT_MODEL = "claude-sonnet-5"
+
+
+async def verify_key(api_key: str) -> None:
+    """Cheapest possible round-trip to confirm a key is live and funded.
+
+    Lets the settings "Connect" button fail fast with a real error from
+    Anthropic (bad key, no credit) instead of surfacing it only on the
+    user's first chat message.
+    """
+    client = AsyncAnthropic(api_key=api_key)
+    await client.messages.create(
+        model=DEFAULT_MODEL,
+        max_tokens=1,
+        messages=[{"role": "user", "content": "hi"}],
+    )
+
+
 async def chat(
     messages: list[dict],
     db: BetDatabase,
     api_key: str,
     user_id: str,
-    model: str = "claude-sonnet-4-20250514",
+    model: str = DEFAULT_MODEL,
 ) -> dict:
-    """Send a chat message to Claude with betting tools, scoped to user_id."""
+    """Send a chat message to Claude with betting tools, scoped to user_id.
+
+    api_key is always the caller's own key — Sharp Edge never holds an
+    Anthropic key of its own, so a visitor's chat spends their credits, not
+    the operator's. The key is used for this request only and never stored.
+    """
     client = AsyncAnthropic(api_key=api_key)
 
     response = await client.messages.create(

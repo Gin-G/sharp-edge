@@ -120,11 +120,22 @@ export function getBackfillStatus(): Promise<BackfillStatus> {
 
 export function sendChat(
   messages: ChatMessage[],
-  model = 'claude-sonnet-4-20250514',
+  apiKey: string,
+  model = 'claude-sonnet-5',
 ): Promise<{ response: string; messages: ChatMessage[] }> {
   return req('/chat', {
     method: 'POST',
-    body: JSON.stringify({ messages, model }),
+    body: JSON.stringify({ messages, api_key: apiKey, model }),
+  });
+}
+
+/** Validate a pasted Anthropic key with a cheap round-trip before marking
+ *  it connected. The key rides in the request body only — never stored
+ *  server-side. */
+export function verifyChatKey(apiKey: string): Promise<{ status: string }> {
+  return req('/chat/verify', {
+    method: 'POST',
+    body: JSON.stringify({ api_key: apiKey }),
   });
 }
 

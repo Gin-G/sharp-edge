@@ -22,7 +22,7 @@ from .fanduel.auth import (
 )
 from .fanduel.client import FanDuelClient
 from .analysis import score_bet, generate_insights
-from .chat import chat as chat_with_claude
+from .chat import chat as chat_with_claude, verify_key, DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -619,7 +619,38 @@ async def picks_backfill_status():
 
 class ChatRequest(BaseModel):
     messages: list[dict]
-    model: str = "claude-sonnet-4-20250514"
+    # The visitor's own Anthropic key — Sharp Edge holds none of its own, so
+    # chat spends the user's credits. Used for this request only, never stored.
+    api_key: str
+    model: str = DEFAULT_MODEL
+
+
+class VerifyKeyRequest(BaseModel):
+    api_key: str
+
+
+def _anthropic_error(e: Exception) -> HTTPException:
+    """Map an Anthropic SDK error to a status the frontend can act on,
+    without leaking the key or a stack trace."""
+    from anthropic import APIStatusError
+    if isinstance(e, APIStatusError):
+        # 401 bad key, 400 no credit, 429 rate limit — pass the status
+        # through so the UI can tell "fix your key" from "try again later".
+        detail = getattr(e, "message", None) or str(e)
+        return HTTPException(e.status_code, detail)
+    return HTTPException(502, f"Anthropic request failed: {type(e).__name__}")
+
+
+@app.post("/chat/verify")
+async def chat_verify(req: VerifyKeyRequest):
+    """Confirm a pasted key works before the settings UI marks it connected."""
+    if not req.api_key.strip():
+        raise HTTPException(400, "No API key provided")
+    try:
+        await verify_key(req.api_key.strip())
+    except Exception as e:
+        raise _anthropic_error(e)
+    return {"status": "ok"}
 
 
 @app.post("/chat")
@@ -628,16 +659,18 @@ async def chat_endpoint(
     uid: str = Depends(get_uid),
     db: BetDatabase = Depends(get_db),
 ):
-    if not settings.anthropic_api_key:
-        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
-    result = await chat_with_claude(
-        messages=req.messages,
-        db=db,
-        api_key=settings.anthropic_api_key,
-        user_id=uid,
-        model=req.model,
-    )
-    return result
+    if not req.api_key.strip():
+        raise HTTPException(400, "Connect your Anthropic API key to use chat.")
+    try:
+        return await chat_with_claude(
+            messages=req.messages,
+            db=db,
+            api_key=req.api_key.strip(),
+            user_id=uid,
+            model=req.model,
+        )
+    except Exception as e:
+        raise _anthropic_error(e)
 
 
 # ------------------------------------------------------------------

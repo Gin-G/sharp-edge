@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     # recapture from DevTools on the POST to api.fanduel.com/sessions.
     fanduel_basic_auth: str = "ODc2YmQzOTE3ZWE3NjYwMjZhNjg5YzY2MTE5OGQxMmU6"
 
-    # Anthropic (for chat endpoint)
-    anthropic_api_key: str = ""
+    # Anthropic keys are supplied per-request by each visitor (chat spends
+    # their credits, not the operator's), so none is configured server-side.
 
     # Server
     host: str = "0.0.0.0"

@@ -1,7 +1,36 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getAuthStatus, login, submitMfaCode, setManualToken, syncBets, importCsv } from '$lib/api';
+  import { getAuthStatus, login, submitMfaCode, setManualToken, syncBets, importCsv, verifyChatKey } from '$lib/api';
+  import { claudeKey, maskKey } from '$lib/claudeKey';
   import type { AuthStatus } from '$lib/types';
+
+  // Claude connection — key lives in sessionStorage via the store, never on
+  // the server. The field is only bound while entering a new key.
+  let claudeInput = '';
+  let claudeVerifying = false;
+  let claudeErr = '';
+
+  async function connectClaude() {
+    const key = claudeInput.trim();
+    if (!key) return;
+    claudeVerifying = true;
+    claudeErr = '';
+    try {
+      await verifyChatKey(key);   // fail fast on a bad or unfunded key
+      claudeKey.set(key);
+      claudeInput = '';
+    } catch (e) {
+      claudeErr = e instanceof Error ? e.message : String(e);
+    } finally {
+      claudeVerifying = false;
+    }
+  }
+
+  function disconnectClaude() {
+    claudeKey.set('');
+    claudeInput = '';
+    claudeErr = '';
+  }
 
   // --- Auth state ---
   let authStatus: AuthStatus = { authenticated: false };
@@ -175,6 +204,53 @@
     {:else}
       <div class="w-2.5 h-2.5 rounded-full bg-red-400"></div>
       <span class="text-sm text-red-300 font-medium">Not authenticated</span>
+    {/if}
+  </div>
+
+  <!-- Connect Claude -->
+  <div class="card space-y-4">
+    <div class="flex items-center justify-between">
+      <h2 class="text-sm font-semibold text-slate-200">Connect Claude</h2>
+      {#if $claudeKey}
+        <span class="inline-flex items-center gap-1.5 text-xs text-emerald-300 font-medium">
+          <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+          Connected · {maskKey($claudeKey)}
+        </span>
+      {/if}
+    </div>
+
+    {#if $claudeKey}
+      <p class="text-sm text-slate-400">
+        The chat runs on your Anthropic account with this key. It's kept in this
+        browser only (cleared when you close the tab) and is never stored on the server.
+      </p>
+      <button class="btn-ghost text-sm" on:click={disconnectClaude}>Disconnect</button>
+    {:else}
+      <p class="text-sm text-slate-400">
+        The chat analyst uses your own Anthropic API key, so it spends your credits, not ours.
+        Create one at
+        <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener"
+           class="underline text-slate-300">console.anthropic.com</a>,
+        then paste it below. It's held in this browser only and never stored on the server.
+      </p>
+      <div class="flex gap-2">
+        <input
+          type="password"
+          bind:value={claudeInput}
+          placeholder="sk-ant-..."
+          autocomplete="off"
+          class="input flex-1 font-mono text-sm"
+          on:keydown={(e) => e.key === 'Enter' && connectClaude()}
+        />
+        <button
+          class="btn-primary text-sm px-4"
+          on:click={connectClaude}
+          disabled={claudeVerifying || !claudeInput.trim()}
+        >{claudeVerifying ? 'Verifying…' : 'Connect'}</button>
+      </div>
+      {#if claudeErr}
+        <p class="text-sm text-red-400">{claudeErr}</p>
+      {/if}
     {/if}
   </div>
 
