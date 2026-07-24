@@ -310,6 +310,16 @@ class SQLiteDatabase(BetDatabase):
         await self._db.commit()
         return inserted
 
+    async def delete_picks(
+        self, screen: str, pick_date: str, unresolved_only: bool = True
+    ) -> int:
+        sql = "DELETE FROM model_picks WHERE screen = ? AND pick_date = ?"
+        if unresolved_only:
+            sql += " AND result IS NULL"
+        cursor = await self._db.execute(sql, (screen, pick_date))
+        await self._db.commit()
+        return cursor.rowcount
+
     async def list_picks(
         self,
         screen: str,

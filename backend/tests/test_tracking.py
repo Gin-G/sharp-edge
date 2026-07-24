@@ -176,6 +176,77 @@ def test_pa_fallback_when_no_lineup_data(tracked_db, monkeypatch):
     assert rows[0]["result"] == "WIN"
 
 
+def test_persist_replace_supersedes_pending_picks(tracked_db):
+    """A re-screen with replace=True clears the day's still-pending picks and
+    records the new slate — the fix for a swapped probable pitcher leaving a
+    stale matchup in the recorded picks."""
+    db, loop = tracked_db
+    run = lambda c: asyncio.run_coroutine_threadsafe(c, loop).result(30)
+    morning = pd.DataFrame([
+        {"batter": "Realmuto", "batter_id": 501, "team": "PHI",
+         "opposing_pitcher": "Will Warren", "pitcher_id": 900,
+         "venue": "P", "hr_score": 20.0, "tags": "BvP"},
+    ])
+    assert tracking.persist_screen_result("hr", morning, YESTERDAY) == 1
+
+    updated = pd.DataFrame([
+        {"batter": "Harper", "batter_id": 502, "team": "PHI",
+         "opposing_pitcher": "Cam Schlittler", "pitcher_id": 901,
+         "venue": "P", "hr_score": 22.0, "tags": "BvP"},
+    ])
+    assert tracking.persist_screen_result("hr", updated, YESTERDAY, replace=True) == 1
+
+    rows = run(db.list_picks("hr"))
+    assert [r["batter"] for r in rows] == ["Harper"]  # Realmuto/Warren gone
+
+
+def test_persist_replace_keeps_settled_picks(tracked_db):
+    """replace only clears *unresolved* rows, so a settled outcome survives a
+    later re-screen of the same day."""
+    db, loop = tracked_db
+    run = lambda c: asyncio.run_coroutine_threadsafe(c, loop).result(30)
+    tracking.persist_screen_result("hr", _hr_picks(), TWO_DAYS_AGO, "backfill")
+    tracking.resolve_pending()  # 111 -> WIN, 333 -> VOID (both resolved)
+
+    # Re-screen the same day with replace: resolved rows must remain.
+    tracking.persist_screen_result("hr", pd.DataFrame(), TWO_DAYS_AGO, replace=True)
+    rows = run(db.list_picks("hr"))
+    assert {r["batter_id"] for r in rows} == {111, 333}
+
+
+def test_regenerate_today_replaces_from_live_cache(tracked_db, monkeypatch):
+    """regenerate_today swaps today's recorded picks for the current warm board."""
+    db, loop = tracked_db
+    run = lambda c: asyncio.run_coroutine_threadsafe(c, loop).result(30)
+    today = date.today()
+
+    stale = pd.DataFrame([
+        {"batter": "Realmuto", "batter_id": 501, "team": "PHI",
+         "opposing_pitcher": "Will Warren", "pitcher_id": 900,
+         "tags": "BvP", "recent_avg": 0.33},
+    ])
+    tracking.persist_screen_result("batter", stale, today)
+
+    from sharp_edge import batters, homers
+
+    class _Cached:
+        def __init__(self, picks): self.picks = picks
+    fresh = pd.DataFrame([
+        {"batter": "Harper", "batter_id": 502, "team": "PHI",
+         "opposing_pitcher": "Cam Schlittler", "pitcher_id": 901,
+         "tags": "BvP", "recent_avg": 0.35},
+    ])
+    monkeypatch.setattr(batters, "get_cached", lambda: _Cached(fresh))
+    monkeypatch.setattr(homers, "get_cached", lambda: None)  # no HR cache yet
+
+    out = tracking.regenerate_today()
+    assert out["batter"] == {"status": "ok", "picks": 1}
+    assert out["hr"] == {"status": "no-cache"}
+
+    rows = run(db.list_picks("batter"))
+    assert [r["batter"] for r in rows] == ["Harper"]
+
+
 def test_no_boxscore_leaves_zero_pa_pending(tracked_db, monkeypatch):
     """Without a box score, a pick with no Statcast PA can't be told apart from
     data that simply hasn't published yet — so it stays pending rather than

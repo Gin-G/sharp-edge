@@ -343,6 +343,18 @@ class PostgresDatabase(BetDatabase):
                 inserted += int(status.rsplit(" ", 1)[-1])
         return inserted
 
+    async def delete_picks(
+        self, screen: str, pick_date: str, unresolved_only: bool = True
+    ) -> int:
+        from datetime import date as _date
+        sql = "DELETE FROM model_picks WHERE screen = $1 AND pick_date = $2"
+        if unresolved_only:
+            sql += " AND result IS NULL"
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(sql, screen, _date.fromisoformat(pick_date))
+        # asyncpg returns e.g. "DELETE 3"
+        return int(status.rsplit(" ", 1)[-1])
+
     async def list_picks(
         self,
         screen: str,

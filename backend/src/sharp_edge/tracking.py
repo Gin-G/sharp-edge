@@ -112,11 +112,17 @@ def _json_safe(v):
 
 
 def persist_screen_result(
-    screen: str, picks_df: pd.DataFrame, pick_date: date, source: str = "live"
+    screen: str, picks_df: pd.DataFrame, pick_date: date, source: str = "live",
+    replace: bool = False,
 ) -> int:
     """Write a picks frame to model_picks. Existing (screen, date, batter)
     rows are left untouched, so calling this twice for the same day — or
     backfilling a day the live screen already recorded — is safe.
+
+    ``replace`` first clears the date's *unresolved* picks, so an intra-day
+    re-screen supersedes the morning's slate (a swapped probable pitcher
+    produces a different pick set) instead of piling new rows on top of it.
+    Settled outcomes are never touched, so this is only meaningful for today.
 
     The run itself is always logged, even when the frame is empty: a day
     with no picks writes no rows, and without that marker a catch-up would
@@ -125,11 +131,12 @@ def persist_screen_result(
         picks_df is None or picks_df.empty or "batter_id" not in picks_df.columns
     )
     rows = [] if empty else _pick_rows(screen, picks_df, pick_date, source)
+    deleted = _run_db(_db.delete_picks(screen, pick_date.isoformat())) if replace else 0
     inserted = _run_db(_db.insert_picks(rows)) if rows else 0
     _run_db(_db.record_screen_run(screen, pick_date.isoformat(), len(rows)))
     logger.info(
-        "[tracking] %s %s: %d picks persisted (%d new, source=%s)",
-        screen, pick_date.isoformat(), len(rows), inserted, source,
+        "[tracking] %s %s: %d picks persisted (%d new, %d replaced, source=%s)",
+        screen, pick_date.isoformat(), len(rows), inserted, deleted, source,
     )
     return inserted
 
@@ -380,6 +387,26 @@ def reresolve_voids(since: Optional[str] = None, dry_run: bool = False) -> dict:
                     fixed, len(by_date), " (dry-run)" if dry_run else "",
                 )
         return summary
+
+
+def regenerate_today() -> dict:
+    """Replace today's still-pending picks with each screen's current board.
+
+    Forces the recorded picks to match the latest slate immediately — e.g.
+    after a probable pitcher was swapped — instead of waiting for the next
+    scheduled intra-day refresh. Reuses each screen's already-warm result, so
+    it's cheap; a screen with no warm cache yet is skipped."""
+    from sharp_edge import batters, homers
+    today = date.today()
+    out: dict = {}
+    for screen, mod in (("hr", homers), ("batter", batters)):
+        cached = mod.get_cached()
+        if cached is None:
+            out[screen] = {"status": "no-cache"}
+            continue
+        n = persist_screen_result(screen, cached.picks, today, replace=True)
+        out[screen] = {"status": "ok", "picks": n}
+    return out
 
 
 # ---------------------------------------------------------------------------

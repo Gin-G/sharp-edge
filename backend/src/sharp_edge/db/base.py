@@ -127,3 +127,13 @@ class BetDatabase(ABC):
         """Settle picks for one date. Each result dict carries batter_id,
         result ('WIN'/'LOSS'/'VOID'), hr_actual, hits_actual, pa_actual.
         Returns the number of rows updated."""
+
+    @abstractmethod
+    async def delete_picks(
+        self, screen: str, pick_date: str, unresolved_only: bool = True
+    ) -> int:
+        """Delete a (screen, date)'s picks so a fresh set can replace them —
+        used when an intra-day re-screen supersedes the morning's slate (e.g. a
+        probable pitcher was swapped). Defaults to unresolved_only so a settled
+        outcome is never destroyed; today's picks are always unresolved.
+        Returns the number of rows deleted."""

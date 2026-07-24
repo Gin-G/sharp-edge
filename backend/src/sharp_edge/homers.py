@@ -255,7 +255,7 @@ def warm_status() -> dict:
         }
 
 
-def _do_warm(target_date: date, persist: bool = True) -> None:
+def _do_warm(target_date: date, replace: bool = False) -> None:
     global _warm_result, _warm_date, _warming, _warm_error, _warm_stale
     try:
         logger.info("[homers] warm-up started for %s", target_date.isoformat())
@@ -277,15 +277,15 @@ def _do_warm(target_date: date, persist: bool = True) -> None:
         # Leaving it unrecorded lets the re-warm / catch-up record it once a
         # fresh scrape lands. Tracking failures must never take down the screen.
         #
-        # persist=False on an intra-day refresh: the day's picks were already
-        # recorded by the first warm-up, and persist is insert-once, so a
-        # refresh whose slate changed (a swapped probable) would *add* the new
-        # batters alongside the originals and double-count the day. The board
-        # still refreshes; only the recorded pick set stays the morning's.
+        # replace=True on an intra-day refresh: today's slate may have changed
+        # (a swapped probable), so the fresh set supersedes the morning's still-
+        # pending picks rather than piling new rows on top of it.
         try:
             from sharp_edge import tracking
-            if persist and not _warm_stale:
-                tracking.persist_screen_result("hr", result.picks, target_date)
+            if not _warm_stale:
+                tracking.persist_screen_result(
+                    "hr", result.picks, target_date, replace=replace
+                )
             tracking.resolve_pending()
         except Exception:
             logger.exception("[homers] pick tracking failed")
@@ -324,9 +324,10 @@ def warm_async() -> dict:
             return {"status": "ready", "stale": True}
         _warming = True
         _warm_started_at = now
-    # An intra-day refresh (we already have today's result) must not re-persist.
+    # An intra-day refresh (we already have today's result) replaces the day's
+    # still-pending picks with the fresh slate; the first warm-up inserts.
     threading.Thread(
-        target=_do_warm, args=(today,), kwargs={"persist": not have_today}, daemon=True
+        target=_do_warm, args=(today,), kwargs={"replace": have_today}, daemon=True
     ).start()
     return {"status": "warming"}
 

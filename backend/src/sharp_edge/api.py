@@ -582,6 +582,16 @@ async def picks_resolve():
     return await asyncio.to_thread(tracking.resolve_pending)
 
 
+@app.post("/picks/regenerate-today")
+async def picks_regenerate_today():
+    """Replace today's still-pending picks with the current live board for each
+    screen — forces the recorded picks to match the latest slate right away
+    (e.g. after a probable pitcher change) instead of waiting for the next
+    intra-day refresh."""
+    tracking = _get_tracking()
+    return await asyncio.to_thread(tracking.regenerate_today)
+
+
 @app.post("/picks/reresolve-voids")
 async def picks_reresolve_voids(since: Optional[str] = None, dry_run: bool = False):
     """Repair picks frozen as VOID by re-checking them against the box score.
