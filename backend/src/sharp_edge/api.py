@@ -582,6 +582,23 @@ async def picks_resolve():
     return await asyncio.to_thread(tracking.resolve_pending)
 
 
+@app.post("/picks/reresolve-voids")
+async def picks_reresolve_voids(since: Optional[str] = None, dry_run: bool = False):
+    """Repair picks frozen as VOID by re-checking them against the box score.
+
+    Fixes VOIDs written prematurely from lagging Statcast data: a pick on a
+    player who actually started and took a plate appearance becomes WIN/LOSS.
+    Genuine voids are left untouched. ``since`` (YYYY-MM-DD) limits the scan;
+    ``dry_run=true`` reports the corrections without writing them."""
+    tracking = _get_tracking()
+    if since is not None:
+        try:
+            date.fromisoformat(since)
+        except ValueError as e:
+            raise HTTPException(400, f"bad since date: {e}")
+    return await asyncio.to_thread(tracking.reresolve_voids, since, dry_run)
+
+
 class BackfillRequest(BaseModel):
     start: str
     end: Optional[str] = None
