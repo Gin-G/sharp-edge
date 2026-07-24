@@ -228,6 +228,12 @@ _warm_stale: bool = False
 # upstream outage isn't hammered on every request.
 _STALE_REWARM_COOLDOWN = 300.0
 
+# Freshness window for a healthy (non-stale) result. Probable pitchers and
+# lineups get announced and changed through the day, so the morning's warm-up
+# goes out of date; past this age warm_async kicks a background re-warm (while
+# still serving the current cache) so the board picks the changes up.
+_WARM_TTL = 90 * 60.0
+
 
 def get_cached() -> Optional[HRScreenResult]:
     with _state_lock:
@@ -249,7 +255,7 @@ def warm_status() -> dict:
         }
 
 
-def _do_warm(target_date: date) -> None:
+def _do_warm(target_date: date, persist: bool = True) -> None:
     global _warm_result, _warm_date, _warming, _warm_error, _warm_stale
     try:
         logger.info("[homers] warm-up started for %s", target_date.isoformat())
@@ -270,9 +276,15 @@ def _do_warm(target_date: date) -> None:
         # would pin them for good and block the catch-up from redoing the day.
         # Leaving it unrecorded lets the re-warm / catch-up record it once a
         # fresh scrape lands. Tracking failures must never take down the screen.
+        #
+        # persist=False on an intra-day refresh: the day's picks were already
+        # recorded by the first warm-up, and persist is insert-once, so a
+        # refresh whose slate changed (a swapped probable) would *add* the new
+        # batters alongside the originals and double-count the day. The board
+        # still refreshes; only the recorded pick set stays the morning's.
         try:
             from sharp_edge import tracking
-            if not _warm_stale:
+            if persist and not _warm_stale:
                 tracking.persist_screen_result("hr", result.picks, target_date)
             tracking.resolve_pending()
         except Exception:
@@ -287,29 +299,35 @@ def _do_warm(target_date: date) -> None:
 
 
 def warm_async() -> dict:
-    """Trigger background warm-up if stale/absent. Non-blocking.
+    """Trigger a background warm-up if the cache is absent, aged, or stale.
+    Non-blocking — a live result keeps serving while a refresh runs.
 
-    A fresh result for today short-circuits. A *stale* result (built from
-    fallback parquet) still serves, but triggers a background re-warm once the
-    cooldown has elapsed so the screen refreshes itself when upstream recovers.
+    A result younger than _WARM_TTL short-circuits. Past that age the morning's
+    probables/lineups may have changed, so a background re-warm is kicked (it
+    doesn't re-persist — the day's picks were recorded by the first warm-up). A
+    *stale* result (built from fallback parquet) refreshes on its own shorter
+    cooldown so the screen self-heals when upstream recovers.
     """
     global _warming, _warm_started_at
     today = date.today()
+    now = time.time()
     with _state_lock:
         have_today = _warm_result is not None and _warm_date == today
-        if have_today and not _warm_stale:
+        age = (now - _warm_started_at) if _warm_started_at is not None else None
+        if have_today and not _warm_stale and age is not None and age < _WARM_TTL:
             return {"status": "ready"}
         if _warming:
             return {"status": "warming"}
         # Stale-but-usable: only re-warm after the cooldown to avoid hammering
         # an upstream that's still down.
-        if have_today and _warm_stale and _warm_started_at is not None and (
-            time.time() - _warm_started_at < _STALE_REWARM_COOLDOWN
-        ):
+        if have_today and _warm_stale and age is not None and age < _STALE_REWARM_COOLDOWN:
             return {"status": "ready", "stale": True}
         _warming = True
-        _warm_started_at = time.time()
-    threading.Thread(target=_do_warm, args=(today,), daemon=True).start()
+        _warm_started_at = now
+    # An intra-day refresh (we already have today's result) must not re-persist.
+    threading.Thread(
+        target=_do_warm, args=(today,), kwargs={"persist": not have_today}, daemon=True
+    ).start()
     return {"status": "warming"}
 
 

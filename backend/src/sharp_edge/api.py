@@ -458,11 +458,11 @@ async def batter_screen():
             },
         )
 
+    # Non-blocking, self-guarded: refreshes in the background only when the
+    # cache is aged past its TTL (picks up mid-day probable/lineup changes) or
+    # is serving degraded fallback data — otherwise a cheap no-op.
+    warm_async()
     status = warm_status()
-    if status.get("stale"):
-        # Serving fallback data — kick a non-blocking refresh (cooldown-guarded)
-        # so the screen self-heals once upstream recovers.
-        warm_async()
     hot = cached.hot_bats.rename(columns={"Name": "batter", "Tm": "team"})
     return {
         "picks": _df_to_records(cached.picks),
@@ -520,11 +520,11 @@ async def homer_screen():
             },
         )
 
+    # Non-blocking, self-guarded: refreshes in the background only when the
+    # cache is aged past its TTL (picks up mid-day probable/lineup changes) or
+    # is serving degraded fallback data — otherwise a cheap no-op.
+    warm_async()
     status = warm_status()
-    if status.get("stale"):
-        # Serving fallback data — kick a non-blocking refresh (cooldown-guarded)
-        # so the screen self-heals once upstream recovers.
-        warm_async()
     return {
         "picks": _df_to_records(cached.picks),
         "hot_pop": _df_to_records(cached.hot_pop),
