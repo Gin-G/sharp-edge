@@ -38,6 +38,22 @@ def _synthetic_statcast() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# Authoritative box score batting lines, kept consistent with the synthetic
+# Statcast frame above. This is the primary settlement source; a batter absent
+# from a date's map genuinely took no plate appearance (e.g. 333, who never
+# played). Resolution only falls back to Statcast when this is empty.
+_SYNTHETIC_BOXSCORE = {
+    TWO_DAYS_AGO.isoformat(): {
+        111: {"pa": 3, "hits": 2, "hr": 1},
+        222: {"pa": 2, "hits": 0, "hr": 0},
+        444: {"pa": 1, "hits": 1, "hr": 1},
+    },
+    YESTERDAY.isoformat(): {
+        111: {"pa": 2, "hits": 1, "hr": 0},
+    },
+}
+
+
 @pytest.fixture()
 def tracked_db(tmp_path, monkeypatch):
     """Tracking configured against a temp SQLite db and a synthetic Statcast
@@ -47,6 +63,10 @@ def tracked_db(tmp_path, monkeypatch):
     monkeypatch.setattr(_data, "_statcast_loaded_on", date.today())
     monkeypatch.setattr(
         tracking, "_starters_for_date", lambda dstr: frozenset({111, 222})
+    )
+    monkeypatch.setattr(
+        tracking, "_boxscore_batting_for_date",
+        lambda dstr: dict(_SYNTHETIC_BOXSCORE.get(dstr, {})),
     )
 
     loop = asyncio.new_event_loop()
@@ -154,6 +174,69 @@ def test_pa_fallback_when_no_lineup_data(tracked_db, monkeypatch):
 
     rows = asyncio.run_coroutine_threadsafe(db.list_picks("hr"), loop).result(30)
     assert rows[0]["result"] == "WIN"
+
+
+def test_no_boxscore_leaves_zero_pa_pending(tracked_db, monkeypatch):
+    """Without a box score, a pick with no Statcast PA can't be told apart from
+    data that simply hasn't published yet — so it stays pending rather than
+    being frozen as a wrong VOID. This is the regression that made real hits
+    (Clement, Springer) show up as void."""
+    db, loop = tracked_db
+    monkeypatch.setattr(tracking, "_boxscore_batting_for_date", lambda dstr: {})
+    tracking.persist_screen_result("hr", _hr_picks(), TWO_DAYS_AGO, "backfill")
+    tracking.resolve_pending()
+
+    rows = asyncio.run_coroutine_threadsafe(db.list_picks("hr"), loop).result(30)
+    by_id = {r["batter_id"]: r for r in rows}
+    # 111 has Statcast events, so it still settles from the fallback.
+    assert by_id[111]["result"] == "WIN"
+    # 333 has neither box score nor Statcast PA — left pending, not VOID.
+    assert by_id[333]["result"] is None
+
+
+def test_reresolve_fixes_premature_void(tracked_db):
+    """A pick frozen VOID (Statcast lag) is corrected to its real WIN/LOSS once
+    the box score is available."""
+    db, loop = tracked_db
+    picks = pd.DataFrame([
+        {"batter": "Test Slugger", "batter_id": 111, "team": "Test Team",
+         "opposing_pitcher": "Test Pitcher", "pitcher_id": 999,
+         "tags": "BvP", "recent_avg": 0.350},
+    ])
+    tracking.persist_screen_result("batter", picks, YESTERDAY)
+    # Simulate the premature void: settled before the data published.
+    asyncio.run_coroutine_threadsafe(
+        db.update_pick_results("batter", YESTERDAY.isoformat(), [
+            {"batter_id": 111, "result": "VOID",
+             "hr_actual": 0, "hits_actual": 0, "pa_actual": 0},
+        ]), loop,
+    ).result(30)
+
+    # Dry run reports the fix without writing it.
+    preview = tracking.reresolve_voids(dry_run=True)
+    assert preview["batter"]["fixed"] == 1
+    still_void = asyncio.run_coroutine_threadsafe(
+        db.list_picks("batter"), loop).result(30)
+    assert still_void[0]["result"] == "VOID"
+
+    # Real run rewrites it to the actual outcome.
+    summary = tracking.reresolve_voids()
+    assert summary["batter"]["fixed"] == 1
+    rows = asyncio.run_coroutine_threadsafe(db.list_picks("batter"), loop).result(30)
+    assert rows[0]["result"] == "WIN" and rows[0]["hits_actual"] == 1
+
+
+def test_reresolve_leaves_genuine_voids(tracked_db):
+    """A pick on a player who truly never took a PA stays VOID."""
+    db, loop = tracked_db
+    tracking.persist_screen_result("hr", _hr_picks(), TWO_DAYS_AGO, "backfill")
+    tracking.resolve_pending()  # 333 (never played) -> VOID
+
+    summary = tracking.reresolve_voids()
+    assert summary["hr"]["fixed"] == 0
+    rows = asyncio.run_coroutine_threadsafe(db.list_picks("hr"), loop).result(30)
+    by_id = {r["batter_id"]: r for r in rows}
+    assert by_id[333]["result"] == "VOID"
 
 
 def test_track_record_aggregation(tracked_db):

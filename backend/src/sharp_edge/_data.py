@@ -385,10 +385,17 @@ def _boxscore_summary(game_pk: int) -> dict:
     when no probable pitcher was recorded). "starters" are the batters who
     were in the starting lineup (battingOrder slot X00) — outcome resolution
     voids picks on players who didn't start, mirroring sportsbook settlement.
+
+    "batting" maps each player's MLBAM id to their final batting line
+    ({pa, hits, hr}). This is the authoritative, lag-free settlement source:
+    the box score is posted immediately post-game, whereas Statcast events can
+    trail by a day — long enough that resolving a pick against Statcast alone
+    can VOID a player who actually started and hit.
+
     Only the small extracted summary is cached — full boxscore payloads would
     blow up memory over a season backfill.
     """
-    empty_side = {"batters": (), "starters": (), "starter": None}
+    empty_side = {"batters": (), "starters": (), "starter": None, "batting": {}}
     try:
         data = statsapi.get("game_boxscore", {"gamePk": game_pk})
     except Exception:
@@ -400,15 +407,25 @@ def _boxscore_summary(game_pk: int) -> dict:
         players = team.get("players") or {}
         batters = []
         starters = []
+        batting = {}
         for p in players.values():
             person = p.get("person") or {}
+            pid = person.get("id")
             pos = (p.get("position") or {}).get("abbreviation")
-            if person.get("id") and pos and pos != "P":
-                batters.append((person["id"], person.get("fullName", "")))
+            if pid and pos and pos != "P":
+                batters.append((pid, person.get("fullName", "")))
             # Starting lineup slots are 100..900; substitutes get 101, 401, …
             order = str(p.get("battingOrder") or "")
-            if person.get("id") and order.endswith("00"):
-                starters.append(person["id"])
+            if pid and order.endswith("00"):
+                starters.append(pid)
+            # Final batting line — present for anyone who came to the plate.
+            line = ((p.get("stats") or {}).get("batting") or {})
+            if pid and line:
+                batting[pid] = {
+                    "pa": int(line.get("plateAppearances") or 0),
+                    "hits": int(line.get("hits") or 0),
+                    "hr": int(line.get("homeRuns") or 0),
+                }
         starter = None
         pitcher_ids = team.get("pitchers") or []
         if pitcher_ids:
@@ -419,5 +436,6 @@ def _boxscore_summary(game_pk: int) -> dict:
             "batters": tuple(batters),
             "starters": tuple(starters),
             "starter": starter,
+            "batting": batting,
         }
     return out

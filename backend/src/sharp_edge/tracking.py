@@ -207,6 +207,35 @@ def _starters_for_date(dstr: str) -> frozenset:
     return frozenset(starters)
 
 
+def _boxscore_batting_for_date(dstr: str) -> dict:
+    """MLBAM id -> {'pa','hits','hr'} across every game on a date.
+
+    The authoritative, lag-free settlement source: box scores post right after
+    the game, so a non-empty result means "every plate appearance that day is
+    accounted for." A player absent from it genuinely took no PA. Statcast, by
+    contrast, can trail a day — which is why resolving against it alone voided
+    players who had actually started and hit. Empty dict means the box scores
+    couldn't be loaded for the date (API failure) and the caller must fall back.
+
+    Not lru_cached: box scores fill in as a slate completes, so a partial
+    result must not be pinned for the process lifetime. The underlying
+    _boxscore_summary is cached per game_pk, so repeat calls stay cheap.
+    """
+    out: dict[int, dict] = {}
+    try:
+        games = fetch_schedule(date.fromisoformat(dstr))
+    except Exception:
+        return {}
+    for game in games:
+        status = (game.get("status", {}) or {}).get("detailedState", "") or ""
+        if any(bad in status for bad in DEAD_STATES_SUBSTRINGS):
+            continue
+        box = _boxscore_summary(game.get("gamePk", 0))
+        for side in ("away", "home"):
+            out.update(box[side].get("batting") or {})
+    return out
+
+
 def resolve_pending() -> dict:
     """Settle every unresolved pick from before today against what actually
     happened. HR picks win on ≥1 home run, batter picks on ≥1 hit.
@@ -228,15 +257,34 @@ def resolve_pending() -> dict:
 
             resolved = 0
             for dstr in sorted(by_date):
-                ev = _events_for_date(date.fromisoformat(dstr))
                 starters = _starters_for_date(dstr)
+                batting = _boxscore_batting_for_date(dstr)
+                box_ok = bool(batting)  # box scores loaded => authoritative
+                # Statcast is only the fallback when the box score is missing.
+                ev = None if box_ok else _events_for_date(date.fromisoformat(dstr))
                 results = []
                 for r in by_date[dstr]:
-                    sub = ev[ev["batter"] == r["batter_id"]]
-                    pa = int(len(sub))
-                    hr = int((sub["events"] == "home_run").sum()) if pa else 0
-                    hits = int(sub["events"].isin(_HIT_EVENTS).sum()) if pa else 0
-                    started = r["batter_id"] in starters if starters else pa > 0
+                    bid = r["batter_id"]
+                    if box_ok:
+                        # Authoritative line. A batter absent from the box
+                        # score genuinely took no PA (pa=0 -> VOID below).
+                        line = batting.get(bid)
+                        pa = line["pa"] if line else 0
+                        hr = line["hr"] if line else 0
+                        hits = line["hits"] if line else 0
+                    else:
+                        sub = ev[ev["batter"] == bid]
+                        pa = int(len(sub))
+                        hr = int((sub["events"] == "home_run").sum()) if pa else 0
+                        hits = int(sub["events"].isin(_HIT_EVENTS).sum()) if pa else 0
+                        if pa == 0:
+                            # No box score and no Statcast PA — can't tell a
+                            # real VOID from data that simply hasn't published
+                            # yet. Leave the pick pending (skip) so a later
+                            # sweep settles it, rather than freezing a wrong
+                            # VOID: resolve only revisits result IS NULL rows.
+                            continue
+                    started = bid in starters if starters else pa > 0
                     if not started or pa == 0:
                         outcome = "VOID"
                     elif screen == "hr":
@@ -244,7 +292,7 @@ def resolve_pending() -> dict:
                     else:
                         outcome = "WIN" if hits >= 1 else "LOSS"
                     results.append({
-                        "batter_id": r["batter_id"],
+                        "batter_id": bid,
                         "result": outcome,
                         "hr_actual": hr,
                         "hits_actual": hits,
@@ -256,6 +304,80 @@ def resolve_pending() -> dict:
                 logger.info(
                     "[tracking] %s: resolved %d picks across %d dates",
                     screen, resolved, len(by_date),
+                )
+        return summary
+
+
+def reresolve_voids(since: Optional[str] = None, dry_run: bool = False) -> dict:
+    """Repair picks frozen as VOID against the authoritative box score.
+
+    resolve_pending only ever revisits unresolved (result IS NULL) rows, so a
+    VOID written prematurely from lagging Statcast data stays wrong forever.
+    This re-checks every VOID pick against the box score batting line and
+    corrects the ones where the player actually started and took a plate
+    appearance — those become WIN/LOSS. Genuine voids (didn't start, or truly
+    no PA) are left untouched, as are dates whose box scores can't be loaded.
+    Idempotent: a second run over already-corrected data changes nothing.
+
+    ``since`` limits the scan to pick_date >= that ISO date. ``dry_run`` reports
+    the corrections without writing them.
+    """
+    with _resolve_lock:
+        today_iso = date.today().isoformat()
+        summary: dict = {}
+        for screen in SCREENS:
+            rows = _run_db(_db.list_picks(screen, since=since))
+            by_date: dict[str, list] = defaultdict(list)
+            for r in rows:
+                if r.get("result") == "VOID" and r["pick_date"] < today_iso:
+                    by_date[r["pick_date"]].append(r)
+
+            fixed = 0
+            corrections: list[dict] = []
+            for dstr in sorted(by_date):
+                batting = _boxscore_batting_for_date(dstr)
+                if not batting:
+                    # Can't authoritatively correct without box scores; a wrong
+                    # VOID here is left for a later run once the API recovers.
+                    continue
+                starters = _starters_for_date(dstr)
+                results = []
+                for r in by_date[dstr]:
+                    bid = r["batter_id"]
+                    line = batting.get(bid)
+                    if not line or line["pa"] == 0:
+                        continue  # truly no PA — VOID stands
+                    started = bid in starters if starters else True
+                    if not started:
+                        continue  # non-starter (e.g. pinch-hit) — VOID stands
+                    if screen == "hr":
+                        outcome = "WIN" if line["hr"] >= 1 else "LOSS"
+                    else:
+                        outcome = "WIN" if line["hits"] >= 1 else "LOSS"
+                    results.append({
+                        "batter_id": bid,
+                        "result": outcome,
+                        "hr_actual": line["hr"],
+                        "hits_actual": line["hits"],
+                        "pa_actual": line["pa"],
+                    })
+                    corrections.append({
+                        "pick_date": dstr, "batter": r.get("batter"),
+                        "batter_id": bid, "was": "VOID", "now": outcome,
+                        "hits": line["hits"], "hr": line["hr"], "pa": line["pa"],
+                    })
+                if results and not dry_run:
+                    fixed += _run_db(_db.update_pick_results(screen, dstr, results))
+                elif results:
+                    fixed += len(results)
+            summary[screen] = {
+                "dates": len(by_date), "fixed": fixed, "corrections": corrections,
+            }
+            if fixed:
+                logger.info(
+                    "[tracking] %s: %s %d VOID picks across %d dates%s",
+                    screen, "would re-resolve" if dry_run else "re-resolved",
+                    fixed, len(by_date), " (dry-run)" if dry_run else "",
                 )
         return summary
 
