@@ -62,9 +62,23 @@ export interface BatterRow {
   p_l3_era: number | null;
   p_l3_ip: number;
   p_l3_starts: number;
+  // Opposing starter's last-3 contact line. Null when his game log carried
+  // no hits/at-bats — the band is then UNKNOWN and nothing is vetoed.
+  p_l3_hits: number | null;
+  p_l3_h9: number | null;
+  p_l3_baa: number | null;
+  p_l3_whip: number | null;
+  p_l3_k9: number | null;
+  p_season_h9: number | null;
+  p_season_baa: number | null;
+  p_season_starts: number;
+  p_form: 'SHARP' | 'HITTABLE' | 'NEUTRAL' | 'UNKNOWN';
+  p_sharp: boolean;
+  p_hittable: boolean;
   is_hot: boolean;
   bvp_edge: boolean;
   hand_slump_edge: boolean;
+  hittable_sp_edge: boolean;
   tags: string;
   game_time: string;
 }

@@ -280,12 +280,26 @@ def _pitcher_info(pitcher_id: int) -> dict:
         return {"hand": None, "name": None}
 
 
+def _opt_int(v) -> Optional[int]:
+    """StatsAPI ints that may be absent. Absent stays absent — a missing
+    field must not read as a zero, or a pitcher whose game log didn't carry
+    ``hits`` would look like he allowed none."""
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 @functools.lru_cache(maxsize=None)
 def _pitcher_gamelog_starts(pitcher_id: int, season: int) -> tuple:
     """All of a pitcher's game-log starts for a season, newest first.
 
     Cached raw so as-of consumers (live screens, historical backfill) can
-    filter by date without refetching. Each entry: date / ip_str / er / hr.
+    filter by date without refetching. Each entry: date / ip_str / er / hr,
+    plus the contact line — hits / at-bats / batters-faced / walks /
+    strikeouts — which the batter screen turns into H/9 and BAA.
     """
     try:
         data = statsapi.get(
@@ -312,31 +326,82 @@ def _pitcher_gamelog_starts(pitcher_id: int, season: int) -> tuple:
                         "ip_str": stat.get("inningsPitched", "0.0"),
                         "er": stat.get("earnedRuns", 0),
                         "hr": int(stat.get("homeRuns", 0) or 0),
+                        "hits": _opt_int(stat.get("hits")),
+                        "ab": _opt_int(stat.get("atBats")),
+                        "bf": _opt_int(stat.get("battersFaced")),
+                        "bb": _opt_int(stat.get("baseOnBalls")),
+                        "so": _opt_int(stat.get("strikeOuts")),
                     })
 
     games.sort(key=lambda g: g["date"], reverse=True)
     return tuple(games)
 
 
-def _pitcher_last_3(
-    pitcher_id: int, season: int, before: Optional[str] = None
-) -> dict:
-    """ERA / IP / ER / starts over the pitcher's last 3 game-log starts.
+_EMPTY_FORM = {
+    "era": None, "ip": 0.0, "er": 0, "starts": 0,
+    "hits": None, "h9": None, "baa": None, "whip": None, "k9": None,
+}
 
-    ``before`` (ISO date) restricts the log to starts strictly before that
-    date, so historical screens see only what was known that morning.
+
+def _pitcher_form(
+    pitcher_id: int,
+    season: int,
+    starts: Optional[int] = 3,
+    before: Optional[str] = None,
+) -> dict:
+    """Rate stats over a pitcher's last ``starts`` game-log starts.
+
+    ``starts=None`` uses the whole season. ``before`` (ISO date) restricts
+    the log to starts strictly before that date, so historical screens see
+    only what was known that morning.
+
+    ERA alone is a poor read on a "batter records a hit" bet: three solo
+    homers can push a start's ERA over 5.00 while the pitcher holds the
+    lineup to four hits, and a pitcher on that kind of run is exactly who a
+    hit prop loses to. ``h9`` and ``baa`` measure what the bet settles on.
+
+    Contact stats are ``None`` — not zero — unless *every* start in the
+    window reported them, so a game log missing the field degrades to "we
+    don't know" rather than to a fictional no-hitter.
     """
     games = [
         g for g in _pitcher_gamelog_starts(pitcher_id, season)
         if not before or g["date"] < before
     ]
-    last3 = games[:3]
-    if not last3:
-        return {"era": None, "ip": 0.0, "er": 0, "starts": 0}
-    outs = sum(_ip_to_outs(g["ip_str"]) for g in last3)
-    er = sum(g["er"] for g in last3)
-    era = round((er * 27 / outs), 2) if outs else None
-    return {"era": era, "ip": round(outs / 3, 1), "er": er, "starts": len(last3)}
+    window = games if starts is None else games[:starts]
+    if not window:
+        return dict(_EMPTY_FORM)
+
+    outs = sum(_ip_to_outs(g["ip_str"]) for g in window)
+    er = sum(g["er"] for g in window)
+
+    def _total(key: str) -> Optional[int]:
+        vals = [g.get(key) for g in window]
+        return sum(vals) if all(v is not None for v in vals) else None
+
+    hits, ab, bb, so = (_total(k) for k in ("hits", "ab", "bb", "so"))
+
+    return {
+        "era": round(er * 27 / outs, 2) if outs else None,
+        "ip": round(outs / 3, 1),
+        "er": er,
+        "starts": len(window),
+        "hits": hits,
+        "h9": round(hits * 27 / outs, 2) if hits is not None and outs else None,
+        "baa": round(hits / ab, 3) if hits is not None and ab else None,
+        "whip": (
+            round((hits + bb) * 3 / outs, 2)
+            if hits is not None and bb is not None and outs else None
+        ),
+        "k9": round(so * 27 / outs, 2) if so is not None and outs else None,
+    }
+
+
+def _pitcher_last_3(
+    pitcher_id: int, season: int, before: Optional[str] = None
+) -> dict:
+    """Back-compatible alias for the three-start window."""
+    return _pitcher_form(pitcher_id, season, starts=3, before=before)
 
 
 def _roster_batters(team_id: int) -> list[tuple[int, str]]:
