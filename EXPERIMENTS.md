@@ -4,10 +4,14 @@ Running log of hypotheses about the MLB batter screen, how to test them, and
 what the tests said. The screen sits around a 65% hit rate; everything here is
 an attempt to move that without gutting volume.
 
-**Nothing in this file is settled until the backtest column is filled in.**
 The code changes shipped alongside it are deliberately split into *on by
 default* (a subtractive rule that encodes an observed failure) and *off by
 default* (a new, volume-expanding rule that has to earn its place).
+
+**Backtest run 1 is in** (2026-08-06, 125 days) — see [Results](#results). Short
+version: the screen is 100% BvP, `hand_slump_edge` has never fired, the veto is
+real but small, and the `hittable` bar shipped at 9.5 is roughly 1.5 H/9 too
+loose to be worth anything. **No defaults have been changed yet.**
 
 ---
 
@@ -118,6 +122,11 @@ The MLB endpoints (`statsapi.mlb.com`, `baseballsavant.mlb.com`,
 policy, so this has to run somewhere with open network — a GitHub Actions
 runner, a terminal, or the k8s pod.
 
+Run 1 took ~25 min end to end on a laptop: ~2.5 min for the 2026 Statcast
+scrape (2024/2025 came from the parquet cache) and ~10 s per slate after that.
+Two dates are skipped with "no games" — the All-Star break, 2026-07-13 and
+2026-07-15.
+
 ### GitHub Actions (easiest)
 
 Actions → **Batter screen backtest** → Run workflow.
@@ -163,36 +172,201 @@ the production rules changed underneath it.
 
 Fill in from the workflow's job summary. One row per run; keep the old rows.
 
-### Run 1 — _(date, board range, git sha)_
+### Run 1 — 2026-08-06, boards 2026-04-01 → 2026-08-05, sha `2dc3569`
+
+125 days, 42,569 batter-games. Slate-wide hit rate (every batter on every
+board, no filter at all): **60.6%**. Run locally, not in CI.
 
 | variant | picks | decided | hit% | 95% CI | /day | Δ vs baseline |
 |---|---|---|---|---|---|---|
-| baseline | | | | | | — |
-| baseline+veto | | | | | | |
-| bvp_only | | | | | | |
-| bvp_only+veto | | | | | | |
-| hand_slump_only | | | | | | |
-| bvp_pa8+veto | | | | | | |
-| bvp_pa12+veto | | | | | | |
-| hot_vs_hittable | | | | | | |
-| hot_vs_hittable+veto | | | | | | |
-| hot_vs_24hits_l3 | | | | | | |
-| hot_vs_30hits_l3 | | | | | | |
-| hot330_vs_hittable | | | | | | |
-| all_edges+veto | | | | | | |
+| baseline | 398 | 376 | 64.9 | 59.9–69.5 | 3.5 | — |
+| baseline+veto | 293 | 278 | 66.2 | 60.4–71.5 | 2.7 | +1.3 |
+| bvp_only | 398 | 376 | 64.9 | 59.9–69.5 | 3.5 | +0.0 |
+| bvp_only+veto | 293 | 278 | 66.2 | 60.4–71.5 | 2.7 | +1.3 |
+| hand_slump_only | **0** | 0 | — | — | 0.0 | — |
+| bvp_pa8+veto | 96 | 93 | 65.6 | 55.5–74.5 | 1.5 | +0.7 |
+| bvp_pa12+veto | 20 | 20 | 70.0 | 48.1–85.5 | 1.1 | +5.1 |
+| hot_vs_hittable | 2534 | 2105 | 64.7 | 62.6–66.7 | 22.4 | −0.2 |
+| hot_vs_hittable+veto | 2534 | 2105 | 64.7 | 62.6–66.7 | 22.4 | −0.2 |
+| hot_vs_24hits_l3 | 168 | 139 | 68.3 | 60.2–75.5 | 3.4 | +3.4 |
+| hot_vs_30hits_l3 | 1 | 1 | 0.0 | 0.0–79.3 | 1.0 | −64.9 |
+| hot330_vs_hittable | 1821 | 1516 | 63.9 | 61.5–66.3 | 16.1 | −1.0 |
+| all_edges+veto | 2674 | 2233 | 64.8 | 62.8–66.7 | 22.3 | −0.1 |
 
 Whole-board hit rate by SP form band:
 
 | band | decided | hit% | 95% CI |
 |---|---|---|---|
-| SHARP | | | |
-| NEUTRAL | | | |
-| HITTABLE | | | |
-| UNKNOWN | | | |
+| SHARP | 8006 | 58.8 | 57.7–59.9 |
+| NEUTRAL | 10082 | 61.3 | 60.3–62.2 |
+| HITTABLE | 10033 | 61.3 | 60.3–62.2 |
+| UNKNOWN | 1656 | 60.5 | 58.1–62.8 |
 
-Vetoed subset (baseline picks facing a SHARP starter): _n_ picks, _hit%_.
+Vetoed subset (baseline picks facing a SHARP starter): **105 picks, 98 decided,
+61.2%** (CI 51.3–70.3).
+
+#### The control the variant list was missing
+
+Every variant above compares against `baseline`, but `baseline` is itself a
+filter. The number that says whether *any* of this is an edge is **the hot bat
+with no pitcher filter at all**:
+
+| variant | picks | decided | hit% | 95% CI | /day | Δ vs hot_only |
+|---|---|---|---|---|---|---|
+| everyone (whole board) | 42569 | 29777 | 60.6 | 60.0–61.1 | 340.6 | −2.1 |
+| **hot_only** | 8728 | 7262 | **62.7** | 61.5–63.8 | 70.4 | — |
+| hot_only+veto | 6339 | 5288 | 63.5 | 62.2–64.8 | 51.5 | +0.8 |
+| baseline (= BvP) | 398 | 376 | 64.9 | 59.9–69.5 | 3.5 | +2.2 |
+| hot+hittable h9≥9.5 (shipped) | 2534 | 2105 | 64.7 | 62.6–66.7 | 22.4 | +2.0 |
+| hot+hittable h9≥11 | 1269 | 1038 | 67.8 | 64.9–70.6 | 11.8 | +5.1 |
+| hot+hittable h9≥12 | 849 | 691 | 69.0 | 65.5–72.4 | 7.9 | +6.3 |
+| hot+hits_l3≥20 | 965 | 794 | 68.4 | 65.1–71.5 | 9.3 | +5.7 |
+
+Being a hot bat is worth +2.1 on its own. **The entire BvP edge is worth another
++2.2, with overlapping CIs, on 376 decided picks.**
+
+#### Dose-response: hot bats only, by the starter's last-3 H/9
+
+| H/9 bin | decided | hit% | 95% CI |
+|---|---|---|---|
+| ≤ 6.5 | 1455 | 61.4 | 58.8–63.8 |
+| 6.5–8.0 | 1218 | 59.8 | 57.0–62.5 |
+| 8.0–9.5 | 1205 | 63.7 | 61.0–66.4 |
+| 9.5–11.0 | 961 | 61.7 | 58.6–64.7 |
+| **11.0–12.0** | 378 | **66.4** | 61.5–71.0 |
+| **> 12.0** | 649 | **68.7** | 65.1–72.2 |
+
+This is a **tail effect, not a gradient**. The middle four bins are flat and
+non-monotone; only genuinely battered starters separate. That is why the shipped
+9.5 bar buys almost nothing — it spends most of its volume on the flat region.
+
+#### Split-half, to check for post-hoc threshold fitting
+
+`h9≥11` and `h9≥12` were picked off a sweep, so they need an out-of-sample
+check. Split at 2026-06-02 (62d / 63d):
+
+| variant | 1st-half dec | 1st half | 2nd-half dec | 2nd half | drift |
+|---|---|---|---|---|---|
+| hot_only (control) | 3430 | 62.2 | 3832 | 63.1 | +0.9 |
+| baseline (BvP) | 182 | 60.4 | 194 | 69.1 | **+8.7** |
+| baseline+veto | 138 | 60.1 | 140 | 72.1 | **+12.0** |
+| hot+hittable h9≥9.5 | 810 | 64.3 | 1295 | 64.9 | +0.6 |
+| hot+hittable h9≥11 | 439 | 67.4 | 599 | 68.1 | +0.7 |
+| hot+hittable h9≥12 | 296 | 68.6 | 395 | 69.4 | +0.8 |
+| hot+hits_l3≥20 | 335 | 71.0 | 459 | 66.4 | −4.6 |
+
+The h9 rules reproduce almost exactly across halves. **The BvP edge does not** —
+its 64.9% season number is the average of a 60.4% half and a 69.1% half.
+
+#### Is the h9≥11 effect just extra plate appearances?
+
+A bad starter means a longer inning, and a "records a hit" prop is mechanically
+easier with a 5th plate appearance. If that were the whole story the rule would
+be a game-length bet wearing a matchup costume. It isn't:
+
+| H/9 bin | decided | hit% | mean PA |
+|---|---|---|---|
+| ≤ 6.5 | 1455 | 61.4 | 4.10 |
+| 6.5–8.0 | 1218 | 59.8 | 4.09 |
+| 8.0–9.5 | 1205 | 63.7 | 4.17 |
+| 9.5–11.0 | 961 | 61.7 | 4.11 |
+| 11.0–12.0 | 378 | 66.4 | 4.22 |
+| > 12.0 | 649 | 68.7 | 4.22 |
+
+Mean PA moves 4.10 → 4.22 across the whole range — nowhere near enough to carry
+6 points of hit rate. Holding PA fixed, the gap survives:
+
+| PA | h9<11 decided | hit% | h9≥11 decided | hit% | diff |
+|---|---|---|---|---|---|
+| 3 | 608 | 42.3 | 95 | 43.2 | +0.9 |
+| 4 | 2718 | 60.2 | 559 | 65.1 | **+4.9** |
+| 5 | 1275 | 76.4 | 320 | 80.3 | **+3.9** |
+
+So roughly +4 points of the ~+5 to +6 is a genuine per-plate-appearance quality
+effect, not a game-length artifact. (The 3-PA row is flat, but n=95.)
 
 **Conclusions:**
+
+- **H1 — partially supported.** Restricted to `starts ≥ 3`, the band means are
+  SHARP 58.9% (57.7–60.0) / NEUTRAL 61.1% (60.0–62.2) / HITTABLE 61.6%
+  (60.6–62.7). SHARP separates from both with disjoint CIs, so recent hit
+  suppression genuinely predicts hit props. **HITTABLE does not separate from
+  NEUTRAL at all** at the shipped 9.5 bar. The premise holds at the sharp end
+  and fails at the hittable end.
+- **H2 — not supported as specified.** The bar was "veto up on baseline *and*
+  the vetoed subset materially below baseline." It's up (+1.3), but the vetoed
+  picks hit 61.2% with a CI of 51.3–70.3 that covers the 64.9% baseline. On the
+  whole board the veto is worth +0.8 (62.7 → 63.5). Real, directionally right,
+  much smaller than the branch assumed.
+- **H3 — confirmed, decisively.** `hand_slump_edge` fired **0 times in 125
+  days**. `baseline` and `bvp_only` are identical row for row (398 picks, 244W /
+  132L). The screen is 100% BvP and the hand+slump half is decoration, exactly
+  as suspected. The `.400 vs hand over 50 PA` bar is unreachable in practice.
+- **H4 — the floor isn't the problem; the edge is.** The `bvp_pa` sweep has no
+  trend (63.8 at 4, 66.2 at 5, 66.7 at 6, 63.5 at 9, 72.3 at 10, 55.6 at 14) —
+  noise once n collapses past ~7 PA. The ship criterion (beat `bvp_only+veto`
+  without falling under ~3 picks/day) is met by nothing: every floor above 5
+  drops below 2.1/day. The real finding is upstream — BvP is +2.2 over "any hot
+  bat" and swings 8.7 points between halves.
+- **H5 — supported, but only far above the shipped threshold.** At h9≥9.5 the
+  edge is +2.0 over the hot-only control at 22.4/day, which is volume at the
+  control's own hit rate — not an edge. At h9≥11 it's 67.8% at 11.8/day (+5.1,
+  CIs disjoint from control) and split-half stable. **This is the most robust
+  result in the experiment.**
+- **H6 — raw hits works, but doesn't win.** `hits_l3≥20` is 68.4% at 9.3/day,
+  comparable to h9≥11 and overlapping it heavily (587 of 849/965 rows shared).
+  But it drifts −4.6 across halves where the rate drifts +0.8. H6 said prefer
+  the raw count *if it wins*; it doesn't, so keep the rate.
+- **H7 — rejected for SHARP, and the HITTABLE bar is badly misplaced.** The
+  `sharp_h9` sweep is flat from 5.0 to 9.0 (64.3–66.4, no knee) and `sharp_baa`
+  likewise (64.0–66.4) — those thresholds barely matter because they only gate
+  398 baseline picks. The `hittable_h9` sweep *does* have a knee, at roughly
+  10.75–11.0, and the shipped 9.5 sits well below it.
+
+**Bug found while reading the boards:** `_sp_band` gates SHARP on
+`min_sharp_starts` but leaves HITTABLE ungated, so a pitcher bands HITTABLE off
+a single bad start — 2,147 of 14,359 HITTABLE rows (15%) have fewer than 3
+starts. It doesn't change the conclusion (restricting to `starts ≥ 3` moves
+HITTABLE from 61.3% to 61.6%) because `hittable_sp_edge` applies its own
+`starts >= 3` check, but the band label is wrong on the board and in
+`GET /batters/pitcher-form`.
+
+**Caveat that outranks all of the above:** these are hit rates, not ROI. At −160
+break-even is 61.5%, which the 60.6% slate-wide rate already sits below and the
+64.9% baseline barely clears. The h9≥11 rule's 67.8% is the first number here
+with real margin in it — but none of this is ranked until prices are attached.
+
+---
+
+## Recommended defaults after run 1
+
+**Nothing below has been applied.** These are what the run-1 evidence supports,
+in priority order.
+
+| # | Change | Evidence | Confidence |
+|---|---|---|---|
+| 1 | `MIN_HITTABLE_H9` **9.50 → 11.00** | Knee of the `hittable_h9` sweep; +5.1 over the hot-only control with disjoint CIs; split-half drift +0.7 | High |
+| 2 | `include_hittable_edge` **False → True**, *only together with #1* | At 11.0: 67.8% at 11.8/day vs baseline 64.9% at 3.5/day. At the shipped 9.5 it adds volume at the control's own hit rate | High, conditional on #1 |
+| 3 | Gate HITTABLE on `min_sharp_starts` in `_sp_band` | 15% of HITTABLE rows come off 1–2 starts; a one-start band label is wrong on the board and in the API | High (correctness, not tuning) |
+| 4 | `veto_sharp_sp` — **keep True** | SHARP separates on the whole board (58.9% vs 61.1/61.6, disjoint CIs). Small (+0.8) but free, and provably harmless next to #1 — `hot+h9≥11` and `hot+h9≥11+veto` are identical | Medium |
+| 5 | `MAX_SHARP_H9` / `MAX_SHARP_BAA` — **leave at 6.50 / .210** | Both sweeps are flat with no knee. No evidence to move them in either direction | Medium |
+| 6 | `hand_slump_edge` — **remove, or drop `min_hand_avg` to ~.290 and re-test** | Fired 0 times in 125 days. As configured it is dead code | High that it's dead; the replacement bar is untested |
+| 7 | BvP thresholds — **change nothing yet** | The edge is +2.2 over "any hot bat" with overlapping CIs and 8.7 points of split-half drift. No floor in 4–20 PA beats it while holding volume. Needs more seasons, not a new threshold | — |
+
+Why 11.0 and not 12.0 for #1: 12.0 scores marginally better (69.0% vs 67.8%) but
+at 7.9 picks/day against 11.8. The rates are within each other's CIs while the
+volume difference is 50%, and 11.0 sits right at the sweep's knee rather than
+out on the thin end where a post-hoc pick is most likely to be fitting noise.
+
+Two things to hold in mind before acting on any of it:
+
+- **#1 and #2 together roughly triple pick volume** (3.5 → ~11.8/day, or ~12.4
+  if BvP stays as an OR-branch). That is a different product, not a tuning
+  change — the track record before and after won't be comparable.
+- **The flat middle of the H/9 curve is unexplained.** The rule works at the
+  tail and does nothing over most of its range, and the PA confound is ruled out
+  but no mechanism has replaced it. That's a reason to ship #1 and watch it, not
+  a reason to build more on top of it yet.
 
 ---
 
@@ -227,13 +401,26 @@ compiled in, so it reflects the shipped configuration, not a variant.
   entirely. Probable lineups aren't posted at warm-up time for every game, but
   a batter's recent average slot is a decent stand-in.
 - **Park and weather.** Coors vs. a cold night in Cleveland is not the same bet.
-- **The `.400 vs hand over 50 PA` bar looks near-impossible.** Career splits
-  that high are rare, so `hand_slump_edge` may fire almost never and the screen
-  may effectively be BvP-only. H3 will confirm; if so, that bar wants lowering
-  to something like `.290` and the edge re-tested.
-- **BvP sample size generally.** 5 PA is 2-for-5. It is very likely noise, and
-  it is currently the main driver of picks. H4 tests raising it; if the answer
-  is "the whole edge is noise", that's worth knowing before adding more on top.
+- ~~**The `.400 vs hand over 50 PA` bar looks near-impossible.**~~ **Answered by
+  run 1: it fired 0 times in 125 days.** The screen is BvP-only in practice.
+  Either drop `hand_slump_edge` or drop the bar to ~`.290` and re-test — but
+  note that the "slump" half of it is now also suspect, since the H/9 dose-
+  response says there's no signal until a starter is genuinely battered.
+- **BvP sample size generally.** ~~5 PA is 2-for-5.~~ **Answered, and it's worse
+  than "the floor is too low":** the whole BvP edge is +2.2 over taking any hot
+  bat (CIs overlapping, 376 decided) and swings 60.4% → 69.1% across the two
+  halves of the season. Raising the floor doesn't rescue it — no floor beats
+  `bvp_only+veto` while staying above ~2 picks/day. The open question is now
+  whether BvP should survive at all, which wants a third season of boards
+  rather than a threshold tweak.
+- **Why is the middle of the H/9 range flat?** Hot bats face starters at
+  6.5–11.0 H/9 with essentially no variation in outcome (59.8–63.7 across three
+  bins, non-monotone), then jump at 11+. Still unexplained. The obvious
+  confound — blowouts handing the lineup extra plate appearances — has been
+  checked and **ruled out** (see below), so something else is going on. Worth
+  knowing before leaning harder on the rule.
 - **No odds attached.** Hit rate is not ROI. A 65% hit rate at -160 is roughly
   break-even. Attaching prices to picks is already on the roadmap in IDEA.md
-  and would change which of these variants actually wins.
+  and would change which of these variants actually wins. Run 1 sharpens this:
+  the baseline's 64.9% is within noise of break-even, so the screen may not
+  currently be profitable at all.
