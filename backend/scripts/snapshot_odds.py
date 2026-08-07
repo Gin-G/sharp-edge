@@ -87,7 +87,18 @@ def snapshot(target: date, outdir: Path, state: str = "CO") -> Path | None:
                 "p_l3_baa": rec.get("p_l3_baa"),
                 "p_form": rec.get("p_form"),
                 "tags": rec.get("tags"),
-                "is_pick": bool(rec.get("is_hot")) and bool(rec.get("tags")),
+                # The actual pick rule, not "has a tag" — a row tagged only
+                # SHARP-SP is one the veto *held back*, and counting it as a
+                # pick would quietly poison any backtest built on this file.
+                "is_pick": bool(
+                    rec.get("is_hot")
+                    and (
+                        rec.get("bvp_edge")
+                        or rec.get("hand_slump_edge")
+                        or rec.get("hittable_sp_edge")
+                    )
+                    and not rec.get("p_sharp")
+                ),
             })
 
     # Prices with no board row still go in — a batter the screen never
