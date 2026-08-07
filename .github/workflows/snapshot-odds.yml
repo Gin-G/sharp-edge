@@ -1,0 +1,123 @@
+name: Daily odds snapshot
+
+# Records FanDuel's to-record-a-hit prices for the day's slate and commits them
+# to data/odds/.
+#
+# This exists because odds are not retrievable after the fact. FanDuel serves
+# the current board and nothing else, so a price that has moved is gone for
+# good — which is why bundle_backtest.py can only report ROI as a function of
+# an *assumed* price rather than a real one. Every day this job doesn't run is
+# a day that can never be backtested properly. That makes it the rare research
+# job worth putting on a schedule.
+#
+# Twice a day, and the second pass merges rather than overwrites:
+#
+#   15:00 UTC  11am ET — ahead of the earliest first pitch (~12:35pm ET), so
+#              day games are captured while their markets are still pre-game.
+#   21:30 UTC  5:30pm ET — closer to the evening slate, which is most of the
+#              card and where the prices are nearer what you'd actually get.
+#              Day games are already underway and absent from this fetch; the
+#              merge keeps the 15:00 rows for them.
+
+on:
+  schedule:
+    - cron: '0 15 * * *'
+    - cron: '30 21 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Slate date (YYYY-MM-DD, blank = today)'
+        default: ''
+      state:
+        description: 'FanDuel state code (affects the API subdomain)'
+        default: 'CO'
+
+permissions:
+  contents: write
+
+# Never let the 21:30 pass start while 15:00 is still going — they write the
+# same file, and the merge is read-modify-write.
+concurrency:
+  group: snapshot-odds
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    # Only the first run of a season pays for the Statcast scrape; after that
+    # the cache makes this a couple of minutes.
+    timeout-minutes: 45
+    env:
+      SHARP_EDGE_CACHE_DIR: ${{ github.workspace }}/.cache/statcast
+      ODDS_DIR: ${{ github.workspace }}/data/odds
+    steps:
+      # Full history: the commit step rebases onto main, which a shallow
+      # clone can't do.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend deps
+        run: |
+          pip install -r backend/requirements.txt
+          pip install --no-deps -e backend/
+
+      # Shares the rolling-key pattern with the backtest workflow: write a new
+      # key each run, restore from the newest prefix match.
+      - name: Restore Statcast cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SHARP_EDGE_CACHE_DIR }}
+          key: snapshot-odds-${{ github.run_id }}
+          restore-keys: |
+            snapshot-odds-
+            backtest-batters-
+
+      - name: Snapshot odds
+        run: |
+          python backend/scripts/snapshot_odds.py \
+            --dir "$ODDS_DIR" \
+            --state "${{ inputs.state || 'CO' }}" \
+            ${{ inputs.date && format('--date {0}', inputs.date) || '' }}
+
+      - name: Summarise
+        if: always()
+        run: |
+          if ! ls "$ODDS_DIR"/odds_*.parquet >/dev/null 2>&1; then
+            printf '## Odds snapshot\n\nNo snapshot written — see the job log.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python backend/scripts/snapshot_odds.py --dir "$ODDS_DIR" --summary > summary.txt
+          {
+            echo "## Odds snapshot"
+            echo
+            echo '```'
+            cat summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit the snapshot
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/odds
+          if git diff --cached --quiet; then
+            echo "no odds changes to commit"
+            exit 0
+          fi
+          git commit -m "odds: snapshot $(date -u +%Y-%m-%d) slate prices"
+          # The schedule can collide with a push to main; rebase and retry
+          # rather than failing a run whose data is already fetched.
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin main && git push origin HEAD:main && exit 0
+            echo "push attempt $i failed, retrying"
+            sleep 5
+          done
+          exit 1

@@ -10,9 +10,12 @@ One row per batter with a posted market, joined to the screen's own view of
 that matchup, so a later backtest can ask "what did the market think, versus
 what did the screen think, versus what happened".
 
-Run it once a day before first pitch (cron, or the Batter screen backtest
-workflow). Re-running the same day overwrites — later in the day is closer to
-the price you'd actually get.
+Re-running the same day **merges** rather than overwrites, keeping the newest
+price per batter. That is what makes running twice safe: an early pass catches
+day games while their markets are still pre-game, a later pass catches the
+evening slate closer to first pitch, and neither pass destroys the other's
+work. Each row carries ``captured_at`` so a backtest can tell a price taken
+eight hours out from one taken at the bell.
 
 Usage:
     python scripts/snapshot_odds.py
@@ -25,7 +28,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -100,13 +103,50 @@ def snapshot(target: date, outdir: Path, state: str = "CO") -> Path | None:
         })
 
     df = pd.DataFrame(rows)
+    df["captured_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
     path = outdir / f"odds_{target.isoformat()}.parquet"
+    if path.exists():
+        # Merge, newest price wins. A batter whose game has already started is
+        # missing from this fetch but must survive from the earlier one — the
+        # whole point of running more than once a day.
+        try:
+            prior = pd.read_parquet(path)
+            before = len(prior)
+            df = (
+                pd.concat([prior, df], ignore_index=True)
+                .drop_duplicates(subset=["batter"], keep="last")
+                .reset_index(drop=True)
+            )
+            logger.info("%s: merged with %d existing rows", target, before)
+        except Exception:
+            logger.exception("%s: could not read %s, overwriting", target, path)
+
     df.to_parquet(path, index=False)
     logger.info(
-        "%s: %d prices (%d joined to the board) -> %s",
-        target, len(df), len(seen), path,
+        "%s: %d prices this pass (%d joined to the board), %d rows total -> %s",
+        target, len(rows), len(seen), len(df), path,
     )
     return path
+
+
+def summarise(outdir: Path) -> None:
+    """Print what's been recorded so far — the job summary's payload."""
+    files = sorted(outdir.glob("odds_*.parquet"))
+    if not files:
+        print(f"no snapshots in {outdir}")
+        return
+    df = pd.read_parquet(files[-1])
+    print(f"{files[-1].name}: {len(df)} prices")
+    if "implied_p" in df:
+        q = df["implied_p"].quantile([0.1, 0.5, 0.9]).round(3)
+        print(f"implied prob   p10 {q.iloc[0]}   median {q.iloc[1]}   p90 {q.iloc[2]}")
+    if "is_pick" in df:
+        print(f"screen picks with a posted market: {int(df['is_pick'].sum())}")
+    if "captured_at" in df and df["captured_at"].notna().any():
+        print(f"captured: {sorted(df['captured_at'].dropna().unique())}")
+    print(f"\n{len(files)} days of odds history recorded "
+          f"({files[0].name[5:15]} .. {files[-1].name[5:15]})")
 
 
 def main() -> None:
@@ -116,7 +156,13 @@ def main() -> None:
     ap.add_argument("--date", default=date.today().isoformat())
     ap.add_argument("--dir", type=Path, default=DEFAULT_DIR)
     ap.add_argument("--state", default="CO")
+    ap.add_argument("--summary", action="store_true",
+                    help="report what's recorded instead of fetching")
     args = ap.parse_args()
+
+    if args.summary:
+        summarise(args.dir)
+        return
     if snapshot(date.fromisoformat(args.date), args.dir, args.state) is None:
         sys.exit(1)
 
