@@ -464,8 +464,7 @@ the same or better long-run rate.
 ## After a rule change ships
 
 Persisted picks carry the rules that were live when they were written, so the
-track record mixes generations after any change. To regenerate history under
-the current rules:
+track record mixes generations after any change.
 
 ```bash
 curl -X POST https://sharp-edge.nickknows.net/api/picks/backfill \
@@ -475,9 +474,55 @@ curl -X POST https://sharp-edge.nickknows.net/api/picks/backfill \
 curl https://sharp-edge.nickknows.net/api/picks/backfill/status
 ```
 
-`start_backfill` regenerates the range unconditionally (unlike the startup
-catch-up, which only fills gaps). Note it re-screens with whatever defaults are
-compiled in, so it reflects the shipped configuration, not a variant.
+It re-screens with whatever defaults are **compiled into the deployed image**,
+so deploy before you backfill or you will regenerate history under the old
+rules.
+
+### What the backfill actually does — corrected 2026-08-07
+
+This section used to claim `start_backfill` "regenerates the range
+unconditionally." **It does not, and it cannot.** Running it revealed:
+
+- `_do_backfill` calls `persist_screen_result(...)` **without `replace=True`**,
+  so nothing is deleted.
+- `insert_picks` is `ON CONFLICT (screen, pick_date, batter_id) DO NOTHING`.
+- Even with `replace=True`, `delete_picks` defaults to `unresolved_only=True`,
+  so settled outcomes are deliberately immutable.
+
+So a backfill is **additive**. It fills in picks the current rules make that
+history doesn't have; it never removes picks the current rules would no longer
+make. After the 2026-08-07 run the batter history holds 1,600 picks in range:
+1,493 that the current rules produce, plus **107 stale BvP picks** from before
+the SHARP veto that the current rules reject. Those 107 hit 63.7% and drag the
+reported rate from 67.5% to 67.2%.
+
+Truly regenerating settled history needs a deliberate delete first — there is
+no endpoint for it, by design.
+
+### Backfill run, 2026-08-07 — production vs. the backtest
+
+128 days, 1,209 picks written, 0 errors, ~24 min. The backtest predicted
+production almost exactly:
+
+| | picks | decided | hit% |
+|---|---|---|---|
+| backtest prediction (current rules) | 1493 | 1241 | 67.4 |
+| **production, current-rule picks** | **1493** | **1242** | **67.5** |
+| production, stale pre-veto picks | 107 | 102 | 63.7 |
+| production, everything in range (what the UI shows) | 1600 | 1344 | 67.2 |
+
+Whole-history batter track record after the run: **1,630 picks, 67.3%** — up
+from 408 picks at 65.4%. By tag: `HOT+HITTABLE` 1,220 picks at 68.0%, `BvP` 410
+at 65.6%.
+
+> Operational note: the endpoint could not do this. The backfill runs as a
+> background thread in the API process, which is capped at 1 CPU and has a
+> liveness probe with the default **1-second** timeout. The thread starves the
+> event loop, `/health` stops answering, and the kubelet SIGKILLs the pod
+> (exit 137) about 90 seconds in — the backfill kills its own pod. This run was
+> done by pointing the same `tracking.start_backfill` code path at the
+> production DB over `kubectl port-forward`. Worth fixing the probe
+> (`timeoutSeconds: 5`, `failureThreshold: 5`) before relying on the endpoint.
 
 ---
 
