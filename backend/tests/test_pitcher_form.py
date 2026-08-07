@@ -228,18 +228,66 @@ def test_hittable_starter_still_produces_picks(slate):
     assert set(res.today["p_form"]) == {"HITTABLE"}
 
 
-def test_hittable_edge_is_off_by_default(slate, monkeypatch):
-    """A hot bat with no BvP history vs. a hittable starter is a candidate,
-    not a pick, until the backtest says otherwise."""
+def test_hittable_edge_is_on_by_default(slate, monkeypatch):
+    """A hot bat with no BvP history vs. a hittable starter is a pick. Run 1 of
+    the backtest turned this on: 67.4% at 12.5 picks/day against 66.2% at 2.7
+    for BvP alone, over 125 days. See EXPERIMENTS.md."""
     slate(HITTABLE_FORM)
     # Strip the BvP edge so hittable_sp_edge is the only thing left.
     monkeypatch.setattr(batters, "_bvp", lambda bid, pid, df=None: None)
 
     res = batters.screen_for_date(TODAY, verbose=False)
     assert res.today["hittable_sp_edge"].all()
+    assert len(res.picks) == 2
+
+    res_off = batters.screen_for_date(
+        TODAY, include_hittable_edge=False, verbose=False
+    )
+    assert len(res_off.picks) == 0
+
+
+# Between the old 9.50 bar and the new 11.00 one. Run 1 found hot bats facing
+# starters in this range hit within noise of hot bats facing anyone — the band
+# was spending most of its volume on a flat stretch of the curve.
+MIDDLING_FORM = {"era": 5.40, "ip": 18.0, "er": 11, "starts": 3,
+                 "hits": 20, "h9": 10.0, "baa": 0.286, "whip": 1.50, "k9": 6.0}
+
+
+def test_middling_starter_is_no_longer_hittable(slate, monkeypatch):
+    """10.0 H/9 / .286 BAA cleared the original 9.50 / .270 bars. It doesn't
+    clear 11.00 / .310, so it produces no hittable-edge pick."""
+    slate(MIDDLING_FORM)
+    monkeypatch.setattr(batters, "_bvp", lambda bid, pid, df=None: None)
+
+    res = batters.screen_for_date(TODAY, verbose=False)
+    assert set(res.today["p_form"]) == {"NEUTRAL"}
+    assert not res.today["hittable_sp_edge"].any()
     assert len(res.picks) == 0
 
-    res_on = batters.screen_for_date(
-        TODAY, include_hittable_edge=True, verbose=False
-    )
-    assert len(res_on.picks) == 2
+
+def test_baa_arm_alone_cannot_reopen_the_band(slate, monkeypatch):
+    """The bands are an OR, and h9 >= 11.0 is a strict subset of baa >= .270.
+    Raising only H/9 would have left the BAA arm binding and changed almost
+    nothing, so .310 has to hold the line on its own."""
+    baa_only = dict(MIDDLING_FORM, h9=9.9, baa=0.300)
+    slate(baa_only)
+    monkeypatch.setattr(batters, "_bvp", lambda bid, pid, df=None: None)
+
+    res = batters.screen_for_date(TODAY, verbose=False)
+    assert set(res.today["p_form"]) == {"NEUTRAL"}
+    assert len(res.picks) == 0
+
+
+def test_one_start_does_not_brand_a_starter_hittable():
+    """HITTABLE used to be ungated on starts while SHARP was, so a single bad
+    outing banded a pitcher — 15% of HITTABLE rows in the run-1 boards came off
+    one or two starts. Picks were never affected (hittable_sp_edge checks
+    starts >= 3 itself) but the label was wrong on the board and in
+    GET /batters/pitcher-form."""
+    one_start = dict(HITTABLE_FORM, starts=1, ip=5.0, hits=9)
+    assert batters._sp_band(one_start) == "NEUTRAL"
+    assert batters._sp_band(dict(one_start, starts=3)) == "HITTABLE"
+
+    # The same gate that already applied to SHARP.
+    lone_gem = dict(SHARP_FORM, starts=1)
+    assert batters._sp_band(lone_gem) == "NEUTRAL"

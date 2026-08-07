@@ -314,15 +314,30 @@ def lookup_bvp(batter_name: str, pitcher_name: str) -> dict:
 # Starting-pitcher hit suppression
 # -----------------------------------------------------------------------------
 #
-# League-average starters sit near 8.5 H/9 and a .250 BAA. The defaults below
-# put SHARP roughly a run-and-a-half of hits per nine under that and HITTABLE
-# a comparable distance over, so both bands mean something rather than
-# splitting the field in half.
+# League-average starters sit near 8.5 H/9 and a .250 BAA.
+#
+# The SHARP bars are symmetric around that — roughly a run-and-a-half of hits
+# per nine under league average. The 125-day backtest (EXPERIMENTS.md, run 1)
+# swept them from 5.0 to 9.0 H/9 and .17 to .27 BAA and found the curve flat
+# with no knee, so they stay where they were: there is no evidence to move them.
+#
+# The HITTABLE bars are *not* symmetric, and that's the run-1 finding. Hit
+# suppression turned out to be a tail effect rather than a gradient — hot bats
+# facing starters between 6.5 and 11.0 H/9 hit within noise of each other
+# (59.8–63.7%, non-monotone), and separation only appears past 11. The original
+# 9.50 / .270 guess sat in the flat region and bought nothing: HITTABLE and
+# NEUTRAL both came back at 61.3% over the whole board.
+#
+# Both bars must move together. h9 >= 11.0 is a strict subset of baa >= .270,
+# so raising only H/9 leaves the BAA arm of the OR binding and changes almost
+# nothing (65.0% at 21.6 picks/day, versus 67.8% at 11.8 for the H/9 rule
+# alone). .310 is the knee of the BAA sweep and the value that keeps the two
+# arms selecting the same population.
 
 MAX_SHARP_H9: float = 6.50
 MAX_SHARP_BAA: float = 0.210
-MIN_HITTABLE_H9: float = 9.50
-MIN_HITTABLE_BAA: float = 0.270
+MIN_HITTABLE_H9: float = 11.00
+MIN_HITTABLE_BAA: float = 0.310
 MIN_SHARP_STARTS: int = 2
 
 
@@ -341,13 +356,21 @@ def _sp_band(
     mostly when walks make an outing short, and in that case whichever one
     fires is the one carrying the signal. UNKNOWN when the game log had no
     contact line at all, which keeps a missing field from vetoing picks.
+
+    Both bands require ``min_sharp_starts`` of evidence. HITTABLE used to be
+    ungated, which let one bad outing brand a starter: 15% of HITTABLE rows in
+    the run-1 boards came off one or two starts, and on opening week every
+    banded pitcher had exactly one. Picks were never affected — the caller
+    checks ``starts >= 3`` itself — but the label was wrong on the board and in
+    ``GET /batters/pitcher-form``.
     """
     h9, baa = form.get("h9"), form.get("baa")
     if h9 is None and baa is None:
         return "UNKNOWN"
-    if form.get("starts", 0) >= min_sharp_starts and (
-        (h9 is not None and h9 <= max_sharp_h9)
-        or (baa is not None and baa <= max_sharp_baa)
+    if form.get("starts", 0) < min_sharp_starts:
+        return "NEUTRAL"
+    if (h9 is not None and h9 <= max_sharp_h9) or (
+        baa is not None and baa <= max_sharp_baa
     ):
         return "SHARP"
     if (h9 is not None and h9 >= min_hittable_h9) or (
@@ -371,7 +394,7 @@ def screen_today(
     min_hittable_baa: float = MIN_HITTABLE_BAA,
     min_sharp_starts: int = MIN_SHARP_STARTS,
     veto_sharp_sp: bool = True,
-    include_hittable_edge: bool = False,
+    include_hittable_edge: bool = True,
     days: int = 7,
     workers: int = 12,
     verbose: bool = True,
@@ -434,7 +457,7 @@ def screen_for_date(
     min_hittable_baa: float = MIN_HITTABLE_BAA,
     min_sharp_starts: int = MIN_SHARP_STARTS,
     veto_sharp_sp: bool = True,
-    include_hittable_edge: bool = False,
+    include_hittable_edge: bool = True,
     days: int = 7,
     workers: int = 12,
     verbose: bool = True,
@@ -451,6 +474,10 @@ def screen_for_date(
     ``veto_sharp_sp`` drops batters facing a SHARP starter from ``picks``.
     They stay in ``today`` tagged SHARP-SP, so the board still shows them and
     a backfill can be re-run with the veto off to compare hit rates.
+
+    ``include_hittable_edge`` turned on after run 1 of the backtest. It is the
+    volume in this screen: ~12.5 picks/day against ~2.7 for BvP alone, at a
+    higher hit rate (67.4% vs 66.2% over 125 days). See EXPERIMENTS.md.
     """
     today = target_date
     end = today - timedelta(days=1)
@@ -619,8 +646,10 @@ def screen_for_date(
         )
         # Hot bat vs. a starter who has been getting hit — no BvP or career
         # split required, so it reaches far more of the board than the two
-        # edges above. Off by default until the backtest says it earns its
-        # place; see EXPERIMENTS.md.
+        # edges above. On by default since run 1 of the backtest, which is also
+        # what moved the HITTABLE bars to 11.0 / .310; at the original 9.5/.270
+        # this edge added volume at the hit rate of simply taking any hot bat.
+        # Keeps its own starts >= 3 floor, stricter than the band's.
         hittable_sp_edge = is_hot and p_hittable and p_l3["starts"] >= 3
 
         tags = []

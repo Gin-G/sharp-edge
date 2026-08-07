@@ -10,8 +10,14 @@ default* (a new, volume-expanding rule that has to earn its place).
 
 **Backtest run 1 is in** (2026-08-06, 125 days) — see [Results](#results). Short
 version: the screen is 100% BvP, `hand_slump_edge` has never fired, the veto is
-real but small, and the `hittable` bar shipped at 9.5 is roughly 1.5 H/9 too
-loose to be worth anything. **No defaults have been changed yet.**
+real but small, and the `hittable` bar shipped at 9.5 was roughly 1.5 H/9 too
+loose to be worth anything.
+
+**Defaults were updated on 2026-08-07** on the strength of that run — HITTABLE
+moved to 11.00 H/9 / .310 BAA and `include_hittable_edge` turned on, taking the
+screen from 2.7 to 12.5 picks/day at a higher hit rate (66.2% → 67.4%). See
+[the applied table](#defaults-after-run-1--applied-2026-08-07) and
+[run 2](#run-2--the-shipped-configuration-against-the-history).
 
 ---
 
@@ -51,16 +57,21 @@ reported them — a game log missing the field must not read as a no-hitter.
 
 ### 2. Banding the starter — `_sp_band`
 
-| Band | Rule (last 3 starts) |
-|---|---|
-| `SHARP` | `h9 ≤ 6.50` or `baa ≤ .210`, with ≥2 starts of evidence |
-| `HITTABLE` | `h9 ≥ 9.50` or `baa ≥ .270` |
-| `NEUTRAL` | in between |
-| `UNKNOWN` | no contact line in the game log — nothing is vetoed |
+| Band | Rule (last 3 starts) | as shipped | after run 1 |
+|---|---|---|---|
+| `SHARP` | `h9 ≤ X` or `baa ≤ Y`, ≥2 starts | 6.50 / .210 | **unchanged** |
+| `HITTABLE` | `h9 ≥ X` or `baa ≥ Y`, ≥2 starts | 9.50 / .270 | **11.00 / .310** |
+| `NEUTRAL` | in between, or too few starts to judge | | |
+| `UNKNOWN` | no contact line in the game log — nothing is vetoed | | |
 
-League-average starters sit near 8.5 H/9 / .250 BAA, so both bands are roughly
-a run-and-a-half of hits per nine off the middle rather than splitting the
-field in half. **These numbers are guesses until the sweep runs.**
+League-average starters sit near 8.5 H/9 / .250 BAA. The original guess put both
+bands a run-and-a-half of hits per nine off the middle, symmetrically. Run 1
+kept the SHARP side and pushed the HITTABLE side much further out: hit
+suppression turned out to be a tail effect, not a gradient, so a symmetric band
+spent most of its volume on a flat stretch of the curve.
+
+The `≥2 starts` requirement originally applied only to SHARP; run 1 extended it
+to HITTABLE, which had been branding starters off a single outing.
 
 ### 3. Rule changes
 
@@ -73,13 +84,15 @@ field in half. **These numbers are guesses until the sweep runs.**
   runs (ERA ≥ 5.00) *or* giving up hits (`HITTABLE`) — but never while
   suppressing hits. The ERA path survives; a hit-suppressing pitcher no longer
   qualifies through it. That is the Cease case, precisely.
-- **`hittable_sp_edge` (OFF by default, `include_hittable_edge=False`).** Hot
-  bat vs. a `HITTABLE` starter, no BvP or career split required. This is the
+- **`hittable_sp_edge` (ON by default since run 1, `include_hittable_edge=True`).**
+  Hot bat vs. a `HITTABLE` starter, no BvP or career split required. This is the
   "someone batting .300 against a pitcher who's given up 24 hits in his last 3
-  starts" idea. It reaches far more of the board than the other two edges, so
-  it stays off until the backtest says it's better than the alternative use of
-  that volume. The candidates render under "Hot Bats vs Hittable Starters",
-  marked experimental.
+  starts" idea. It shipped off, because it reaches far more of the board than
+  the other two edges and hadn't earned that volume yet; run 1 says it has, at
+  the retuned 11.00/.310 bars. It is now the screen's primary source of picks —
+  1,200 of 1,493 over the backtest window — and renders under "Hot Bats vs
+  Hittable Starters". Keeps its own `starts >= 3` floor, stricter than the
+  band's.
 
 ### 4. Diagnostics
 
@@ -338,35 +351,113 @@ with real margin in it — but none of this is ranked until prices are attached.
 
 ---
 
-## Recommended defaults after run 1
+## Defaults after run 1 — APPLIED 2026-08-07
 
-**Nothing below has been applied.** These are what the run-1 evidence supports,
-in priority order.
-
-| # | Change | Evidence | Confidence |
+| # | Change | Status | Evidence |
 |---|---|---|---|
-| 1 | `MIN_HITTABLE_H9` **9.50 → 11.00** | Knee of the `hittable_h9` sweep; +5.1 over the hot-only control with disjoint CIs; split-half drift +0.7 | High |
-| 2 | `include_hittable_edge` **False → True**, *only together with #1* | At 11.0: 67.8% at 11.8/day vs baseline 64.9% at 3.5/day. At the shipped 9.5 it adds volume at the control's own hit rate | High, conditional on #1 |
-| 3 | Gate HITTABLE on `min_sharp_starts` in `_sp_band` | 15% of HITTABLE rows come off 1–2 starts; a one-start band label is wrong on the board and in the API | High (correctness, not tuning) |
-| 4 | `veto_sharp_sp` — **keep True** | SHARP separates on the whole board (58.9% vs 61.1/61.6, disjoint CIs). Small (+0.8) but free, and provably harmless next to #1 — `hot+h9≥11` and `hot+h9≥11+veto` are identical | Medium |
-| 5 | `MAX_SHARP_H9` / `MAX_SHARP_BAA` — **leave at 6.50 / .210** | Both sweeps are flat with no knee. No evidence to move them in either direction | Medium |
-| 6 | `hand_slump_edge` — **remove, or drop `min_hand_avg` to ~.290 and re-test** | Fired 0 times in 125 days. As configured it is dead code | High that it's dead; the replacement bar is untested |
-| 7 | BvP thresholds — **change nothing yet** | The edge is +2.2 over "any hot bat" with overlapping CIs and 8.7 points of split-half drift. No floor in 4–20 PA beats it while holding volume. Needs more seasons, not a new threshold | — |
+| 1 | `MIN_HITTABLE_H9` **9.50 → 11.00** | **applied** | Knee of the `hittable_h9` sweep; +5.1 over the hot-only control with disjoint CIs; split-half drift +0.7 |
+| 1b | `MIN_HITTABLE_BAA` **.270 → .310** | **applied** | Forced by #1 — see below. Knee of the `hittable_baa` sweep (68.2% at 9.3/day standalone) |
+| 2 | `include_hittable_edge` **False → True** | **applied** | 67.4% at 12.5/day vs 66.2% at 2.7 for BvP alone |
+| 3 | Gate HITTABLE on `min_sharp_starts` in `_sp_band` | **applied** | 15% of HITTABLE rows came off 1–2 starts; the label was wrong on the board and in the API |
+| 4 | `veto_sharp_sp` — keep `True` | unchanged | SHARP separates on the whole board (58.9% vs 61.1/61.6, disjoint CIs). Small (+0.8) but free |
+| 5 | `MAX_SHARP_H9` / `MAX_SHARP_BAA` — keep 6.50 / .210 | unchanged | Both sweeps flat, no knee. No evidence to move them either way |
+| 6 | `hand_slump_edge` — remove, or drop `min_hand_avg` to ~.290 | **not done** | Fired 0 times in 125 days. Dead as configured, but the replacement bar is untested — left for a run 2 |
+| 7 | BvP thresholds | **not done** | +2.2 over "any hot bat" with overlapping CIs and 8.7 points of split-half drift. Needs more seasons, not a new threshold |
 
-Why 11.0 and not 12.0 for #1: 12.0 scores marginally better (69.0% vs 67.8%) but
-at 7.9 picks/day against 11.8. The rates are within each other's CIs while the
-volume difference is 50%, and 11.0 sits right at the sweep's knee rather than
-out on the thin end where a post-hoc pick is most likely to be fitting noise.
+### Why both HITTABLE bars had to move
 
-Two things to hold in mind before acting on any of it:
+The recommendation as first written moved only `MIN_HITTABLE_H9`, and that
+would have been close to a no-op. The band is an **OR**, and over these boards
+`h9 ≥ 11.0` is a strict *subset* of `baa ≥ .270` — every starter clearing the
+H/9 bar also clears the BAA bar, so the BAA arm stays binding and keeps
+selecting the population the H/9 change was meant to exclude:
 
-- **#1 and #2 together roughly triple pick volume** (3.5 → ~11.8/day, or ~12.4
-  if BvP stays as an OR-branch). That is a different product, not a tuning
-  change — the track record before and after won't be comparable.
-- **The flat middle of the H/9 curve is unexplained.** The rule works at the
-  tail and does nothing over most of its range, and the PA confound is ruled out
-  but no mechanism has replaced it. That's a reason to ship #1 and watch it, not
-  a reason to build more on top of it yet.
+| rule | picks | /day | hit% | 95% CI |
+|---|---|---|---|---|
+| h9 ≥ 11 only (what was measured) | 1269 | 11.8 | 67.8 | 64.9–70.6 |
+| **h9 ≥ 11 OR baa ≥ .270 (naive apply)** | 2421 | 21.6 | **65.0** | 62.9–67.0 |
+| h9 ≥ 11 OR baa ≥ .300 | 1390 | 12.8 | 66.8 | 64.0–69.5 |
+| **h9 ≥ 11 OR baa ≥ .310 (shipped)** | 1288 | 11.8 | **67.7** | 64.9–70.5 |
+
+Applying #1 alone would have landed on the second row — 65.0% at 21.6/day,
+statistically indistinguishable from the 9.5 bar it replaced. .310 is the knee
+of the `hittable_baa` sweep and the value at which the two arms select the same
+population again.
+
+Why 11.0 and not 12.0: 12.0 scores marginally better (69.0% vs 67.8%) at 7.9
+picks/day against 11.8. The rates sit inside each other's CIs while the volume
+differs by 50%, and 11.0 is at the sweep's knee rather than out on the thin end
+where a post-hoc pick is most likely to be fitting noise.
+
+---
+
+## Run 2 — the shipped configuration against the history
+
+Same 125 days of boards, no rebuild. Every variant is recomputed from raw
+columns, so this is an apples-to-apples comparison on identical slates.
+
+| configuration | picks | decided | /day | hit% | 95% CI |
+|---|---|---|---|---|---|
+| slate-wide (no filter at all) | 42569 | 29777 | 340.6 | 60.6 | 60.0–61.1 |
+| hot bat only (no pitcher filter) | 8728 | 7262 | 70.4 | 62.7 | 61.5–63.8 |
+| **pre-branch** — hot + BvP | 398 | 376 | 3.5 | 64.9 | 59.9–69.5 |
+| **branch as shipped** — + SHARP veto | 293 | 278 | 2.7 | 66.2 | 60.4–71.5 |
+| branch with hittable ON at 9.5/.270 | 2674 | 2233 | 22.3 | 64.8 | 62.8–66.7 |
+| **applied config** — 11.0/.310, edge ON, veto ON | 1493 | 1241 | 12.5 | **67.4** | 64.8–70.0 |
+
+Split-half (cut at 2026-06-02), to show the new config isn't a fitted artifact:
+
+| configuration | 1st-half dec | 1st half | 2nd-half dec | 2nd half | drift |
+|---|---|---|---|---|---|
+| pre-branch (hot + BvP) | 182 | 60.4 | 194 | 69.1 | **+8.7** |
+| branch as shipped (+veto) | 138 | 60.1 | 140 | 72.1 | **+12.0** |
+| hittable ON at 9.5/.270 | 881 | 64.4 | 1352 | 65.0 | +0.6 |
+| **applied config** | 540 | 66.7 | 701 | 68.0 | **+1.3** |
+
+The applied config is 2.5 points above the pre-branch screen and 1.2 above the
+branch as it shipped, at **4.6× the pick volume** of the latter — and it is far
+more stable across halves than either, because the volume is no longer coming
+from a 20-pick BvP sample.
+
+### The change is purely additive
+
+It drops nothing the current rules pick:
+
+| | picks | decided | hit% | 95% CI |
+|---|---|---|---|---|
+| kept (picked by both) | 293 | 278 | 66.2 | 60.4–71.5 |
+| dropped by the new rules | **0** | 0 | — | — |
+| added by the new rules | 1200 | 963 | **67.8** | 64.8–70.7 |
+
+The added picks hit *better* than the retained ones, which is the cleanest
+statement of the run-1 result: the hittable-starter edge is a better rule than
+BvP, and BvP was only ever contributing ~3 picks a day.
+
+### What the change costs: correlated picks
+
+The old screen picked individual batters on their personal BvP history. The new
+one picks *whole lineups against one bad starter* — the first live slate run
+under it returned 8 Red Sox against Luis Castillo out of 17 picks. That's a
+portfolio property worth stating explicitly:
+
+| config | picks | /day | distinct date×SP groups | max on one SP | mean | % of picks in a group of 5+ |
+|---|---|---|---|---|---|---|
+| old (BvP + veto) | 293 | 2.7 | 258 | 2 | 1.14 | 0% |
+| **applied config** | 1493 | 12.5 | 631 | **8** | 2.37 | **19%** |
+
+Those stacks resolve *better* than the config average, not worse — 23 groups of
+5 or more, mean within-group hit rate 70.8%, four that went a perfect 5-for-5,
+and **none that lost every pick**. So this isn't a hidden loss, but it is a real
+change in variance: within-group hit rates have a 20.9-point standard deviation,
+and one starter having a good night now moves the whole day. Expect the daily
+track record to swing much harder than the old 2.7-picks-a-day screen did, at
+the same or better long-run rate.
+
+> **Caveat on the band table in `eval`.** `p_form` is a *stored* column, written
+> at build time, so the "hit rate by SP form band" breakdown still reflects the
+> 9.5/.270 bands and the ungated HITTABLE. Every other number recomputes from
+> raw columns and does pick up the new thresholds. Rebuild with `--force` before
+> reading that table again.
 
 ---
 

@@ -50,7 +50,7 @@ interface with DraftKings first, then line shopping across books.
 - [x] Svelte frontend: dashboard, calendar heatmap, ROI trend chart, win-rate donut, mobile-responsive layout
 - [x] Client-side caching so tab switches stop refetching screens and track record
 - [x] MLB batter screen: recent form, BvP, handedness splits, opposing SP last-3 ERA, edge flags
-- [x] Batter screen reads the starter's last-3 hit suppression (H/9, BAA) and holds back picks against sharp starters
+- [x] Batter screen reads the starter's last-3 hit suppression (H/9, BAA), holds back picks against sharp starters, and picks hot bats against battered ones
 - [x] Backtest harness replays past slates through the screen and scores rule variants against settled outcomes
 - [x] MLB home run screen: ISO/barrel power metrics, park factors, pitcher HR/9 and barrel% allowed, BvP
 - [x] Statcast pipeline: chunked scrape, per-year parquet persistence, parquet fallback, self-healing stale re-warm
@@ -62,7 +62,10 @@ interface with DraftKings first, then line shopping across books.
 - [x] MCP server (stdio) exposing stats, breakdown, score_bet, history, insights, sync, import to Claude Desktop/Code
 - [x] Helm chart on K3s: CNPG, ExternalSecrets via OpenBao, Cilium ingress, cert-manager TLS, Recreate strategy
 - [x] GitHub Actions: pytest, image build, automatic image bump, smoke probe against the origin
-- [ ] Run the batter backtest and settle the hot-bat-vs-hittable-starter edge and band thresholds (EXPERIMENTS.md)
+- [x] Batter backtest run 1 (125 days): hot-bat-vs-hittable-starter edge on by default, HITTABLE bands retuned to 11.00 H/9 / .310 BAA (EXPERIMENTS.md)
+- [ ] Attach odds to picks — hit rate isn't ROI, and the screen sits near break-even at -160
+- [ ] Retire or re-bar `hand_slump_edge`: it fired 0 times in 125 days
+- [ ] Decide whether the BvP edge survives — it's +2.2 over "any hot bat" with 8.7pts of split-half drift
 - [ ] Bullpen quality and lineup slot as batter-screen features
 - [ ] Extract a Sportsbook provider interface from the FanDuel client (auth, history sync, odds, balance)
 - [ ] DraftKings integration: login/session handling, bet history sync, canonical schema mapping

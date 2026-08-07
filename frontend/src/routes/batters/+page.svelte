@@ -77,11 +77,17 @@
   // Qualified on the batter side but dropped because the opposing starter has
   // been suppressing hits. Shown so the veto is visible rather than silent.
   $: vetoed = (data?.today ?? [])
-    .filter((r) => r.p_sharp && r.is_hot && (r.bvp_edge || r.hand_slump_edge))
+    .filter(
+      (r) =>
+        r.p_sharp &&
+        r.is_hot &&
+        (r.bvp_edge || r.hand_slump_edge || r.hittable_sp_edge)
+    )
     .sort((a, b) => (a.p_l3_h9 ?? 99) - (b.p_l3_h9 ?? 99));
 
-  // Candidate pool for the experimental edge (hot bat vs. a starter who's
-  // been getting hit). Not picks yet — see EXPERIMENTS.md.
+  // Picks that fire on the hittable-starter edge alone — the volume in this
+  // screen since it turned on. Broken out the same way as the BvP and
+  // hand+slump sections, so it's clear which rule produced which pick.
   $: hotVsHittable = (data?.today ?? [])
     .filter((r) => r.hittable_sp_edge && !r.bvp_edge && !r.hand_slump_edge)
     .sort((a, b) => (b.p_l3_h9 ?? 0) - (a.p_l3_h9 ?? 0));
@@ -238,15 +244,14 @@
       {/if}
     </section>
 
-    <!-- Experimental: hot bat vs. a starter who's been getting hit -->
+    <!-- Hot bat vs. a starter who's been getting hit -->
     <section class="card overflow-hidden p-0">
       <div class="px-5 py-4 border-b border-border flex items-baseline justify-between">
         <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
           Hot Bats vs Hittable Starters
-          <span class="ml-2 normal-case font-normal text-xs text-amber-400/80">experimental — not picks</span>
         </h2>
         <span class="text-xs text-slate-500">
-          {hotVsHittable.length} bat{hotVsHittable.length === 1 ? '' : 's'} with no BvP/hand edge
+          {hotVsHittable.length} pick{hotVsHittable.length === 1 ? '' : 's'} on this edge alone
         </span>
       </div>
       {#if hotVsHittable.length === 0}
