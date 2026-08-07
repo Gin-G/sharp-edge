@@ -81,6 +81,17 @@ export interface BatterRow {
   hittable_sp_edge: boolean;
   tags: string;
   game_time: string;
+  // FanDuel to-record-a-hit price and what it implies. Null when no market is
+  // posted for this batter (not in a confirmed lineup, market pulled, etc.) —
+  // model_p and breakeven_odds are still filled in, so it's clear what price
+  // the pick would need.
+  fd_odds: number | null;
+  implied_p: number | null;
+  model_p: number;
+  ev: number | null;
+  edge_pts: number | null;
+  kelly: number | null;
+  breakeven_odds: number;
 }
 
 export interface HotBatRow {
@@ -98,6 +109,13 @@ export interface BatterScreen {
   picks: BatterRow[];
   hot_bats: HotBatRow[];
   today: BatterRow[];
+  as_of?: string | null;
+  stale?: boolean;
+  odds?: {
+    age_seconds: number | null;
+    error: string | null;
+    count: number;
+  };
 }
 
 export interface HomerRow {

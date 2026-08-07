@@ -56,6 +56,32 @@
     return v.toFixed(digits);
   }
 
+  function fmtOdds(v: number | null): string {
+    if (v === null || v === undefined) return '—';
+    return v > 0 ? `+${v}` : `${v}`;
+  }
+
+  function fmtPct(v: number | null): string {
+    if (v === null || v === undefined) return '—';
+    return `${(100 * v).toFixed(1)}%`;
+  }
+
+  // EV per $1 staked. This is the number that decides whether a pick is a
+  // bet: the screen hits ~67% and break-even at -207 is 67.4%, so a good
+  // matchup at a bad price is still a losing ticket.
+  function fmtEv(v: number | null): string {
+    if (v === null || v === undefined) return '—';
+    return `${v >= 0 ? '+' : ''}${v.toFixed(3)}`;
+  }
+
+  function evClass(v: number | null): string {
+    if (v === null || v === undefined) return 'text-slate-500';
+    if (v >= 0.03) return 'text-emerald-400 font-semibold';
+    if (v > 0) return 'text-emerald-500/80';
+    if (v > -0.03) return 'text-slate-400';
+    return 'text-red-400';
+  }
+
   // Colour the starter's recent contact profile. SHARP is the warning: a
   // pitcher holding lineups to a low average is the wrong side of a
   // "records a hit" bet however good the batter's history looks.
@@ -134,6 +160,15 @@
         </h2>
         <span class="text-xs text-slate-500">
           {data.picks.length} hot bat{data.picks.length === 1 ? '' : 's'} with ≥1 edge
+          {#if data.odds}
+            {#if data.odds.error}
+              · <span class="text-amber-500/80">odds unavailable</span>
+            {:else}
+              · FanDuel odds {data.odds.age_seconds != null && data.odds.age_seconds > 60
+                ? `${Math.round(data.odds.age_seconds / 60)}m old`
+                : 'live'}
+            {/if}
+          {/if}
         </span>
       </div>
       {#if data.picks.length === 0}
@@ -155,6 +190,10 @@
                 <th class="text-right px-4 py-3">SP L3 H/9</th>
                 <th class="text-right px-4 py-3">SP L3 BAA</th>
                 <th class="text-center px-4 py-3">SP Form</th>
+                <th class="text-right px-4 py-3">FD</th>
+                <th class="text-right px-4 py-3">Model</th>
+                <th class="text-right px-4 py-3">Edge</th>
+                <th class="text-right px-4 py-3">EV/$1</th>
                 <th class="text-left px-4 py-3">Tags</th>
                 <th class="text-right px-4 py-3">Time</th>
               </tr>
@@ -180,6 +219,21 @@
                   <td class="px-4 py-2.5 text-center">
                     <span class="inline-block px-2 py-0.5 text-xs rounded border {BAND_CLASS[r.p_form] ?? BAND_CLASS.UNKNOWN}">{r.p_form}</span>
                   </td>
+                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-200">
+                    {#if r.fd_odds !== null && r.fd_odds !== undefined}
+                      {fmtOdds(r.fd_odds)}<span class="block text-xs text-slate-500">{fmtPct(r.implied_p)}</span>
+                    {:else}
+                      <span class="text-slate-600">no line</span>
+                      <span class="block text-xs text-slate-600">need {fmtOdds(r.breakeven_odds)}</span>
+                    {/if}
+                  </td>
+                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-300">{fmtPct(r.model_p)}</td>
+                  <td class="px-4 py-2.5 text-right tabular-nums {evClass(r.ev)}">
+                    {r.edge_pts !== null && r.edge_pts !== undefined
+                      ? `${r.edge_pts >= 0 ? '+' : ''}${r.edge_pts.toFixed(1)}`
+                      : '—'}
+                  </td>
+                  <td class="px-4 py-2.5 text-right tabular-nums {evClass(r.ev)}">{fmtEv(r.ev)}</td>
                   <td class="px-4 py-2.5">
                     {#each r.tags.split(',').filter(Boolean) as tag}
                       <span class="inline-block px-2 py-0.5 mr-1 text-xs rounded bg-indigo-600/20 text-indigo-300 border border-indigo-600/30">{tag}</span>

@@ -464,12 +464,37 @@ async def batter_screen():
     warm_async()
     status = warm_status()
     hot = cached.hot_bats.rename(columns={"Name": "batter", "Tm": "team"})
+    picks = _df_to_records(cached.picks)
+    today = _df_to_records(cached.today)
+
+    # Prices are the difference between "the screen is right two thirds of the
+    # time" and "the screen makes money" — at -207 those are the same number.
+    # Never let a FanDuel hiccup take the board down with it: no odds just
+    # means the EV columns come back null.
+    odds_meta = {"age_seconds": None, "error": "not attempted", "count": 0}
+    try:
+        from .fanduel.odds import cached_hit_odds
+        from . import pricing
+
+        got = await cached_hit_odds(state=settings.fanduel_state)
+        pricing.enrich_records(picks, got["odds"])
+        pricing.enrich_records(today, got["odds"])
+        odds_meta = {
+            "age_seconds": got["age_seconds"],
+            "error": got["error"],
+            "count": len(got["odds"]),
+        }
+    except Exception as e:
+        logger.warning("odds enrichment failed: %s", e)
+        odds_meta["error"] = str(e)
+
     return {
-        "picks": _df_to_records(cached.picks),
+        "picks": picks,
         "hot_bats": _df_to_records(hot),
-        "today": _df_to_records(cached.today),
+        "today": today,
         "as_of": status["cached_date"],
         "stale": bool(status.get("stale")),
+        "odds": odds_meta,
     }
 
 
