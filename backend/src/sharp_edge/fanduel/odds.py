@@ -124,12 +124,13 @@ class FanDuelOdds:
                     prices[_norm(name)] = int(odds)
         return prices
 
-    async def hit_odds_for_slate(self, target: Optional[date] = None) -> dict[str, int]:
-        """Every batter's to-record-a-hit price across the slate.
+    async def hit_prices_detailed(self, target: Optional[date] = None) -> dict[str, dict]:
+        """Prices with the game they belong to.
 
-        Names are normalised, and a batter appears once — the same player
-        can't be in two games on one day, so a flat map is safe and makes the
-        join at the call site trivial.
+        A closing price is only meaningful relative to *its own* first pitch —
+        the card runs from lunchtime to late evening, so "before first pitch"
+        is a different moment for every game. Carrying ``event_start`` lets a
+        later pass work out how close to the bell each quote was taken.
         """
         target = target or date.today()
         async with httpx.AsyncClient(
@@ -146,16 +147,33 @@ class FanDuelOdds:
 
             async def one(ev):
                 async with sem:
-                    return await self.fetch_hit_prices(client, ev["event_id"])
+                    return ev, await self.fetch_hit_prices(client, ev["event_id"])
 
-            merged: dict[str, int] = {}
-            for prices in await asyncio.gather(*(one(e) for e in events)):
-                merged.update(prices)
+            merged: dict[str, dict] = {}
+            for ev, prices in await asyncio.gather(*(one(e) for e in events)):
+                for name, american in prices.items():
+                    merged[name] = {
+                        "odds": american,
+                        "event_id": ev["event_id"],
+                        "event_name": ev["name"],
+                        "event_start": ev["open_date"],
+                    }
             logger.info(
                 "[fd-odds] %d games -> %d batter prices for %s",
                 len(events), len(merged), target,
             )
             return merged
+
+    async def hit_odds_for_slate(self, target: Optional[date] = None) -> dict[str, int]:
+        """Every batter's to-record-a-hit price across the slate.
+
+        Names are normalised, and a batter appears once — the same player
+        can't be in two games on one day, so a flat map is safe and makes the
+        join at the call site trivial. This is the projection of
+        ``hit_prices_detailed`` that the live screen wants.
+        """
+        detailed = await self.hit_prices_detailed(target)
+        return {name: v["odds"] for name, v in detailed.items()}
 
 
 # --------------------------------------------------------------------------

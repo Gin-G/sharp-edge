@@ -150,3 +150,74 @@ def test_a_failed_event_page_yields_no_prices_rather_than_raising():
 
     got = asyncio.run(fd_odds.FanDuelOdds().fetch_hit_prices(_Client(), "1"))
     assert got == {}
+
+
+# --------------------------------------------------------------------------
+# Closing prices
+# --------------------------------------------------------------------------
+
+def _snap():
+    import importlib.util
+    from pathlib import Path
+    p = Path(__file__).resolve().parent.parent / "scripts" / "snapshot_odds.py"
+    spec = importlib.util.spec_from_file_location("snap", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_closing_price_is_the_last_quote_before_that_batters_own_first_pitch():
+    """The card runs from lunchtime to late evening, so one pass is near the
+    bell for a few games and hours early for the rest. Each batter's close is
+    relative to his own game."""
+    import pandas as pd
+    snap = _snap()
+
+    df = pd.DataFrame([
+        # Day game: the 15:00 pass is 80 min out, the later pass is past start.
+        {"batter": "day guy", "fd_odds": -200, "mins_to_start": 80.0,
+         "captured_at": "T1"},
+        {"batter": "day guy", "fd_odds": -260, "mins_to_start": -200.0,
+         "captured_at": "T2"},
+        # Night game: both passes pre-game, the later one is the close.
+        {"batter": "night guy", "fd_odds": -180, "mins_to_start": 500.0,
+         "captured_at": "T1"},
+        {"batter": "night guy", "fd_odds": -215, "mins_to_start": 25.0,
+         "captured_at": "T2"},
+    ])
+    close = snap.closing_prices(df).set_index("batter")["fd_odds"].to_dict()
+
+    # The day game's in-play quote must not become its "close".
+    assert close["day guy"] == -200
+    assert close["night guy"] == -215
+
+
+def test_a_batter_whose_game_already_started_keeps_his_pre_game_close():
+    import pandas as pd
+    snap = _snap()
+    df = pd.DataFrame([
+        {"batter": "x", "fd_odds": -150, "mins_to_start": 10.0, "captured_at": "T1"},
+        {"batter": "x", "fd_odds": -400, "mins_to_start": -30.0, "captured_at": "T2"},
+    ])
+    assert snap.closing_prices(df)["fd_odds"].tolist() == [-150]
+
+
+def test_unknown_game_time_falls_back_to_the_last_capture():
+    import pandas as pd
+    snap = _snap()
+    df = pd.DataFrame([
+        {"batter": "x", "fd_odds": -150, "mins_to_start": None, "captured_at": "T1"},
+        {"batter": "x", "fd_odds": -170, "mins_to_start": None, "captured_at": "T2"},
+    ])
+    got = snap.closing_prices(df)
+    assert len(got) == 1 and got["fd_odds"].iloc[0] in (-150, -170)
+
+
+def test_mins_to_start_goes_negative_once_underway():
+    from datetime import datetime, timezone
+    snap = _snap()
+    now = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
+    assert snap._mins_to_start("2026-08-07T23:00:00.000Z", now) == 300.0
+    assert snap._mins_to_start("2026-08-07T17:00:00.000Z", now) == -60.0
+    assert snap._mins_to_start(None, now) is None
+    assert snap._mins_to_start("not a date", now) is None

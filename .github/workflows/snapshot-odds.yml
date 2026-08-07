@@ -10,19 +10,37 @@ name: Daily odds snapshot
 # a day that can never be backtested properly. That makes it the rare research
 # job worth putting on a schedule.
 #
-# Twice a day, and the second pass merges rather than overwrites:
+# Passes accumulate through the day rather than replacing each other, because
+# the number that actually matters is the *closing* price. Beating an opening
+# line mostly means being early; beating the close means being right, since by
+# then the market has absorbed lineups, weather, scratches and whatever the
+# sharp money knew.
 #
-#   15:00 UTC  11am ET — ahead of the earliest first pitch (~12:35pm ET), so
-#              day games are captured while their markets are still pre-game.
-#   21:30 UTC  5:30pm ET — closer to the evening slate, which is most of the
-#              card and where the prices are nearer what you'd actually get.
-#              Day games are already underway and absent from this fetch; the
-#              merge keeps the 15:00 rows for them.
+# "Before first pitch" is per-game, not per-slate — the card runs from about
+# 12:35pm to 10:10pm ET, so no single pass is near the bell for more than a
+# few games. Hence a pass ahead of each start cluster. Every row records
+# mins_to_start, and a batter's close is his last row still positive on it.
+#
+#   15:00 UTC  11am ET   full pass — the only one that joins to the board, so
+#                        it pays for Statcast (~3 min). Everything after it is
+#                        --prices-only and takes seconds.
+#   16:20 UTC  12:20pm   ahead of the ~12:35pm day games
+#   19:50 UTC   3:50pm   ahead of the ~4:05pm afternoon games
+#   22:50 UTC   6:50pm   ahead of the 6:40/7:05pm cluster, most of the card
+#   23:55 UTC   7:55pm   ahead of the ~8:10pm starts
+#   01:25 UTC   9:25pm   ahead of the west-coast 9:40/10:10pm starts
+#
+# The cheap passes cost seconds each, so the whole day is a few minutes of
+# runner time on top of the one full pass.
 
 on:
   schedule:
-    - cron: '0 15 * * *'
-    - cron: '30 21 * * *'
+    - cron: '0 15 * * *'    # full pass, with board context
+    - cron: '20 16 * * *'   # close: day games
+    - cron: '50 19 * * *'   # close: afternoon
+    - cron: '50 22 * * *'   # close: main evening cluster
+    - cron: '55 23 * * *'   # close: late evening
+    - cron: '25 1 * * *'    # close: west coast
   workflow_dispatch:
     inputs:
       date:
@@ -31,12 +49,17 @@ on:
       state:
         description: 'FanDuel state code (affects the API subdomain)'
         default: 'CO'
+      prices_only:
+        description: 'Skip the board join (seconds instead of minutes)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
-# Never let the 21:30 pass start while 15:00 is still going — they write the
-# same file, and the merge is read-modify-write.
+# Two passes must never overlap: appending to the day's file is a
+# read-modify-write, and a closing pass starting while the full pass is still
+# going would lose whichever wrote first.
 concurrency:
   group: snapshot-odds
   cancel-in-progress: false
@@ -44,8 +67,8 @@ concurrency:
 jobs:
   snapshot:
     runs-on: ubuntu-latest
-    # Only the first run of a season pays for the Statcast scrape; after that
-    # the cache makes this a couple of minutes.
+    # Generous only for the full pass, which loads Statcast. The closing
+    # passes finish in seconds.
     timeout-minutes: 45
     env:
       SHARP_EDGE_CACHE_DIR: ${{ github.workspace }}/.cache/statcast
@@ -79,11 +102,34 @@ jobs:
             snapshot-odds-
             backtest-batters-
 
+      # Only the 15:00 pass joins to the board. The rest just need prices, and
+      # skipping the join turns a 3-minute job into a 5-second one.
+      - name: Decide pass type
+        id: pass
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            if [ "${{ github.event.schedule }}" = "0 15 * * *" ]; then
+              echo "flag=" >> "$GITHUB_OUTPUT"
+              echo "kind=full (with board context)" >> "$GITHUB_OUTPUT"
+            else
+              echo "flag=--prices-only" >> "$GITHUB_OUTPUT"
+              echo "kind=closing (prices only)" >> "$GITHUB_OUTPUT"
+            fi
+          elif [ "${{ inputs.prices_only }}" = "true" ]; then
+            echo "flag=--prices-only" >> "$GITHUB_OUTPUT"
+            echo "kind=closing (prices only)" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=" >> "$GITHUB_OUTPUT"
+            echo "kind=full (with board context)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Snapshot odds
         run: |
+          echo "pass: ${{ steps.pass.outputs.kind }}"
           python backend/scripts/snapshot_odds.py \
             --dir "$ODDS_DIR" \
             --state "${{ inputs.state || 'CO' }}" \
+            ${{ steps.pass.outputs.flag }} \
             ${{ inputs.date && format('--date {0}', inputs.date) || '' }}
 
       - name: Summarise
@@ -112,7 +158,7 @@ jobs:
             echo "no odds changes to commit"
             exit 0
           fi
-          git commit -m "odds: snapshot $(date -u +%Y-%m-%d) slate prices"
+          git commit -m "odds: ${{ steps.pass.outputs.kind }} snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
           # The schedule can collide with a push to main; rebase and retry
           # rather than failing a run whose data is already fetched.
           for i in 1 2 3; do
