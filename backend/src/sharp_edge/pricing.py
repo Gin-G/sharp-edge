@@ -125,17 +125,31 @@ def _breakeven(p: float) -> int:
     return round((dec - 1) * 100) if dec >= 2 else -round(100 / (dec - 1))
 
 
-def enrich_records(records: list[dict], odds: dict[str, int]) -> list[dict]:
+def enrich_records(records: list[dict], odds: dict) -> list[dict]:
     """Attach price, model probability and EV to screen rows in place.
 
-    ``odds`` is keyed by normalised batter name. A row with no posted market
-    still gets ``model_p`` and ``breakeven_odds`` — knowing the price you'd
-    need is useful even when there isn't one.
+    ``odds`` is keyed by normalised batter name and may be either a flat
+    ``{name: american}`` map or the detailed ``{name: {...}}`` form. The
+    detailed form additionally carries the FanDuel ids a bet-slip link is
+    built from, so they're passed through when present.
+
+    A row with no posted market still gets ``model_p`` and ``breakeven_odds``
+    — knowing the price you'd need is useful even when there isn't one.
     """
     from ._data import _norm
 
     for r in records:
         name = r.get("batter")
-        american = odds.get(_norm(name)) if name else None
+        q = odds.get(_norm(name)) if name else None
+        if isinstance(q, dict):
+            american = q.get("odds")
+            r["fd_market_id"] = q.get("market_id")
+            r["fd_selection_id"] = q.get("selection_id")
+            r["fd_event_id"] = q.get("event_id")
+        else:
+            american = q
+            r.setdefault("fd_market_id", None)
+            r.setdefault("fd_selection_id", None)
+            r.setdefault("fd_event_id", None)
         r.update(price_pick(r.get("p_l3_h9"), american))
     return records

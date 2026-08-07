@@ -116,6 +116,18 @@ export interface BatterScreen {
     error: string | null;
     count: number;
   };
+  bundle?: {
+    legs: BatterRow[];
+    summary: {
+      legs: number;
+      decimal: number | null;
+      american: number | null;
+      model_p: number | null;
+      implied_p: number | null;
+      ev: number | null;
+    };
+    betslip_url: string | null;
+  };
 }
 
 export interface HomerRow {

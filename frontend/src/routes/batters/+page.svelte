@@ -44,6 +44,7 @@
   onMount(load);
   onDestroy(() => {
     if (pollTimer) clearTimeout(pollTimer);
+    if (copyTimer) clearTimeout(copyTimer);
   });
 
   function fmtAvg(v: number | null): string {
@@ -59,6 +60,23 @@
   function fmtOdds(v: number | null): string {
     if (v === null || v === undefined) return '—';
     return v > 0 ? `+${v}` : `${v}`;
+  }
+
+  let copied = false;
+  let copyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function copyBetslip() {
+    const url = data?.bundle?.betslip_url;
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      copied = true;
+      if (copyTimer) clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => (copied = false), 2000);
+    } catch {
+      // Clipboard is permission-gated and fails silently in some contexts;
+      // the link itself is right there to copy by hand.
+    }
   }
 
   function fmtPct(v: number | null): string {
@@ -141,6 +159,64 @@
   {/if}
 
   <PickTrackRecord screen="batter" winLabel="Hit" />
+
+  {#if data?.bundle && data.bundle.legs.length > 0}
+    <!-- The day's bundle: +EV only, one leg per game, ranked by EV. Sits
+         above the board because it's the actionable part — the board is
+         ~12 picks and most of them are priced out. -->
+    <section class="card p-0 overflow-hidden border-emerald-800/50">
+      <div class="px-5 py-4 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
+        <h2 class="text-sm font-semibold text-emerald-300 uppercase tracking-wider">
+          Today's Bundle
+          <span class="ml-2 normal-case font-normal text-xs text-slate-500">
+            +EV only, one leg per game
+          </span>
+        </h2>
+        {#if data.bundle.summary.american != null}
+          <span class="text-xs text-slate-400 tabular-nums">
+            {data.bundle.summary.legs}-leg parlay
+            <span class="text-slate-200 font-semibold">{fmtOdds(data.bundle.summary.american)}</span>
+            · model {fmtPct(data.bundle.summary.model_p)} vs implied {fmtPct(data.bundle.summary.implied_p)}
+            · <span class={evClass(data.bundle.summary.ev)}>EV {fmtEv(data.bundle.summary.ev)}</span>
+          </span>
+        {/if}
+      </div>
+
+      <div class="divide-y divide-border/50">
+        {#each data.bundle.legs as r (r.batter)}
+          <div class="px-5 py-2.5 flex items-center justify-between gap-4 text-sm">
+            <div class="min-w-0">
+              <span class="text-slate-200 font-medium">{r.batter}</span>
+              <span class="text-slate-500 text-xs"> vs {r.opposing_pitcher}</span>
+            </div>
+            <div class="flex items-center gap-4 tabular-nums text-xs shrink-0">
+              <span class="text-slate-500">SP {fmtNum(r.p_l3_h9)} H/9</span>
+              <span class="text-slate-300">{fmtOdds(r.fd_odds)}</span>
+              <span class={evClass(r.ev)}>{fmtEv(r.ev)}</span>
+            </div>
+          </div>
+        {/each}
+      </div>
+
+      <div class="px-5 py-4 border-t border-border flex items-center gap-3 flex-wrap">
+        {#if data.bundle.betslip_url}
+          <a
+            href={data.bundle.betslip_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="px-3 py-1.5 rounded-lg text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-500"
+          >Open in FanDuel bet slip</a>
+          <button
+            class="px-3 py-1.5 rounded-lg text-sm font-medium bg-surface-700 text-slate-300 hover:bg-surface-600"
+            on:click={copyBetslip}
+          >{copied ? 'Copied' : 'Copy link'}</button>
+        {/if}
+        <span class="text-xs text-slate-500">
+          Prices move — re-check the slip before placing.
+        </span>
+      </div>
+    </section>
+  {/if}
 
   {#if loading && !data}
     <div class="card text-slate-400 text-sm flex items-center gap-3">

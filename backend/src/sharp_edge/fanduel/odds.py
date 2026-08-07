@@ -99,6 +99,20 @@ class FanDuelOdds:
         self, client: httpx.AsyncClient, event_id: str
     ) -> dict[str, int]:
         """``{normalised batter name: american odds}`` for one game."""
+        return {k: v["odds"] for k, v in
+                (await self.fetch_hit_runners(client, event_id)).items()}
+
+    async def fetch_hit_runners(
+        self, client: httpx.AsyncClient, event_id: str
+    ) -> dict[str, dict]:
+        """Price plus the ids that identify the selection to FanDuel.
+
+        ``market_id`` and ``selection_id`` are what an addToBetslip deep link
+        is built from — they're the difference between "here are some picks"
+        and "here is a loaded bet slip". A runner that isn't ACTIVE is skipped
+        along with a non-OPEN market: a scratched batter still has ids, and a
+        link built from them would fail on arrival.
+        """
         try:
             data = await self._get(
                 client, "event-page", {"eventId": event_id, "tab": BATTER_TAB}
@@ -107,22 +121,30 @@ class FanDuelOdds:
             logger.warning("[fd-odds] event %s: %s", event_id, e)
             return {}
 
-        prices: dict[str, int] = {}
+        out: dict[str, dict] = {}
         for market in (data.get("attachments", {}).get("markets", {}) or {}).values():
             if market.get("marketType") != HIT_MARKET:
                 continue
             if market.get("marketStatus") not in (None, "OPEN"):
                 continue
+            market_id = market.get("marketId")
             for runner in market.get("runners") or []:
                 name = runner.get("runnerName")
+                if runner.get("runnerStatus") not in (None, "ACTIVE"):
+                    continue
                 odds = (
                     (runner.get("winRunnerOdds") or {})
                     .get("americanDisplayOdds", {})
                     .get("americanOddsInt")
                 )
                 if name and odds is not None:
-                    prices[_norm(name)] = int(odds)
-        return prices
+                    out[_norm(name)] = {
+                        "odds": int(odds),
+                        "market_id": market_id,
+                        "selection_id": runner.get("selectionId"),
+                        "sgm": bool(market.get("sgmMarket")),
+                    }
+        return out
 
     async def hit_prices_detailed(self, target: Optional[date] = None) -> dict[str, dict]:
         """Prices with the game they belong to.
@@ -147,13 +169,13 @@ class FanDuelOdds:
 
             async def one(ev):
                 async with sem:
-                    return ev, await self.fetch_hit_prices(client, ev["event_id"])
+                    return ev, await self.fetch_hit_runners(client, ev["event_id"])
 
             merged: dict[str, dict] = {}
-            for ev, prices in await asyncio.gather(*(one(e) for e in events)):
-                for name, american in prices.items():
+            for ev, runners in await asyncio.gather(*(one(e) for e in events)):
+                for name, r in runners.items():
                     merged[name] = {
-                        "odds": american,
+                        **r,
                         "event_id": ev["event_id"],
                         "event_name": ev["name"],
                         "event_start": ev["open_date"],
@@ -192,7 +214,12 @@ _CACHE_TTL_SECONDS = 300
 async def cached_hit_odds(
     target: Optional[date] = None, state: str = "CO", force: bool = False
 ) -> dict:
-    """``{"odds": {...}, "fetched_at": ts, "age_seconds": n, "error": str|None}``"""
+    """``{"odds": {...}, "fetched_at": ts, "age_seconds": n, "error": str|None}``
+
+    ``odds`` is the detailed form — price plus the FanDuel ids — because the
+    bet-slip link needs them and re-fetching just for ids would double the
+    calls for data we already had in hand.
+    """
     import time
 
     target = target or date.today()
@@ -205,7 +232,7 @@ async def cached_hit_odds(
     )
     if not fresh:
         try:
-            odds = await FanDuelOdds(state=state).hit_odds_for_slate(target)
+            odds = await FanDuelOdds(state=state).hit_prices_detailed(target)
             if odds:
                 _cache.update({"odds": odds, "fetched_at": now,
                                "date": target, "error": None})

@@ -488,6 +488,11 @@ async def batter_screen():
         logger.warning("odds enrichment failed: %s", e)
         odds_meta["error"] = str(e)
 
+    # The day's bundle: +EV only, one leg per game, ranked by EV — plus a
+    # link that loads it straight into the bet slip.
+    from . import bundle as _bundle
+
+    legs = _bundle.build(picks)
     return {
         "picks": picks,
         "hot_bats": _df_to_records(hot),
@@ -495,6 +500,11 @@ async def batter_screen():
         "as_of": status["cached_date"],
         "stale": bool(status.get("stale")),
         "odds": odds_meta,
+        "bundle": {
+            "legs": legs,
+            "summary": _bundle.summarise(legs),
+            "betslip_url": _bundle.betslip_url(legs, state=settings.fanduel_state),
+        },
     }
 
 
