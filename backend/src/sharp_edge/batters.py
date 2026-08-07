@@ -5,14 +5,30 @@ Returns three frames:
   hot_bats : everyone hitting > min_recent_avg over last N days
   today    : every batter in today's lineups, enriched with recent form,
              splits vs the opposing SP's handedness, BvP, and the SP's
-             last-3-starts ERA — with edge flags so you can slice it
+             last-3-starts form — with edge flags so you can slice it
              however you want
-  picks    : hot bats facing an advantageous matchup (≥1 edge type)
+  picks    : hot bats facing an advantageous matchup (≥1 edge type) whose
+             starter isn't in a hit-suppressing run
 
 Edges:
   bvp_edge       : bvp_avg ≥ min_bvp_avg & bvp_pa ≥ min_bvp_pa
   hand_slump_edge: vs_hand_avg ≥ min_hand_avg & vs_hand_pa ≥ min_hand_pa
-                   & opposing SP last-3 ERA ≥ min_slump_era
+                   & the opposing SP is giving up runs (last-3 ERA ≥
+                   min_slump_era) or hits (last-3 H/9 ≥ min_hittable_h9 or
+                   BAA ≥ min_hittable_baa) — and is not sharp
+
+Starting-pitcher form (last 3 starts):
+  The bet settles on "did this batter get a hit", so the starter's recent
+  *hit* suppression matters more than his ERA. Three solo homers push a
+  start over 5.00 ERA while the lineup managed four hits; a starter on that
+  run beats hit props. So each row carries the SP's last-3 H/9 and BAA
+  alongside ERA, and rows are banded:
+
+    SHARP    — h9 ≤ max_sharp_h9 or baa ≤ max_sharp_baa (≥ min_sharp_starts
+               starts of evidence). Vetoed out of picks entirely.
+    HITTABLE — h9 ≥ min_hittable_h9 or baa ≥ min_hittable_baa
+    NEUTRAL  — in between
+    UNKNOWN  — the game log carried no contact line; nothing is vetoed
 
 deps: install with `pip install -e ".[models]"` (pybaseball, MLB-StatsAPI, pandas)
 """
@@ -40,8 +56,9 @@ from sharp_edge._data import (
     _load_statcast,
     _local_time_str,
     _norm,
+    _pitcher_form,
+    _pitcher_gamelog_starts,
     _pitcher_info,
-    _pitcher_last_3,
     _roster_batters,
     fetch_schedule,
     statcast_is_stale,
@@ -293,6 +310,76 @@ def lookup_bvp(batter_name: str, pitcher_name: str) -> dict:
     }
 
 
+# -----------------------------------------------------------------------------
+# Starting-pitcher hit suppression
+# -----------------------------------------------------------------------------
+#
+# League-average starters sit near 8.5 H/9 and a .250 BAA.
+#
+# The SHARP bars are symmetric around that — roughly a run-and-a-half of hits
+# per nine under league average. The 125-day backtest (EXPERIMENTS.md, run 1)
+# swept them from 5.0 to 9.0 H/9 and .17 to .27 BAA and found the curve flat
+# with no knee, so they stay where they were: there is no evidence to move them.
+#
+# The HITTABLE bars are *not* symmetric, and that's the run-1 finding. Hit
+# suppression turned out to be a tail effect rather than a gradient — hot bats
+# facing starters between 6.5 and 11.0 H/9 hit within noise of each other
+# (59.8–63.7%, non-monotone), and separation only appears past 11. The original
+# 9.50 / .270 guess sat in the flat region and bought nothing: HITTABLE and
+# NEUTRAL both came back at 61.3% over the whole board.
+#
+# Both bars must move together. h9 >= 11.0 is a strict subset of baa >= .270,
+# so raising only H/9 leaves the BAA arm of the OR binding and changes almost
+# nothing (65.0% at 21.6 picks/day, versus 67.8% at 11.8 for the H/9 rule
+# alone). .310 is the knee of the BAA sweep and the value that keeps the two
+# arms selecting the same population.
+
+MAX_SHARP_H9: float = 6.50
+MAX_SHARP_BAA: float = 0.210
+MIN_HITTABLE_H9: float = 11.00
+MIN_HITTABLE_BAA: float = 0.310
+MIN_SHARP_STARTS: int = 2
+
+
+def _sp_band(
+    form: dict,
+    max_sharp_h9: float = MAX_SHARP_H9,
+    max_sharp_baa: float = MAX_SHARP_BAA,
+    min_hittable_h9: float = MIN_HITTABLE_H9,
+    min_hittable_baa: float = MIN_HITTABLE_BAA,
+    min_sharp_starts: int = MIN_SHARP_STARTS,
+) -> str:
+    """Classify a starter's recent contact profile: SHARP / HITTABLE /
+    NEUTRAL / UNKNOWN.
+
+    Either rate alone is enough to land in a band — H/9 and BAA disagree
+    mostly when walks make an outing short, and in that case whichever one
+    fires is the one carrying the signal. UNKNOWN when the game log had no
+    contact line at all, which keeps a missing field from vetoing picks.
+
+    Both bands require ``min_sharp_starts`` of evidence. HITTABLE used to be
+    ungated, which let one bad outing brand a starter: 15% of HITTABLE rows in
+    the run-1 boards came off one or two starts, and on opening week every
+    banded pitcher had exactly one. Picks were never affected — the caller
+    checks ``starts >= 3`` itself — but the label was wrong on the board and in
+    ``GET /batters/pitcher-form``.
+    """
+    h9, baa = form.get("h9"), form.get("baa")
+    if h9 is None and baa is None:
+        return "UNKNOWN"
+    if form.get("starts", 0) < min_sharp_starts:
+        return "NEUTRAL"
+    if (h9 is not None and h9 <= max_sharp_h9) or (
+        baa is not None and baa <= max_sharp_baa
+    ):
+        return "SHARP"
+    if (h9 is not None and h9 >= min_hittable_h9) or (
+        baa is not None and baa >= min_hittable_baa
+    ):
+        return "HITTABLE"
+    return "NEUTRAL"
+
+
 def screen_today(
     min_recent_avg: float = 0.300,
     min_recent_ab: int = 10,
@@ -301,6 +388,13 @@ def screen_today(
     min_hand_avg: float = 0.400,
     min_hand_pa: int = 50,
     min_slump_era: float = 5.00,
+    max_sharp_h9: float = MAX_SHARP_H9,
+    max_sharp_baa: float = MAX_SHARP_BAA,
+    min_hittable_h9: float = MIN_HITTABLE_H9,
+    min_hittable_baa: float = MIN_HITTABLE_BAA,
+    min_sharp_starts: int = MIN_SHARP_STARTS,
+    veto_sharp_sp: bool = True,
+    include_hittable_edge: bool = True,
     days: int = 7,
     workers: int = 12,
     verbose: bool = True,
@@ -314,6 +408,13 @@ def screen_today(
         min_hand_avg=min_hand_avg,
         min_hand_pa=min_hand_pa,
         min_slump_era=min_slump_era,
+        max_sharp_h9=max_sharp_h9,
+        max_sharp_baa=max_sharp_baa,
+        min_hittable_h9=min_hittable_h9,
+        min_hittable_baa=min_hittable_baa,
+        min_sharp_starts=min_sharp_starts,
+        veto_sharp_sp=veto_sharp_sp,
+        include_hittable_edge=include_hittable_edge,
         days=days,
         workers=workers,
         verbose=verbose,
@@ -350,6 +451,13 @@ def screen_for_date(
     min_hand_avg: float = 0.400,
     min_hand_pa: int = 50,
     min_slump_era: float = 5.00,
+    max_sharp_h9: float = MAX_SHARP_H9,
+    max_sharp_baa: float = MAX_SHARP_BAA,
+    min_hittable_h9: float = MIN_HITTABLE_H9,
+    min_hittable_baa: float = MIN_HITTABLE_BAA,
+    min_sharp_starts: int = MIN_SHARP_STARTS,
+    veto_sharp_sp: bool = True,
+    include_hittable_edge: bool = True,
     days: int = 7,
     workers: int = 12,
     verbose: bool = True,
@@ -362,6 +470,14 @@ def screen_for_date(
     of the historical mode: handedness splits are the player's career line
     as of now, not as of the target date — career splits move slowly, so the
     lookahead is small.
+
+    ``veto_sharp_sp`` drops batters facing a SHARP starter from ``picks``.
+    They stay in ``today`` tagged SHARP-SP, so the board still shows them and
+    a backfill can be re-run with the veto off to compare hit rates.
+
+    ``include_hittable_edge`` turned on after run 1 of the backtest. It is the
+    volume in this screen: ~12.5 picks/day against ~2.7 for BvP alone, at a
+    higher hit rate (67.4% vs 66.2% over 125 days). See EXPERIMENTS.md.
     """
     today = target_date
     end = today - timedelta(days=1)
@@ -455,7 +571,10 @@ def screen_for_date(
             "bvp": _bvp(bid, ppid, sc_df),
             "hand": _handedness_splits(bid),
             "pinfo": _pitcher_info(ppid),
-            "p_l3": _pitcher_last_3(ppid, season, before=as_of),
+            "p_l3": _pitcher_form(ppid, season, starts=3, before=as_of),
+            # Season line for context: it says whether a three-start SHARP
+            # run is who the pitcher is or a hot streak he's riding.
+            "p_szn": _pitcher_form(ppid, season, starts=None, before=as_of),
         }
 
     if targets:
@@ -470,6 +589,7 @@ def screen_for_date(
         hand_split = r["hand"]
         p_hand = r["pinfo"]["hand"]
         p_l3 = r["p_l3"]
+        p_szn = r["p_szn"]
         bvp = r["bvp"] or {"avg": None, "pa": 0, "hits": 0}
 
         if p_hand == "R":
@@ -490,25 +610,57 @@ def screen_for_date(
             and recent_avg >= min_recent_avg
             and recent_ab >= min_recent_ab
         )
+        band = _sp_band(
+            p_l3,
+            max_sharp_h9=max_sharp_h9,
+            max_sharp_baa=max_sharp_baa,
+            min_hittable_h9=min_hittable_h9,
+            min_hittable_baa=min_hittable_baa,
+            min_sharp_starts=min_sharp_starts,
+        )
+        p_sharp = band == "SHARP"
+        p_hittable = band == "HITTABLE"
+
         bvp_edge = (
             bvp["avg"] is not None
             and bvp["avg"] >= min_bvp_avg
             and bvp["pa"] >= min_bvp_pa
         )
+        # "Slumping" now means giving up runs *or* giving up hits — but never
+        # while suppressing hits. A 5.00+ ERA built on homers used to qualify
+        # a pitcher who was otherwise carving lineups up; that's the case this
+        # screen kept losing.
+        p_slumping = (
+            p_l3["starts"] >= 3
+            and not p_sharp
+            and (
+                (p_l3["era"] is not None and p_l3["era"] >= min_slump_era)
+                or p_hittable
+            )
+        )
         hand_slump_edge = (
             vs_hand_avg is not None
             and vs_hand_avg >= min_hand_avg
             and vs_hand_pa >= min_hand_pa
-            and p_l3["era"] is not None
-            and p_l3["era"] >= min_slump_era
-            and p_l3["starts"] >= 3
+            and p_slumping
         )
+        # Hot bat vs. a starter who has been getting hit — no BvP or career
+        # split required, so it reaches far more of the board than the two
+        # edges above. On by default since run 1 of the backtest, which is also
+        # what moved the HITTABLE bars to 11.0 / .310; at the original 9.5/.270
+        # this edge added volume at the hit rate of simply taking any hot bat.
+        # Keeps its own starts >= 3 floor, stricter than the band's.
+        hittable_sp_edge = is_hot and p_hittable and p_l3["starts"] >= 3
 
         tags = []
         if bvp_edge:
             tags.append("BvP")
         if hand_slump_edge:
             tags.append("HAND+SLUMP")
+        if hittable_sp_edge:
+            tags.append("HOT+HITTABLE")
+        if p_sharp:
+            tags.append("SHARP-SP")
 
         rows.append({
             "batter": bname,
@@ -527,9 +679,21 @@ def screen_for_date(
             "p_l3_era": p_l3["era"],
             "p_l3_ip": p_l3["ip"],
             "p_l3_starts": p_l3["starts"],
+            "p_l3_hits": p_l3["hits"],
+            "p_l3_h9": p_l3["h9"],
+            "p_l3_baa": p_l3["baa"],
+            "p_l3_whip": p_l3["whip"],
+            "p_l3_k9": p_l3["k9"],
+            "p_season_h9": p_szn["h9"],
+            "p_season_baa": p_szn["baa"],
+            "p_season_starts": p_szn["starts"],
+            "p_form": band,
+            "p_sharp": p_sharp,
+            "p_hittable": p_hittable,
             "is_hot": is_hot,
             "bvp_edge": bvp_edge,
             "hand_slump_edge": hand_slump_edge,
+            "hittable_sp_edge": hittable_sp_edge,
             "tags": ",".join(tags),
             "game_time": _local_time_str(gtime),
         })
@@ -539,7 +703,16 @@ def screen_for_date(
     if today_df.empty:
         picks = pd.DataFrame()
     else:
-        mask = today_df["is_hot"] & (today_df["bvp_edge"] | today_df["hand_slump_edge"])
+        edge = today_df["bvp_edge"] | today_df["hand_slump_edge"]
+        if include_hittable_edge:
+            edge = edge | today_df["hittable_sp_edge"]
+        mask = today_df["is_hot"] & edge
+        if veto_sharp_sp:
+            # The batter still shows on the board tagged SHARP-SP; he just
+            # isn't a pick. A starter holding lineups to a .200 average is
+            # the wrong side of a "records a hit" bet no matter how good the
+            # BvP line looks — five career at-bats don't outweigh it.
+            mask = mask & ~today_df["p_sharp"]
         picks = today_df[mask].copy()
         if not picks.empty:
             picks = picks.sort_values(
@@ -547,7 +720,38 @@ def screen_for_date(
                 ascending=[False, False, False, False],
             ).reset_index(drop=True)
 
+    if verbose:
+        bands = today_df["p_form"].value_counts().to_dict() if not today_df.empty else {}
+        print(f"[screen] sp_form={bands} picks={len(picks)}")
+
     return ScreenResult(picks=picks, hot_bats=hot_df, today=today_df)
+
+
+def lookup_pitcher_form(
+    pitcher_name: str, starts: int = 3, season: Optional[int] = None
+) -> dict:
+    """Last-N-starts form for one pitcher, plus the band the screen assigns.
+
+    Exposed so a surprising pick (or a surprising *absence*) can be checked
+    against the same numbers the screen used, rather than inferred from the
+    board.
+    """
+    ps = statsapi.lookup_player(pitcher_name)
+    if not ps:
+        raise ValueError(f"pitcher not found: {pitcher_name!r}")
+    pid = ps[0]["id"]
+    season = season or date.today().year
+    form = _pitcher_form(pid, season, starts=starts)
+    return {
+        "pitcher": ps[0]["fullName"],
+        "pitcher_id": pid,
+        "season": season,
+        "window_starts": starts,
+        "last_n": form,
+        "season_to_date": _pitcher_form(pid, season, starts=None),
+        "band": _sp_band(form),
+        "game_log": [dict(g) for g in _pitcher_gamelog_starts(pid, season)[:starts]],
+    }
 
 
 def find_value_bats(**kwargs) -> pd.DataFrame:

@@ -473,6 +473,25 @@ async def batter_screen():
     }
 
 
+@app.get("/batters/pitcher-form")
+async def batter_pitcher_form(name: str, starts: int = 3, season: Optional[int] = None):
+    """Recent-form line for one starting pitcher, plus the band the screen
+    assigns him (SHARP / HITTABLE / NEUTRAL / UNKNOWN).
+
+    The screen vetoes picks against a SHARP starter, so this is how you check
+    a surprising pick — or a surprising absence — against the same numbers the
+    screen used instead of inferring them from the board.
+    """
+    try:
+        from .batters import lookup_pitcher_form
+    except ImportError as e:
+        raise HTTPException(500, f"models extras not installed: {e}")
+    try:
+        return await asyncio.to_thread(lookup_pitcher_form, name, starts, season)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
 @app.get("/batters/screen/status")
 async def batter_screen_status():
     """Probe for the warm-up state — used by the frontend's polling loop."""
