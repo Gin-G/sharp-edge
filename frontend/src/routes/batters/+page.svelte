@@ -215,6 +215,30 @@
           Prices move — re-check the slip before placing.
         </span>
       </div>
+
+      {#if data.bundle.near_misses?.length}
+        <!-- A short bundle is usually the honest answer, since the market
+             already prices most of the screen's edge. Showing what missed,
+             and by how much, makes that a useful message instead of a
+             blank one. -->
+        <div class="px-5 py-3 border-t border-border bg-surface-800/40">
+          <div class="text-xs text-slate-500 mb-2">
+            Didn't clear the bar — and the price each would need:
+          </div>
+          {#each data.bundle.near_misses as m}
+            <div class="flex items-center justify-between text-xs py-0.5 tabular-nums">
+              <span class="text-slate-400">
+                {m.batter}<span class="text-slate-600"> vs {m.opposing_pitcher}</span>
+              </span>
+              <span class="flex items-center gap-3 shrink-0">
+                <span class="text-slate-500">{fmtOdds(m.fd_odds)}</span>
+                <span class={evClass(m.ev)}>{fmtEv(m.ev)}</span>
+                <span class="text-slate-600 w-24 text-right">needs {fmtOdds(m.needs)}</span>
+              </span>
+            </div>
+          {/each}
+        </div>
+      {/if}
     </section>
   {/if}
 

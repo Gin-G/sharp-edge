@@ -122,7 +122,15 @@ def snapshot(
                 "team": rec.get("team"),
                 "opposing_pitcher": rec.get("opposing_pitcher"),
                 "pitcher_id": rec.get("pitcher_id"),
-                "model_p": pricing.model_probability(rec.get("p_l3_h9")),
+                # Only picks get a probability. The calibration was fit on
+                # screen picks, and handing every batter on the board the same
+                # pitcher-derived ~66% would make a .190 hitter at -125 look
+                # like a huge edge. The price is still recorded for everyone —
+                # non-picks are the control group a price model needs.
+                "model_p": (
+                    pricing.model_probability(rec.get("p_l3_h9"))
+                    if pricing.is_screen_pick(rec) else None
+                ),
                 "recent_avg": rec.get("recent_avg"),
                 "recent_ab": rec.get("recent_ab"),
                 "vs_hand_avg": rec.get("vs_hand_avg"),

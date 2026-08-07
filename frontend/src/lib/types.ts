@@ -127,6 +127,14 @@ export interface BatterScreen {
       ev: number | null;
     };
     betslip_url: string | null;
+    near_misses: {
+      batter: string;
+      opposing_pitcher: string;
+      fd_odds: number | null;
+      ev: number | null;
+      edge_pts: number | null;
+      needs: number | null;
+    }[];
   };
 }
 

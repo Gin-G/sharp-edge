@@ -101,6 +101,31 @@ def build(
     return out
 
 
+def near_misses(records: list[dict], chosen: list[dict], limit: int = 4) -> list[dict]:
+    """Priced picks that didn't clear the bar, best first.
+
+    A one- or zero-leg bundle is frequently the honest answer — the market
+    prices most of the screen's edge already — but "nothing today" is a much
+    more useful message when you can see what was close and by how much.
+    ``needs`` is the price each would have to reach to become a bet.
+    """
+    taken = {id(r) for r in chosen}
+    out = [
+        {
+            "batter": r.get("batter"),
+            "opposing_pitcher": r.get("opposing_pitcher"),
+            "fd_odds": r.get("fd_odds"),
+            "ev": r.get("ev"),
+            "edge_pts": r.get("edge_pts"),
+            "needs": r.get("breakeven_odds"),
+        }
+        for r in records
+        if id(r) not in taken and r.get("ev") is not None
+    ]
+    out.sort(key=lambda r: -(r["ev"] or 0))
+    return out[:limit]
+
+
 def summarise(bundle: list[dict]) -> dict:
     """Combined odds and EV for the bundle taken as a parlay.
 

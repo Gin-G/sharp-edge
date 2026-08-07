@@ -97,10 +97,12 @@ def test_price_pick_flags_a_negative_edge():
 def test_enrich_records_joins_on_normalised_names():
     from sharp_edge._data import _norm
 
-    records = [
-        {"batter": "José Ramírez", "p_l3_h9": 16.2},
-        {"batter": "Nobody At All", "p_l3_h9": 12.0},
-    ]
+    def _pick(name, h9):
+        return {"batter": name, "p_l3_h9": h9, "is_hot": True,
+                "bvp_edge": False, "hand_slump_edge": False,
+                "hittable_sp_edge": True, "p_sharp": False}
+
+    records = [_pick("José Ramírez", 16.2), _pick("Nobody At All", 12.0)]
     pricing.enrich_records(records, {_norm("Jose Ramirez"): -150})
     assert records[0]["fd_odds"] == -150      # accents normalised away
     assert records[0]["ev"] > 0
@@ -221,3 +223,48 @@ def test_mins_to_start_goes_negative_once_underway():
     assert snap._mins_to_start("2026-08-07T17:00:00.000Z", now) == -60.0
     assert snap._mins_to_start(None, now) is None
     assert snap._mins_to_start("not a date", now) is None
+
+
+# --------------------------------------------------------------------------
+# Calibration eligibility
+# --------------------------------------------------------------------------
+
+def test_no_probability_is_claimed_outside_the_calibration_population():
+    """The model reads the *pitcher* alone, so it hands every batter the same
+    ~66%. Against a backup catcher's honest -125 that fabricates a huge fake
+    edge — on the day this was found, 55% of the whole board looked +EV."""
+    backup_catcher = {
+        "batter": "Weak Hitting Catcher", "p_l3_h9": 9.0,
+        "is_hot": False, "bvp_edge": False, "hand_slump_edge": False,
+        "hittable_sp_edge": False, "p_sharp": False,
+    }
+    pricing.enrich_records([backup_catcher], {"weak hitting catcher": -125})
+    assert backup_catcher["model_p"] is None
+    assert backup_catcher["ev"] is None
+    # The price itself is still reported — it's the *claim* we withhold.
+    assert backup_catcher["fd_odds"] == -125
+    assert backup_catcher["implied_p"] is not None
+
+
+def test_a_real_pick_still_gets_priced():
+    from sharp_edge._data import _norm
+    pick = {
+        "batter": "Hot Bat", "p_l3_h9": 16.2, "is_hot": True,
+        "bvp_edge": False, "hand_slump_edge": False,
+        "hittable_sp_edge": True, "p_sharp": False,
+    }
+    pricing.enrich_records([pick], {_norm("Hot Bat"): -220})
+    assert pick["model_p"] > pricing.BASE_RATE
+    assert pick["ev"] is not None
+
+
+def test_a_vetoed_row_is_not_priced():
+    """Facing a SHARP starter means the screen declined the bet; quoting an
+    EV for it would invite betting exactly what the veto exists to stop."""
+    vetoed = {
+        "batter": "Held Back", "p_l3_h9": 5.0, "is_hot": True,
+        "bvp_edge": True, "hand_slump_edge": False,
+        "hittable_sp_edge": False, "p_sharp": True,
+    }
+    pricing.enrich_records([vetoed], {"held back": -150})
+    assert vetoed["model_p"] is None and vetoed["ev"] is None

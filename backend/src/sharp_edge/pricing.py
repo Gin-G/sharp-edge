@@ -95,8 +95,42 @@ def kelly_fraction(p: float, american: int) -> float:
     return max(0.0, f)
 
 
-def price_pick(p_l3_h9: Optional[float], american: Optional[int]) -> dict:
-    """Everything the UI needs for one pick at one price."""
+def is_screen_pick(rec: dict) -> bool:
+    """Is this row one the screen actually picks?
+
+    The calibration below was fit on screen picks — hot bats that cleared an
+    edge and weren't facing a SHARP starter. It is *not* a general model of
+    "will this batter get a hit", and must not be used as one.
+    """
+    return bool(
+        rec.get("is_hot")
+        and (
+            rec.get("bvp_edge")
+            or rec.get("hand_slump_edge")
+            or rec.get("hittable_sp_edge")
+        )
+        and not rec.get("p_sharp")
+    )
+
+
+def price_pick(
+    p_l3_h9: Optional[float], american: Optional[int], eligible: bool = True
+) -> dict:
+    """Everything the UI needs for one pick at one price.
+
+    ``eligible=False`` means the row is outside the calibration's population,
+    so no probability is claimed and no EV is computed. Quoting one would be
+    worse than useless: the model reads off the *pitcher* alone, so it hands
+    a .190-hitting backup catcher the same 66% it gives a star, and against
+    his honest -125 price that fabricates a large fake edge. On the day this
+    was found, 55% of the whole board looked +EV on exactly that error.
+    """
+    if not eligible:
+        return {
+            "model_p": None, "fd_odds": american,
+            "implied_p": round(american_to_implied(american), 4) if american else None,
+            "ev": None, "edge_pts": None, "kelly": None, "breakeven_odds": None,
+        }
     p = model_probability(p_l3_h9)
     if american is None:
         return {
@@ -151,5 +185,5 @@ def enrich_records(records: list[dict], odds: dict) -> list[dict]:
             r.setdefault("fd_market_id", None)
             r.setdefault("fd_selection_id", None)
             r.setdefault("fd_event_id", None)
-        r.update(price_pick(r.get("p_l3_h9"), american))
+        r.update(price_pick(r.get("p_l3_h9"), american, eligible=is_screen_pick(r)))
     return records
