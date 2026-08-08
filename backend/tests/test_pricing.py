@@ -32,29 +32,62 @@ def test_american_decimal_roundtrip():
 # Calibration
 # --------------------------------------------------------------------------
 
-def test_probability_rises_with_the_starter_getting_hit():
-    """The screen's signal is a tail effect, so the buckets must be monotone
-    in H/9 — that ordering is the whole claim."""
-    ps = [pricing.model_probability(h) for h in (5.0, 12.0, 14.0, 17.0)]
-    assert ps == sorted(ps)
-    assert ps[0] < ps[-1]
+def _row(**kw):
+    base = {"vs_hand_avg": 0.260, "recent_ab": 20, "recent_avg": 0.290,
+            "p_l3_h9": 9.0, "p_l3_k9": 8.0}
+    base.update(kw)
+    return base
 
 
-def test_thin_bucket_is_shrunk_toward_the_base_rate():
-    """The SP-16+ bucket is 77.6% raw on 67 picks and swings 13 points between
-    halves of the season. Reporting that unshrunk would claim a double-digit
-    edge on noise."""
-    raw = 52 / 67
-    shrunk = pricing.model_probability(16.5)
-    assert shrunk < raw
-    assert pricing.BASE_RATE < shrunk < raw
-    # Still meaningfully above base — shrinkage tempers, it doesn't erase.
-    assert shrunk - pricing.BASE_RATE > 0.02
+def test_two_batters_facing_the_same_starter_get_different_numbers():
+    """The whole reason the old model had to be replaced. It read the pitcher
+    alone, so it gave a star and a .190-hitting backup the same figure — and
+    against the backup's honest price that invented an enormous fake edge."""
+    star = pricing.model_probability(_row(vs_hand_avg=0.320, recent_ab=28))
+    backup = pricing.model_probability(_row(vs_hand_avg=0.195, recent_ab=6))
+    assert star > backup
+    # And by a margin that matters against a price, not a rounding wobble.
+    assert star - backup > 0.05
 
 
-def test_missing_pitcher_line_falls_back_to_base_rate():
-    assert pricing.model_probability(None) == pricing.BASE_RATE
-    assert pricing.model_probability("nonsense") == pricing.BASE_RATE
+def test_batter_quality_outweighs_the_starter():
+    """Measured over 29,777 settled rows: vs-hand average correlates with a
+    hit at r=+0.119, the starter's recent H/9 at r=+0.011."""
+    good_bat_sharp_sp = pricing.model_probability(
+        _row(vs_hand_avg=0.320, p_l3_h9=5.0))
+    weak_bat_battered_sp = pricing.model_probability(
+        _row(vs_hand_avg=0.200, p_l3_h9=16.0))
+    assert good_bat_sharp_sp > weak_bat_battered_sp
+
+
+def test_a_more_hittable_starter_still_helps_at_the_margin():
+    lo = pricing.model_probability(_row(p_l3_h9=6.0))
+    hi = pricing.model_probability(_row(p_l3_h9=16.0))
+    assert hi > lo
+
+
+def test_strikeout_pitchers_suppress_the_probability():
+    assert pricing.model_probability(_row(p_l3_k9=12.0)) < \
+        pricing.model_probability(_row(p_l3_k9=5.0))
+
+
+def test_missing_features_are_imputed_not_fatal():
+    """A board row can be missing any of these — an unknown career split, a
+    game log with no contact line. None of it may raise."""
+    for rec in ({}, {"vs_hand_avg": None}, {"p_l3_h9": float("nan")},
+                {"recent_ab": "junk"}, None, "nonsense"):
+        p = pricing.model_probability(rec)
+        assert 0.0 < p < 1.0
+
+
+def test_predictions_stay_in_a_plausible_range():
+    """Even at absurd inputs the model must not claim a certainty it can't
+    have — EV multiplies this number by a price."""
+    extreme_hi = pricing.model_probability(
+        _row(vs_hand_avg=0.500, recent_ab=40, p_l3_h9=20.0, p_l3_k9=2.0))
+    extreme_lo = pricing.model_probability(
+        _row(vs_hand_avg=0.100, recent_ab=1, p_l3_h9=3.0, p_l3_k9=15.0))
+    assert 0.30 < extreme_lo < extreme_hi < 0.95
 
 
 # --------------------------------------------------------------------------
@@ -79,11 +112,11 @@ def test_kelly_is_zero_when_there_is_no_edge():
 
 
 def test_price_pick_without_a_market_still_reports_what_it_needs():
-    q = pricing.price_pick(16.2, None)
+    q = pricing.price_pick(_row(vs_hand_avg=0.310, p_l3_h9=16.2), None)
     assert q["fd_odds"] is None and q["ev"] is None
-    assert q["model_p"] > pricing.BASE_RATE
+    assert 0.5 < q["model_p"] < 0.95
     # The useful half: the price at which this would become a bet.
-    assert q["breakeven_odds"] < -200
+    assert q["breakeven_odds"] < -100
 
 
 def test_price_pick_flags_a_negative_edge():
@@ -226,45 +259,27 @@ def test_mins_to_start_goes_negative_once_underway():
 
 
 # --------------------------------------------------------------------------
-# Calibration eligibility
+# Every row is priced now
 # --------------------------------------------------------------------------
 
-def test_no_probability_is_claimed_outside_the_calibration_population():
-    """The model reads the *pitcher* alone, so it hands every batter the same
-    ~66%. Against a backup catcher's honest -125 that fabricates a huge fake
-    edge — on the day this was found, 55% of the whole board looked +EV."""
-    backup_catcher = {
-        "batter": "Weak Hitting Catcher", "p_l3_h9": 9.0,
-        "is_hot": False, "bvp_edge": False, "hand_slump_edge": False,
-        "hittable_sp_edge": False, "p_sharp": False,
-    }
-    pricing.enrich_records([backup_catcher], {"weak hitting catcher": -125})
-    assert backup_catcher["model_p"] is None
-    assert backup_catcher["ev"] is None
-    # The price itself is still reported — it's the *claim* we withhold.
-    assert backup_catcher["fd_odds"] == -125
-    assert backup_catcher["implied_p"] is not None
+def test_a_weak_hitter_is_priced_near_his_market_not_far_above_it():
+    """The bug this model exists to fix. The old one gave every batter the
+    pitcher-derived ~66%, so a .190 hitter honestly priced at -125 (55.6%)
+    showed a 10-point edge. 55% of the board looked +EV on that error."""
+    backup = {"batter": "Weak Hitting Catcher", "vs_hand_avg": 0.195,
+              "recent_ab": 6, "recent_avg": 0.190, "p_l3_h9": 9.0,
+              "p_l3_k9": 8.0}
+    pricing.enrich_records([backup], {"weak hitting catcher": -125})
+    assert backup["model_p"] is not None       # no gate any more
+    assert backup["edge_pts"] < 5.0            # and no fabricated edge
 
 
-def test_a_real_pick_still_gets_priced():
-    from sharp_edge._data import _norm
-    pick = {
-        "batter": "Hot Bat", "p_l3_h9": 16.2, "is_hot": True,
-        "bvp_edge": False, "hand_slump_edge": False,
-        "hittable_sp_edge": True, "p_sharp": False,
-    }
-    pricing.enrich_records([pick], {_norm("Hot Bat"): -220})
-    assert pick["model_p"] > pricing.BASE_RATE
-    assert pick["ev"] is not None
+def test_a_strong_hitter_is_still_allowed_an_edge():
+    star = {"batter": "Star Bat", "vs_hand_avg": 0.330, "recent_ab": 30,
+            "recent_avg": 0.340, "p_l3_h9": 16.0, "p_l3_k9": 5.0}
+    pricing.enrich_records([star], {"star bat": -150})
+    assert star["model_p"] > 0.60
+    assert star["ev"] is not None
 
 
-def test_a_vetoed_row_is_not_priced():
-    """Facing a SHARP starter means the screen declined the bet; quoting an
-    EV for it would invite betting exactly what the veto exists to stop."""
-    vetoed = {
-        "batter": "Held Back", "p_l3_h9": 5.0, "is_hot": True,
-        "bvp_edge": True, "hand_slump_edge": False,
-        "hittable_sp_edge": False, "p_sharp": True,
-    }
-    pricing.enrich_records([vetoed], {"held back": -150})
-    assert vetoed["model_p"] is None and vetoed["ev"] is None
+

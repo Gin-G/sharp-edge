@@ -128,7 +128,7 @@ def snapshot(
                 # like a huge edge. The price is still recorded for everyone —
                 # non-picks are the control group a price model needs.
                 "model_p": (
-                    pricing.model_probability(rec.get("p_l3_h9"))
+                    pricing.model_probability(rec)
                     if pricing.is_screen_pick(rec) else None
                 ),
                 "recent_avg": rec.get("recent_avg"),

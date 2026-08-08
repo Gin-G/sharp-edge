@@ -7,20 +7,21 @@ the pick. This module is the part that decides.
 
 Three steps:
 
-  model_probability   what the screen's own history says a pick of this shape
-                      wins, shrunk toward the base rate so a thin bucket can't
-                      manufacture an edge.
+  model_probability   a logistic regression over 29,777 settled board rows —
+                      batter quality first, pitcher form second — recalibrated
+                      onto the pick population.
   devig               strip the book's margin out of the quoted price, so the
                       comparison is model-vs-market rather than model-vs-vig.
   expected_value      profit per $1 staked at the quoted price.
 
-Everything here is derived from the 125-day backtest in EXPERIMENTS.md and
-should be re-derived whenever the screen's rules change — a calibration table
-is only valid for the rule set that produced it.
+Coefficients come from scripts/calibrate_model.py over the 125-day backtest in
+EXPERIMENTS.md, and should be refit whenever the screen's rules change — a
+calibration is only valid for the population that produced it.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from .fanduel.odds import american_to_decimal, american_to_implied
@@ -28,42 +29,88 @@ from .fanduel.odds import american_to_decimal, american_to_implied
 # Base rate of the current rule set: 1,241 decided picks, 67.4%.
 BASE_RATE = 0.674
 
-# Hit rate by the opposing starter's last-3 H/9, over those same picks. The
-# screen's signal is a tail effect (EXPERIMENTS.md, run 1) so the buckets are
-# deliberately coarse and only really separate at the top.
+# Logistic regression over 29,777 settled board rows, fit by
+# scripts/calibrate_model.py. Re-run it whenever the screen's rules change.
 #
-#   (min_h9, wins, n)
-_CALIBRATION = [
-    (16.0, 52, 67),    # 77.6% raw — the extreme end, and the thinnest bucket
-    (13.0, 236, 344),  # 68.6%
-    (11.0, 421, 634),  # 66.4%
-    (0.0, 128, 196),   # 65.3% — mostly BvP picks against ordinary starters
-]
+# This replaced a four-bucket lookup on the pitcher's H/9 that, measured on a
+# held-out half of the season, scored AUC 0.5047 — a coin flip — with a
+# log-loss *worse* than predicting the base rate for everyone. It also gave
+# every batter facing a given starter the same number, which is why board-wide
+# EV had to be suppressed with an eligibility check. A model that knows who the
+# batter is doesn't need that guard.
+#
+# The ordering of the coefficients is the finding. The batter's career average
+# against the hand carries roughly ten times the weight of the starter's recent
+# H/9 — which is the screen's whole original premise, and is close to how the
+# market itself weights them.
+_COEF = {
+    "intercept": -1.133761,
+    "vs_hand_avg": 6.028424,
+    "recent_ab": 0.011981,
+    "p_l3_h9": 0.004995,
+    "p_l3_k9": -0.019688,
+}
 
-# Empirical-Bayes shrinkage toward BASE_RATE, in units of "prior observations".
-# k=100 is strong on purpose: the SP-16+ bucket has 67 samples and swings from
-# 69.2% to 82.9% between halves of the season, and an unshrunk 77.6% would
-# quietly claim a double-digit edge on the strength of that noise.
-SHRINKAGE_K = 100.0
+# Training medians, for imputing a missing feature. Using live medians instead
+# would let a slate's own composition shift the model.
+_MEDIANS = {
+    "vs_hand_avg": 0.2510,
+    "recent_ab": 17.0000,
+    "p_l3_h9": 8.2000,
+    "p_l3_k9": 8.3100,
+}
+
+# Platt correction, fit on the pick population alone, and **applied only to
+# picks**. The logistic is fit over the whole board (60.6% base rate) but picks
+# hit 68%, and selection the features don't fully explain pulls pick
+# predictions 4.7 points low. Ranking is unaffected — Platt is monotone — but
+# EV is computed from the *level*, so without this the model would essentially
+# never find a bet.
+#
+# Applying it board-wide instead was measurably wrong: it lifts every
+# non-pick toward a 68% population they aren't in, and 44% of the board came
+# back +EV against a book that holds ~5%. Scope matters as much as the fit.
+_PLATT = (0.226436, 0.893979)
+
+_FEATURES = ["vs_hand_avg", "recent_ab", "p_l3_h9", "p_l3_k9"]
 
 
-def model_probability(p_l3_h9: Optional[float]) -> float:
-    """The screen's calibrated win probability for a pick facing a starter at
-    ``p_l3_h9`` hits per nine over his last three starts.
+def _sigmoid(z: float) -> float:
+    z = max(-30.0, min(30.0, z))
+    return 1.0 / (1.0 + math.exp(-z))
 
-    ``None`` — no contact line in the game log — falls back to the base rate
-    rather than guessing a bucket.
+
+def model_probability(rec) -> float:
+    """Calibrated probability that this batter records a hit.
+
+    Accepts a board row. A bare number is still accepted and read as the
+    starter's H/9 with every other feature imputed, so older call sites keep
+    working — but that path throws away the batter, which is the strongest
+    term in the model, and should not be relied on.
     """
-    if p_l3_h9 is None:
-        return BASE_RATE
-    try:
-        h9 = float(p_l3_h9)
-    except (TypeError, ValueError):
-        return BASE_RATE
-    for min_h9, wins, n in _CALIBRATION:
-        if h9 >= min_h9:
-            return (wins + SHRINKAGE_K * BASE_RATE) / (n + SHRINKAGE_K)
-    return BASE_RATE
+    if not isinstance(rec, dict):
+        try:
+            rec = {"p_l3_h9": float(rec)} if rec is not None else {}
+        except (TypeError, ValueError):
+            rec = {}
+
+    z = _COEF["intercept"]
+    for f in _FEATURES:
+        v = rec.get(f)
+        try:
+            v = float(v) if v is not None else _MEDIANS[f]
+        except (TypeError, ValueError):
+            v = _MEDIANS[f]
+        if v != v:  # NaN
+            v = _MEDIANS[f]
+        z += _COEF[f] * v
+
+    raw = _sigmoid(z)
+    if not is_screen_pick(rec):
+        return raw
+    a, b = _PLATT
+    lo = min(max(raw, 1e-6), 1 - 1e-6)
+    return _sigmoid(a + b * math.log(lo / (1 - lo)))
 
 
 def devig_probability(american: int, overround: float = 1.0) -> float:
@@ -96,11 +143,11 @@ def kelly_fraction(p: float, american: int) -> float:
 
 
 def is_screen_pick(rec: dict) -> bool:
-    """Is this row one the screen actually picks?
+    """Is this row one the screen actually bets?
 
-    The calibration below was fit on screen picks — hot bats that cleared an
-    edge and weren't facing a SHARP starter. It is *not* a general model of
-    "will this batter get a hit", and must not be used as one.
+    No longer gates pricing — the model knows who the batter is, so it can be
+    trusted on any row. Kept because the bundle and the odds snapshot both
+    need to know which rows are picks.
     """
     return bool(
         rec.get("is_hot")
@@ -113,25 +160,12 @@ def is_screen_pick(rec: dict) -> bool:
     )
 
 
-def price_pick(
-    p_l3_h9: Optional[float], american: Optional[int], eligible: bool = True
-) -> dict:
-    """Everything the UI needs for one pick at one price.
+def price_pick(rec, american: Optional[int]) -> dict:
+    """Everything the UI needs for one row at one price.
 
-    ``eligible=False`` means the row is outside the calibration's population,
-    so no probability is claimed and no EV is computed. Quoting one would be
-    worse than useless: the model reads off the *pitcher* alone, so it hands
-    a .190-hitting backup catcher the same 66% it gives a star, and against
-    his honest -125 price that fabricates a large fake edge. On the day this
-    was found, 55% of the whole board looked +EV on exactly that error.
+    ``rec`` is a board row; a bare H/9 is still accepted for older callers.
     """
-    if not eligible:
-        return {
-            "model_p": None, "fd_odds": american,
-            "implied_p": round(american_to_implied(american), 4) if american else None,
-            "ev": None, "edge_pts": None, "kelly": None, "breakeven_odds": None,
-        }
-    p = model_probability(p_l3_h9)
+    p = model_probability(rec)
     if american is None:
         return {
             "model_p": round(p, 4),
@@ -185,5 +219,5 @@ def enrich_records(records: list[dict], odds: dict) -> list[dict]:
             r.setdefault("fd_market_id", None)
             r.setdefault("fd_selection_id", None)
             r.setdefault("fd_event_id", None)
-        r.update(price_pick(r.get("p_l3_h9"), american, eligible=is_screen_pick(r)))
+        r.update(price_pick(r, american))
     return records
