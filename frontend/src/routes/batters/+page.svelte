@@ -169,7 +169,7 @@
         <h2 class="text-sm font-semibold text-emerald-300 uppercase tracking-wider">
           Today's Bundle
           <span class="ml-2 normal-case font-normal text-xs text-slate-500">
-            +EV only, one leg per game
+            edge ≥ 3 pts, one leg per game
           </span>
         </h2>
         {#if data.bundle.summary.american != null}
@@ -223,7 +223,9 @@
              blank one. -->
         <div class="px-5 py-3 border-t border-border bg-surface-800/40">
           <div class="text-xs text-slate-500 mb-2">
-            Didn't clear the bar — and the price each would need:
+            Didn't clear the 3-point edge threshold — and the price each would need.
+            The model's own level is off by ~1.7 pts, so a smaller edge isn't
+            distinguishable from zero.
           </div>
           {#each data.bundle.near_misses as m}
             <div class="flex items-center justify-between text-xs py-0.5 tabular-nums">
@@ -233,6 +235,7 @@
               <span class="flex items-center gap-3 shrink-0">
                 <span class="text-slate-500">{fmtOdds(m.fd_odds)}</span>
                 <span class={evClass(m.ev)}>{fmtEv(m.ev)}</span>
+                <span class="text-slate-500 w-16 text-right">{m.short_by != null ? `-${m.short_by.toFixed(1)}pt` : ''}</span>
                 <span class="text-slate-600 w-24 text-right">needs {fmtOdds(m.needs)}</span>
               </span>
             </div>

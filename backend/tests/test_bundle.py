@@ -6,11 +6,23 @@ from sharp_edge import bundle
 
 
 def _pick(name, ev, odds, pitcher, market="708.1", selection="1",
-          model_p=0.70, implied=0.66, event="e1"):
+          model_p=0.70, implied=None, event="e1"):
+    """A priced pick, with implied/edge/EV derived from the odds.
+
+    Deriving rather than passing them keeps fixtures self-consistent — an edge
+    and an EV that disagree on sign is not a state the real pipeline can
+    produce, and a test built on one proves nothing. ``ev`` is accepted and
+    ignored for call-site readability.
+    """
+    from sharp_edge import pricing
+    from sharp_edge.fanduel.odds import american_to_implied
+    imp = american_to_implied(odds) if implied is None else implied
     return {
-        "batter": name, "ev": ev, "fd_odds": odds, "pitcher_id": pitcher,
+        "batter": name, "fd_odds": odds, "pitcher_id": pitcher,
         "fd_market_id": market, "fd_selection_id": selection,
-        "fd_event_id": event, "model_p": model_p, "implied_p": implied,
+        "fd_event_id": event, "model_p": model_p, "implied_p": round(imp, 4),
+        "edge_pts": round(100 * (model_p - imp), 1),
+        "ev": round(pricing.expected_value(model_p, odds), 4),
     }
 
 
@@ -22,20 +34,23 @@ def test_negative_ev_picks_are_dropped_however_good_the_matchup():
     """The 2026-08-07 lesson: the two best matchups on the board were priced
     -290 and -280 and were both losing bets."""
     rows = [
-        _pick("great matchup bad price", -0.038, -290, 1, model_p=0.715),
-        _pick("ordinary matchup fair price", +0.025, -185, 2, model_p=0.665),
+        _pick("great matchup bad price", None, -290, 1, model_p=0.715),
+        _pick("ordinary matchup fair price", None, -185, 2, model_p=0.715),
     ]
     got = bundle.build(rows)
     assert [r["batter"] for r in got] == ["ordinary matchup fair price"]
 
 
 def test_ranked_by_ev_not_by_probability():
-    """A 71.5% pick at -290 is a worse bet than a 66.5% pick at -185."""
+    """Both clear the edge gate; the one with the *lower* win probability is
+    the better bet because its price is longer."""
     rows = [
-        _pick("high p", +0.005, -280, 1, model_p=0.72),
-        _pick("high ev", +0.040, -220, 2, model_p=0.66),
+        _pick("high p", None, -280, 1, model_p=0.79),   # edge 5.3, EV +0.072
+        _pick("high ev", None, -220, 2, model_p=0.75),  # edge 6.3, EV +0.091
     ]
-    assert [r["batter"] for r in bundle.build(rows)] == ["high ev", "high p"]
+    got = bundle.build(rows)
+    assert [r["batter"] for r in got] == ["high ev", "high p"]
+    assert got[0]["model_p"] < got[1]["model_p"]
 
 
 def test_one_leg_per_game_by_default():
@@ -136,3 +151,67 @@ def test_summarise_multiplies_legs():
 def test_summarise_of_an_empty_bundle_is_not_a_crash():
     s = bundle.summarise([])
     assert s["legs"] == 0 and s["ev"] is None
+
+
+# --------------------------------------------------------------------------
+# Minimum edge threshold
+# --------------------------------------------------------------------------
+
+def _edged(name, edge_pts, ev, odds, pitcher, model_p=0.70):
+    """A pick with an exact edge, by choosing the implied probability."""
+    imp = model_p - edge_pts / 100.0
+    r = _pick(name, ev, odds, pitcher, model_p=model_p, implied=imp)
+    return r
+
+
+def test_barely_positive_edges_are_rejected():
+    """The model's level is off by ~1.7 points on held-out picks, so a
+    half-point edge is indistinguishable from zero — betting it means paying
+    the vig to act on rounding."""
+    from sharp_edge import pricing
+    rows = [
+        _edged("rounding error", 0.5, +0.008, -200, 1),
+        _edged("real edge", 4.0, +0.060, -200, 2),
+    ]
+    got = bundle.build(rows)
+    assert [r["batter"] for r in got] == ["real edge"]
+    assert pricing.MIN_EDGE_PTS == 3.0
+
+
+def test_the_threshold_is_on_edge_not_ev():
+    """EV and edge agree on sign but not on magnitude — the same EV is a
+    different edge at a different price, and the calibration error is
+    denominated in edge."""
+    # A long price turns a small edge into a big EV; the gate must still bite.
+    small_edge_big_ev = _edged("longshot", 1.5, +0.30, 400, 1, model_p=0.25)
+    assert bundle.build([small_edge_big_ev]) == []
+
+
+def test_threshold_is_overridable():
+    rows = [_edged("marginal", 1.0, +0.02, -200, 1)]
+    assert bundle.build(rows) == []
+    assert len(bundle.build(rows, min_edge_pts=0.5)) == 1
+
+
+def test_near_misses_report_the_price_that_would_clear_the_threshold():
+    """Break-even isn't the useful number once the gate is 3 points above it."""
+    rows = [_edged("close", 2.0, None, -250, 1, model_p=0.70)]
+    misses = bundle.near_misses(rows, [])
+    assert len(misses) == 1
+    m = misses[0]
+    assert m["short_by"] == 1.0
+    # A 3-point edge needs implied down to 67%, which is -203. For a
+    # favourite that is a *longer* price than the -250 on offer, i.e. nearer
+    # zero.
+    assert m["needs"] == -203
+    assert m["needs"] > -250
+
+
+def test_near_misses_are_ordered_by_how_close_they_came():
+    rows = [
+        _edged("far", -4.0, -0.05, -300, 1),
+        _edged("closest", 2.5, +0.04, -200, 2),
+        _edged("middling", 0.0, 0.0, -220, 3),
+    ]
+    assert [m["batter"] for m in bundle.near_misses(rows, [])] == \
+        ["closest", "middling", "far"]

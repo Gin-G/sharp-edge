@@ -74,6 +74,23 @@ _PLATT = (0.226436, 0.893979)
 
 _FEATURES = ["vs_hand_avg", "recent_ab", "p_l3_h9", "p_l3_k9"]
 
+# Minimum model-vs-market gap, in probability points, before a pick counts as
+# a bet.
+#
+# Not a taste for caution — a statement about precision. On held-out picks the
+# model's level is off by ~1.7 points, and its per-bucket calibration error
+# runs to 4.7. A quoted edge of half a point is therefore indistinguishable
+# from zero, and betting it means paying the vig to act on rounding.
+#
+# Three points sits above the level error with a little room. It's a floor on
+# *edge* rather than on EV deliberately: EV > 0 exactly when edge > 0, so the
+# two agree on sign, but the same EV means different edges at different prices
+# and edge is the thing the calibration error is denominated in.
+#
+# Revisit once the closing-price snapshots can measure the error directly
+# rather than inferring it from a split half.
+MIN_EDGE_PTS = 3.0
+
 
 def _sigmoid(z: float) -> float:
     z = max(-30.0, min(30.0, z))

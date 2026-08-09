@@ -64,23 +64,32 @@ def betslip_url(selections: Iterable[dict], state: str = "co") -> Optional[str]:
 def build(
     records: list[dict],
     max_legs: int = DEFAULT_MAX_LEGS,
-    min_ev: float = 0.0,
+    min_edge_pts: float | None = None,
     cross_game: bool = True,
 ) -> list[dict]:
-    """The day's bundle: priced, +EV picks ranked by EV, best first.
+    """The day's bundle: picks clearing the edge threshold, ranked by EV.
 
-    ``min_ev=0`` keeps only bets that are actually positive at the quoted
-    price. That is the whole point of having odds — on 2026-08-07 it cut a
-    9-pick board to 3, and the two it dropped hardest were the *best*
-    matchups on the board, priced at -290 and -280.
+    The gate is a minimum model-vs-market gap, defaulting to
+    ``pricing.MIN_EDGE_PTS`` (3 points). Merely positive isn't enough: the
+    model's level is off by ~1.7 points on held-out picks, so a half-point
+    edge is indistinguishable from zero and betting it means paying the vig to
+    act on rounding.
+
+    Ranking stays on EV even though the gate is on edge — once a pick has
+    cleared, the question is how much it returns per dollar, and that depends
+    on the price as well as the gap.
     """
+    from . import pricing
+
+    threshold = pricing.MIN_EDGE_PTS if min_edge_pts is None else min_edge_pts
     priced = [
         r for r in records
         if r.get("fd_odds") is not None
         and r.get("ev") is not None
+        and r.get("edge_pts") is not None
         and r.get("fd_market_id") is not None
         and r.get("fd_selection_id") is not None
-        and r["ev"] >= min_ev
+        and r["edge_pts"] >= threshold
     ]
     priced.sort(key=lambda r: (-r["ev"], -(r.get("model_p") or 0)))
 
@@ -102,28 +111,50 @@ def build(
 
 
 def near_misses(records: list[dict], chosen: list[dict], limit: int = 4) -> list[dict]:
-    """Priced picks that didn't clear the bar, best first.
+    """Priced picks that didn't clear the threshold, closest first.
 
-    A one- or zero-leg bundle is frequently the honest answer — the market
-    prices most of the screen's edge already — but "nothing today" is a much
-    more useful message when you can see what was close and by how much.
-    ``needs`` is the price each would have to reach to become a bet.
+    A short or empty bundle is frequently the honest answer — the market
+    prices most of the screen's edge already — but "nothing today" is far more
+    useful when you can see what was close and by how much.
+
+    ``needs`` is the price at which the pick would clear, which is the
+    actionable number: the threshold is on edge, so it's the price that buys
+    the missing points, not merely break-even.
     """
+    from . import pricing
+
     taken = {id(r) for r in chosen}
-    out = [
-        {
+    out = []
+    for r in records:
+        if id(r) in taken or r.get("edge_pts") is None:
+            continue
+        p = r.get("model_p")
+        out.append({
             "batter": r.get("batter"),
             "opposing_pitcher": r.get("opposing_pitcher"),
             "fd_odds": r.get("fd_odds"),
             "ev": r.get("ev"),
             "edge_pts": r.get("edge_pts"),
-            "needs": r.get("breakeven_odds"),
-        }
-        for r in records
-        if id(r) not in taken and r.get("ev") is not None
-    ]
-    out.sort(key=lambda r: -(r["ev"] or 0))
+            "short_by": round(pricing.MIN_EDGE_PTS - r["edge_pts"], 1),
+            "needs": _price_for_edge(p, pricing.MIN_EDGE_PTS) if p else None,
+        })
+    # Explicit None check: an edge of exactly 0.0 is falsy, and `or` would
+    # sort a dead-level pick below one that missed by four points.
+    out.sort(key=lambda r: -(r["edge_pts"] if r["edge_pts"] is not None else -99))
     return out[:limit]
+
+
+def _price_for_edge(model_p: float, edge_pts: float) -> Optional[int]:
+    """The price at which ``model_p`` would carry ``edge_pts`` of edge.
+
+    Implied probability has to fall to ``model_p - edge``, so this is the
+    longer price you'd need to see quoted.
+    """
+    target = model_p - edge_pts / 100.0
+    if target <= 0:
+        return None
+    dec = 1 / target
+    return round((dec - 1) * 100) if dec >= 2 else -round(100 / (dec - 1))
 
 
 def summarise(bundle: list[dict]) -> dict:
