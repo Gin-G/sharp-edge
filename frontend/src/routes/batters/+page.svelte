@@ -169,7 +169,7 @@
         <h2 class="text-sm font-semibold text-emerald-300 uppercase tracking-wider">
           Today's Bets
           <span class="ml-2 normal-case font-normal text-xs text-slate-500">
-            most likely to record a hit, one per game
+            ≥68% to record a hit, one per game
           </span>
         </h2>
         {#if data.bundle.summary.american != null}
@@ -224,7 +224,7 @@
              blank one. -->
         <div class="px-5 py-3 border-t border-border bg-surface-800/40">
           <div class="text-xs text-slate-500 mb-2">
-            Also qualified, ranked below the cut:
+            Qualified for the screen but under the 68% bar:
           </div>
           {#each data.bundle.near_misses as m}
             <div class="flex items-center justify-between text-xs py-0.5 tabular-nums">

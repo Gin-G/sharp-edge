@@ -218,7 +218,8 @@ def test_sharp_starter_vetoes_bvp_picks(slate):
 def test_veto_can_be_switched_off_for_backtesting(slate):
     slate(SHARP_FORM)
     res = batters.screen_for_date(
-        TODAY, veto_sharp_sp=False, max_picks=None, verbose=False
+        TODAY, veto_sharp_sp=False, min_pick_probability=0.0,
+        one_pick_per_game=False, verbose=False
     )
     assert len(res.picks) == 2
 
@@ -227,35 +228,58 @@ def test_hittable_starter_still_produces_picks(slate):
     """Both fixtures face the *same* starter, so one pick — two batters in one
     game are a single bet on that pitcher having a bad day, not two reads."""
     slate(HITTABLE_FORM)
-    res = batters.screen_for_date(TODAY, verbose=False)
+    res = batters.screen_for_date(TODAY, min_pick_probability=0.0, verbose=False)
     assert len(res.picks) == 1
     assert set(res.today["p_form"]) == {"HITTABLE"}
 
 
 def test_both_batters_survive_when_one_per_game_is_off(slate):
     slate(HITTABLE_FORM)
-    res = batters.screen_for_date(TODAY, one_pick_per_game=False, verbose=False)
+    res = batters.screen_for_date(
+        TODAY, min_pick_probability=0.0, one_pick_per_game=False, verbose=False
+    )
     assert len(res.picks) == 2
 
 
-def test_the_slate_is_capped(slate):
-    """Qualifying and being worth betting are different things: everything
-    that clears the filters hits 67.4% together, the best 3 a day 72.5%."""
+def test_the_bar_is_a_probability_not_a_count(slate):
+    """A fixed count is arbitrary in both directions — it throws away real
+    picks on a loaded slate and pads a thin one. The gate is how likely the
+    batter is to get a hit."""
+    slate(HITTABLE_FORM)
+    # An impossible bar clears the board even though both still qualify.
+    none_clear = batters.screen_for_date(
+        TODAY, min_pick_probability=0.99, one_pick_per_game=False, verbose=False
+    )
+    assert len(none_clear.picks) == 0
+    assert none_clear.today["hittable_sp_edge"].all()   # still qualified
+
+    both = batters.screen_for_date(
+        TODAY, min_pick_probability=0.0, one_pick_per_game=False, verbose=False
+    )
+    assert len(both.picks) == 2
+
+
+def test_volume_is_not_capped_by_default(slate):
+    """Days producing 5-6 picks hit 72.6% and 7+ hit 69.8%, against 67.6% on
+    1-2 pick days — a busy slate is busy because more matchups are good, so
+    there's nothing to cap."""
+    assert batters.MAX_PICKS_PER_DAY is None
     slate(HITTABLE_FORM)
     res = batters.screen_for_date(
-        TODAY, max_picks=1, one_pick_per_game=False, verbose=False
+        TODAY, min_pick_probability=0.0, one_pick_per_game=False, verbose=False
     )
-    assert len(res.picks) == 1
-    uncapped = batters.screen_for_date(
-        TODAY, max_picks=None, one_pick_per_game=False, verbose=False
+    assert len(res.picks) == 2
+    capped = batters.screen_for_date(
+        TODAY, min_pick_probability=0.0, max_picks=1,
+        one_pick_per_game=False, verbose=False
     )
-    assert len(uncapped.picks) == 2
+    assert len(capped.picks) == 1
 
 
 def test_picks_are_ranked_by_probability_of_a_hit(slate):
     slate(HITTABLE_FORM)
     res = batters.screen_for_date(
-        TODAY, max_picks=None, one_pick_per_game=False, verbose=False
+        TODAY, min_pick_probability=0.0, one_pick_per_game=False, verbose=False
     )
     ps = list(res.picks["model_p"])
     assert ps == sorted(ps, reverse=True)
@@ -269,12 +293,12 @@ def test_hittable_edge_is_on_by_default(slate, monkeypatch):
     # Strip the BvP edge so hittable_sp_edge is the only thing left.
     monkeypatch.setattr(batters, "_bvp", lambda bid, pid, df=None: None)
 
-    res = batters.screen_for_date(TODAY, verbose=False)
+    res = batters.screen_for_date(TODAY, min_pick_probability=0.0, verbose=False)
     assert res.today["hittable_sp_edge"].all()
     assert len(res.picks) == 1      # same starter, so one bet
 
     res_off = batters.screen_for_date(
-        TODAY, include_hittable_edge=False, verbose=False
+        TODAY, include_hittable_edge=False, min_pick_probability=0.0, verbose=False
     )
     assert len(res_off.picks) == 0
 

@@ -340,26 +340,41 @@ MIN_HITTABLE_H9: float = 11.00
 MIN_HITTABLE_BAA: float = 0.310
 MIN_SHARP_STARTS: int = 2
 
-# How many picks a slate is allowed to produce.
+# The bar a pick has to clear: the model's probability that the batter records
+# a hit.
 #
-# Qualifying and being worth betting are different things. Everything that
-# clears the filters together hits 67.4%, which at -207 is break-even; the
-# best 3 a day, ranked by the model's probability that the batter records a
-# hit, hit 72.5%. The extra volume was buying nothing and costing five points,
-# and it landed hardest on exactly the wrong days — the 26-pick slate hit
-# 36.4% and the 23-pick slate 55.0%, while 5-pick days went 80% and 100%.
+# A quality threshold rather than a fixed count, because a count is arbitrary
+# in both directions — it throws away real picks on a loaded slate and pads a
+# thin one. This lets the day decide how many bets there are.
 #
-# Measured over the 125-day backtest, cross-game, ranked by model probability:
+# Measured over the 129-day backtest, one batter per game, screen qualifiers
+# only:
 #
-#     top 1/day   1.0 picks   76.9%
-#     top 3/day   2.8 picks   72.5%     <- here
-#     top 4/day   3.6 picks   69.6%
-#     top 5/day   4.1 picks   67.1%
-#     everything 12.5 picks   67.4%
+#     >= 0.65   4.5/day   70.4%   split-half drift +4.3
+#     >= 0.67   3.9/day   71.4%   drift +2.2
+#     >= 0.68   3.4/day   71.7%   drift +1.4     <- here
+#     >= 0.69   2.9/day   72.6%   drift +0.9
+#     >= 0.70   2.3/day   70.3%   drift -2.3     <- noise; sample has thinned
+#     (everything that qualifies: 12.0/day, 67.4%)
 #
-# Note that top 5 is already back to taking-everything territory. Set to None
-# to restore the old behaviour of picking everything that qualifies.
-MAX_PICKS_PER_DAY: Optional[int] = 3
+# 0.68 is the last point where the bar still buys hit rate and the split-half
+# is tight. Past 0.70 the numbers bounce because there's nothing left to
+# measure — 44 of 129 days produce no pick at all by 0.72.
+#
+# The threshold is only meaningful because the model is calibrated: across
+# deciles of picks, predicted tracks actual within about two points. "68%"
+# means 68%, so it can be used as a bar rather than just a ranking.
+#
+# Volume is self-limiting on quality, not capped: days that produce 5-6 picks
+# hit 72.6% and 7+ days hit 69.8%, versus 67.6% on 1-2 pick days. A busy slate
+# is busy because more matchups are genuinely good. That's the opposite of the
+# old take-everything rule, where the 20+ pick days hit 38-55% precisely
+# because volume came from lowering the bar.
+MIN_PICK_PROBABILITY: float = 0.68
+
+# Optional hard cap, off by default — the threshold does the work. Set an int
+# to also limit the count on an exceptional slate.
+MAX_PICKS_PER_DAY: Optional[int] = None
 
 
 def _sp_band(
@@ -416,6 +431,7 @@ def screen_today(
     min_sharp_starts: int = MIN_SHARP_STARTS,
     veto_sharp_sp: bool = True,
     include_hittable_edge: bool = True,
+    min_pick_probability: float = MIN_PICK_PROBABILITY,
     max_picks: Optional[int] = MAX_PICKS_PER_DAY,
     one_pick_per_game: bool = True,
     days: int = 7,
@@ -438,6 +454,7 @@ def screen_today(
         min_sharp_starts=min_sharp_starts,
         veto_sharp_sp=veto_sharp_sp,
         include_hittable_edge=include_hittable_edge,
+        min_pick_probability=min_pick_probability,
         max_picks=max_picks,
         one_pick_per_game=one_pick_per_game,
         days=days,
@@ -483,6 +500,7 @@ def screen_for_date(
     min_sharp_starts: int = MIN_SHARP_STARTS,
     veto_sharp_sp: bool = True,
     include_hittable_edge: bool = True,
+    min_pick_probability: float = MIN_PICK_PROBABILITY,
     max_picks: Optional[int] = MAX_PICKS_PER_DAY,
     one_pick_per_game: bool = True,
     days: int = 7,
@@ -759,11 +777,14 @@ def screen_for_date(
             picks = picks.sort_values(
                 ["model_p", "recent_avg"], ascending=[False, False]
             )
+            if one_pick_per_game:
+                # Two batters in one game are one bet on that pitcher having a
+                # bad day, not two independent reads — and the best of them is
+                # the one to have.
+                picks = picks.groupby("pitcher_id", sort=False).head(1)
+            if min_pick_probability:
+                picks = picks[picks["model_p"] >= min_pick_probability]
             if max_picks:
-                if one_pick_per_game:
-                    # Two batters in one game are one bet on that pitcher
-                    # having a bad day, not two independent reads.
-                    picks = picks.groupby("pitcher_id", sort=False).head(1)
                 picks = picks.head(max_picks)
             picks = picks.reset_index(drop=True)
 
