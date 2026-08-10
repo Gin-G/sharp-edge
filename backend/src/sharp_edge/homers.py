@@ -324,10 +324,15 @@ def warm_async() -> dict:
             return {"status": "ready", "stale": True}
         _warming = True
         _warm_started_at = now
-    # An intra-day refresh (we already have today's result) replaces the day's
-    # still-pending picks with the fresh slate; the first warm-up inserts.
+    # Always replace for today — today's picks are unresolved by definition
+    # and the rules running right now should own the day's list. Keying off
+    # the in-process cache meant the first warm after a pod restart inserted,
+    # and insert is ON CONFLICT DO NOTHING, so a slate an earlier pod had
+    # recorded under different rules simply survived a mid-day deploy.
+    #
+    # Safe because delete_picks only clears *unresolved* rows.
     threading.Thread(
-        target=_do_warm, args=(today,), kwargs={"replace": have_today}, daemon=True
+        target=_do_warm, args=(today,), kwargs={"replace": True}, daemon=True
     ).start()
     return {"status": "warming"}
 

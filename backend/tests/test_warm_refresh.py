@@ -58,11 +58,19 @@ def test_aged_cache_triggers_background_refresh_with_replace(screen, monkeypatch
     assert captured["kwargs"] == {"replace": True}
 
 
-def test_cold_cache_warms_and_inserts(screen, monkeypatch):
+def test_cold_cache_also_replaces(screen, monkeypatch):
+    """A cold cache means a fresh pod, not a fresh day — an earlier pod may
+    already have written today's picks under different rules.
+
+    This used to insert, and insert is ON CONFLICT DO NOTHING, so a mid-day
+    deploy left the *old* pick set in the track record. On 2026-08-10 the board
+    showed the 2 picks the new gate passed while the track record still showed
+    13 from the morning's ungated build.
+    """
     mod, captured = screen
     _set_cache(mod, monkeypatch, have_today=False, age=None)
     assert mod.warm_async() == {"status": "warming"}
-    assert captured["kwargs"] == {"replace": False}
+    assert captured["kwargs"] == {"replace": True}
 
 
 def test_stale_cache_holds_off_until_cooldown(screen, monkeypatch):
