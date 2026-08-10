@@ -30,27 +30,41 @@ def _pick(name, ev, odds, pitcher, market="708.1", selection="1",
 # Selection
 # --------------------------------------------------------------------------
 
-def test_negative_ev_picks_are_dropped_however_good_the_matchup():
-    """The 2026-08-07 lesson: the two best matchups on the board were priced
-    -290 and -280 and were both losing bets."""
+def test_price_does_not_veto_a_pick():
+    """The reversal. A short price is worth seeing, but a pick is a pick
+    because we think the man gets a hit — the market doesn't get to choose
+    the card, and EV gating meant a leg vanished when a line moved a cent."""
     rows = [
-        _pick("great matchup bad price", None, -290, 1, model_p=0.715),
-        _pick("ordinary matchup fair price", None, -185, 2, model_p=0.715),
+        _pick("dear but likely", None, -330, 1, model_p=0.72),
+        _pick("cheap and likely", None, -150, 2, model_p=0.72),
     ]
     got = bundle.build(rows)
-    assert [r["batter"] for r in got] == ["ordinary matchup fair price"]
+    assert {r["batter"] for r in got} == {"dear but likely", "cheap and likely"}
+    # The -330 leg is plainly -EV and still made the card.
+    assert min(r["ev"] for r in got) < 0
 
 
-def test_ranked_by_ev_not_by_probability():
-    """Both clear the edge gate; the one with the *lower* win probability is
-    the better bet because its price is longer."""
+def test_ranked_by_probability_of_a_hit():
+    """Ranked by the thing being bet, not by what it pays."""
     rows = [
-        _pick("high p", None, -280, 1, model_p=0.79),   # edge 5.3, EV +0.072
-        _pick("high ev", None, -220, 2, model_p=0.75),  # edge 6.3, EV +0.091
+        _pick("most likely", None, -280, 1, model_p=0.79),
+        _pick("better priced", None, -150, 2, model_p=0.68),
     ]
     got = bundle.build(rows)
-    assert [r["batter"] for r in got] == ["high ev", "high p"]
-    assert got[0]["model_p"] < got[1]["model_p"]
+    assert [r["batter"] for r in got] == ["most likely", "better priced"]
+    # ...even though the second is the better price by EV.
+    assert got[1]["ev"] > got[0]["ev"]
+
+
+def test_a_price_floor_is_still_available_on_request():
+    """Not the default any more, but the machinery remains for anyone who
+    wants it."""
+    rows = [
+        _pick("dear", None, -330, 1, model_p=0.72),
+        _pick("cheap", None, -150, 2, model_p=0.72),
+    ]
+    assert len(bundle.build(rows)) == 2
+    assert [r["batter"] for r in bundle.build(rows, min_edge_pts=3.0)] == ["cheap"]
 
 
 def test_one_leg_per_game_by_default():
@@ -78,7 +92,8 @@ def test_falls_back_to_the_event_when_the_pitcher_is_unknown():
 
 
 def test_max_legs_is_respected():
-    rows = [_pick(f"p{i}", 0.05 - i * 0.001, -200, pitcher=i) for i in range(10)]
+    rows = [_pick(f"p{i}", None, -200, pitcher=i, model_p=0.7 - i * 0.01)
+            for i in range(10)]
     assert len(bundle.build(rows, max_legs=3)) == 3
 
 
@@ -154,64 +169,30 @@ def test_summarise_of_an_empty_bundle_is_not_a_crash():
 
 
 # --------------------------------------------------------------------------
-# Minimum edge threshold
+# Near misses
 # --------------------------------------------------------------------------
 
-def _edged(name, edge_pts, ev, odds, pitcher, model_p=0.70):
-    """A pick with an exact edge, by choosing the implied probability."""
-    imp = model_p - edge_pts / 100.0
-    r = _pick(name, ev, odds, pitcher, model_p=model_p, implied=imp)
-    return r
+def _board_row(name, model_p, pitcher, is_pick=True):
+    return {"batter": name, "opposing_pitcher": f"sp{pitcher}",
+            "pitcher_id": pitcher, "model_p": model_p, "fd_odds": -200,
+            "ev": 0.05, "edge_pts": 3.3,
+            "is_hot": is_pick, "hittable_sp_edge": is_pick,
+            "bvp_edge": False, "hand_slump_edge": False, "p_sharp": False}
 
 
-def test_barely_positive_edges_are_rejected():
-    """The model's level is off by ~1.7 points on held-out picks, so a
-    half-point edge is indistinguishable from zero — betting it means paying
-    the vig to act on rounding."""
-    from sharp_edge import pricing
-    rows = [
-        _edged("rounding error", 0.5, +0.008, -200, 1),
-        _edged("real edge", 4.0, +0.060, -200, 2),
-    ]
-    got = bundle.build(rows)
-    assert [r["batter"] for r in got] == ["real edge"]
-    assert pricing.MIN_EDGE_PTS == 3.0
+def test_near_misses_come_from_the_board_not_the_picks():
+    """The screen truncates picks to the day's best few, so anything it
+    dropped is only visible on the board."""
+    board = [_board_row("chosen", 0.75, 1), _board_row("fourth", 0.70, 2),
+             _board_row("fifth", 0.68, 3), _board_row("not a pick", 0.9, 4,
+                                                      is_pick=False)]
+    chosen = [board[0]]
+    misses = bundle.near_misses(board, chosen)
+    assert [m["batter"] for m in misses] == ["fourth", "fifth"]
 
 
-def test_the_threshold_is_on_edge_not_ev():
-    """EV and edge agree on sign but not on magnitude — the same EV is a
-    different edge at a different price, and the calibration error is
-    denominated in edge."""
-    # A long price turns a small edge into a big EV; the gate must still bite.
-    small_edge_big_ev = _edged("longshot", 1.5, +0.30, 400, 1, model_p=0.25)
-    assert bundle.build([small_edge_big_ev]) == []
-
-
-def test_threshold_is_overridable():
-    rows = [_edged("marginal", 1.0, +0.02, -200, 1)]
-    assert bundle.build(rows) == []
-    assert len(bundle.build(rows, min_edge_pts=0.5)) == 1
-
-
-def test_near_misses_report_the_price_that_would_clear_the_threshold():
-    """Break-even isn't the useful number once the gate is 3 points above it."""
-    rows = [_edged("close", 2.0, None, -250, 1, model_p=0.70)]
-    misses = bundle.near_misses(rows, [])
-    assert len(misses) == 1
-    m = misses[0]
-    assert m["short_by"] == 1.0
-    # A 3-point edge needs implied down to 67%, which is -203. For a
-    # favourite that is a *longer* price than the -250 on offer, i.e. nearer
-    # zero.
-    assert m["needs"] == -203
-    assert m["needs"] > -250
-
-
-def test_near_misses_are_ordered_by_how_close_they_came():
-    rows = [
-        _edged("far", -4.0, -0.05, -300, 1),
-        _edged("closest", 2.5, +0.04, -200, 2),
-        _edged("middling", 0.0, 0.0, -220, 3),
-    ]
-    assert [m["batter"] for m in bundle.near_misses(rows, [])] == \
-        ["closest", "middling", "far"]
+def test_near_misses_are_ranked_by_probability():
+    board = [_board_row("low", 0.60, 1), _board_row("high", 0.72, 2),
+             _board_row("mid", 0.66, 3)]
+    assert [m["batter"] for m in bundle.near_misses(board, [])] == \
+        ["high", "mid", "low"]

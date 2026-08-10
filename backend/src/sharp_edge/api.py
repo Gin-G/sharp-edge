@@ -504,7 +504,10 @@ async def batter_screen():
             "legs": legs,
             "summary": _bundle.summarise(legs),
             "betslip_url": _bundle.betslip_url(legs, state=settings.fanduel_state),
-            "near_misses": _bundle.near_misses(picks, legs),
+            # From the whole board: the screen has already truncated picks
+            # to the day's best few, so anything it dropped is only visible
+            # here.
+            "near_misses": _bundle.near_misses(today, legs),
         },
     }
 

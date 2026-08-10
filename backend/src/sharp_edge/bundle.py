@@ -1,26 +1,25 @@
-"""Pick the bets worth making, and build a link that loads them.
+"""The day's bets, and a link that loads them into the slip.
 
-Two jobs the screen didn't previously do.
+**What gets picked.** The batters most likely to record a hit, ranked by the
+model's probability, one per game, capped at a handful. Qualifying for the
+screen and being worth betting are different things: everything that clears
+the filters hits 67.4% together, while the best 3 a day hit 72.5%.
 
-**Selecting.** The board is ~12 picks a day now, and the backtest is blunt
-about what that's worth: all picks together hit 67.4%, which at -207 is
-break-even. Ranking by calibrated probability and keeping only the top of the
-board hit 74.0% at 1/day and 73.5% at 2/day, and those held up across halves
-of the season (drift +0.9 and +4.5) where taking three or more did not (+7.7).
-Now that prices are attached, the ranking is by **expected value** rather than
-probability — a 71.5% pick at -290 is a worse bet than a 66.5% pick at -185,
-and only EV says so.
+**Price is shown, not obeyed.** Odds and EV ride along on every leg because
+they're worth knowing — a pick at -330 is a poor price whatever the read — but
+they don't decide the card. Gating on EV handed selection to the market: legs
+vanished when a line moved a few cents, and a slate of short prices produced
+"bet nothing" even when the reads were good. It was also a finer distinction
+than the model can actually make, its calibration being off by ~1.7 points.
 
-**Linking.** A bundle you have to re-enter by hand isn't much use at 6:50pm
-with first pitch at 7:05. FanDuel selections carry a ``marketId`` and
+**One leg per game.** Two batters facing the same starter are one bet on that
+pitcher having a bad day, not two independent reads. A book prices them as a
+same-game parlay, below the product of their legs, for exactly that reason.
+
+**Linking.** A card you have to re-enter by hand isn't much use at 6:50pm with
+first pitch at 7:05. FanDuel selections carry a ``marketId`` and
 ``selectionId``, and its ``addToBetslip`` endpoint takes them as repeated
-indexed parameters, so a bundle can arrive as a loaded slip.
-
-One rule shapes the default: **one leg per game.** 57% of naive top-2 bundles
-were two batters facing the same starter, which a book prices as a same-game
-parlay well below the product of its legs, precisely because it knows the
-outcomes are correlated. Cross-game legs are priced independently and are the
-ones you can actually get down at the quoted number.
+indexed parameters, so the card can arrive as a loaded slip.
 """
 
 from __future__ import annotations
@@ -67,38 +66,45 @@ def build(
     min_edge_pts: float | None = None,
     cross_game: bool = True,
 ) -> list[dict]:
-    """The day's bundle: picks clearing the edge threshold, ranked by EV.
+    """The day's bets: the picks most likely to record a hit, best first.
 
-    The gate is a minimum model-vs-market gap, defaulting to
-    ``pricing.MIN_EDGE_PTS`` (3 points). Merely positive isn't enough: the
-    model's level is off by ~1.7 points on held-out picks, so a half-point
-    edge is indistinguishable from zero and betting it means paying the vig to
-    act on rounding.
+    Ranked by ``model_p`` — the probability the batter gets a hit, which is
+    the thing being bet. **Price does not gate this.** A pick is a pick
+    because we think the man gets a hit; the odds tell you what it pays and
+    whether it looks dear, and both are worth seeing, but neither is a good
+    enough signal to overrule the read.
 
-    Ranking stays on EV even though the gate is on edge — once a pick has
-    cleared, the question is how much it returns per dollar, and that depends
-    on the price as well as the gap.
+    That's a deliberate reversal. Gating on expected value meant the market
+    chose the card: a leg the model liked vanished the moment the line moved a
+    few cents, and on a slate where every price was short the answer was
+    "bet nothing" even when the reads were good. Worse, the gate was only as
+    trustworthy as the model's calibration, which is off by ~1.7 points — so
+    it was discarding real picks on a distinction it couldn't actually make.
+
+    ``min_edge_pts`` is still honoured when passed explicitly, for anyone who
+    does want a price floor. It just isn't the default any more.
     """
-    from . import pricing
-
-    threshold = pricing.MIN_EDGE_PTS if min_edge_pts is None else min_edge_pts
     priced = [
         r for r in records
-        if r.get("fd_odds") is not None
-        and r.get("ev") is not None
-        and r.get("edge_pts") is not None
-        and r.get("fd_market_id") is not None
+        if r.get("fd_market_id") is not None
         and r.get("fd_selection_id") is not None
-        and r["edge_pts"] >= threshold
+        and r.get("model_p") is not None
     ]
-    priced.sort(key=lambda r: (-r["ev"], -(r.get("model_p") or 0)))
+    if min_edge_pts is not None:
+        priced = [
+            r for r in priced
+            if r.get("edge_pts") is not None and r["edge_pts"] >= min_edge_pts
+        ]
+    priced.sort(key=lambda r: (-(r.get("model_p") or 0), -(r.get("ev") or -9)))
 
     out: list[dict] = []
     seen_games: set = set()
     for r in priced:
         if cross_game:
-            # Prefer the pitcher id; fall back to the FanDuel event so a row
-            # without board context still can't double up on one game.
+            # Two batters in one game are one bet on that pitcher having a bad
+            # day, not two independent reads. Prefer the pitcher id; fall back
+            # to the FanDuel event so a row without board context still can't
+            # double up.
             game = r.get("pitcher_id") or r.get("fd_event_id")
             if game is not None and game in seen_games:
                 continue
@@ -110,51 +116,32 @@ def build(
     return out
 
 
-def near_misses(records: list[dict], chosen: list[dict], limit: int = 4) -> list[dict]:
-    """Priced picks that didn't clear the threshold, closest first.
+def near_misses(board: list[dict], chosen: list[dict], limit: int = 5) -> list[dict]:
+    """Batters who qualified but ranked below the cut, best first.
 
-    A short or empty bundle is frequently the honest answer — the market
-    prices most of the screen's edge already — but "nothing today" is far more
-    useful when you can see what was close and by how much.
-
-    ``needs`` is the price at which the pick would clear, which is the
-    actionable number: the threshold is on edge, so it's the price that buys
-    the missing points, not merely break-even.
+    Pass the whole board, not the picks — the screen already truncates picks
+    to the day's best few, so anything it dropped is only visible here. Worth
+    showing for two reasons: seeing who just missed, and spotting a name you
+    have a read on that the model happened to rank fourth.
     """
     from . import pricing
 
-    taken = {id(r) for r in chosen}
-    out = []
-    for r in records:
-        if id(r) in taken or r.get("edge_pts") is None:
-            continue
-        p = r.get("model_p")
-        out.append({
+    taken = {(r.get("batter"), r.get("pitcher_id")) for r in chosen}
+    out = [
+        {
             "batter": r.get("batter"),
             "opposing_pitcher": r.get("opposing_pitcher"),
+            "model_p": r.get("model_p"),
             "fd_odds": r.get("fd_odds"),
             "ev": r.get("ev"),
             "edge_pts": r.get("edge_pts"),
-            "short_by": round(pricing.MIN_EDGE_PTS - r["edge_pts"], 1),
-            "needs": _price_for_edge(p, pricing.MIN_EDGE_PTS) if p else None,
-        })
-    # Explicit None check: an edge of exactly 0.0 is falsy, and `or` would
-    # sort a dead-level pick below one that missed by four points.
-    out.sort(key=lambda r: -(r["edge_pts"] if r["edge_pts"] is not None else -99))
+        }
+        for r in board
+        if pricing.is_screen_pick(r)
+        and (r.get("batter"), r.get("pitcher_id")) not in taken
+    ]
+    out.sort(key=lambda r: -(r["model_p"] if r["model_p"] is not None else 0))
     return out[:limit]
-
-
-def _price_for_edge(model_p: float, edge_pts: float) -> Optional[int]:
-    """The price at which ``model_p`` would carry ``edge_pts`` of edge.
-
-    Implied probability has to fall to ``model_p - edge``, so this is the
-    longer price you'd need to see quoted.
-    """
-    target = model_p - edge_pts / 100.0
-    if target <= 0:
-        return None
-    dec = 1 / target
-    return round((dec - 1) * 100) if dec >= 2 else -round(100 / (dec - 1))
 
 
 def summarise(bundle: list[dict]) -> dict:

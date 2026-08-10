@@ -133,8 +133,7 @@ export interface BatterScreen {
       fd_odds: number | null;
       ev: number | null;
       edge_pts: number | null;
-      short_by: number | null;
-      needs: number | null;
+      model_p: number | null;
     }[];
   };
 }

@@ -167,9 +167,9 @@
     <section class="card p-0 overflow-hidden border-emerald-800/50">
       <div class="px-5 py-4 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
         <h2 class="text-sm font-semibold text-emerald-300 uppercase tracking-wider">
-          Today's Bundle
+          Today's Bets
           <span class="ml-2 normal-case font-normal text-xs text-slate-500">
-            edge ≥ 3 pts, one leg per game
+            most likely to record a hit, one per game
           </span>
         </h2>
         {#if data.bundle.summary.american != null}
@@ -190,8 +190,9 @@
               <span class="text-slate-500 text-xs"> vs {r.opposing_pitcher}</span>
             </div>
             <div class="flex items-center gap-4 tabular-nums text-xs shrink-0">
+              <span class="text-emerald-300 font-semibold">{fmtPct(r.model_p)}</span>
               <span class="text-slate-500">SP {fmtNum(r.p_l3_h9)} H/9</span>
-              <span class="text-slate-300">{fmtOdds(r.fd_odds)}</span>
+              <span class="text-slate-400">{fmtOdds(r.fd_odds)}</span>
               <span class={evClass(r.ev)}>{fmtEv(r.ev)}</span>
             </div>
           </div>
@@ -223,9 +224,7 @@
              blank one. -->
         <div class="px-5 py-3 border-t border-border bg-surface-800/40">
           <div class="text-xs text-slate-500 mb-2">
-            Didn't clear the 3-point edge threshold — and the price each would need.
-            The model's own level is off by ~1.7 pts, so a smaller edge isn't
-            distinguishable from zero.
+            Also qualified, ranked below the cut:
           </div>
           {#each data.bundle.near_misses as m}
             <div class="flex items-center justify-between text-xs py-0.5 tabular-nums">
@@ -233,10 +232,9 @@
                 {m.batter}<span class="text-slate-600"> vs {m.opposing_pitcher}</span>
               </span>
               <span class="flex items-center gap-3 shrink-0">
-                <span class="text-slate-500">{fmtOdds(m.fd_odds)}</span>
+                <span class="text-slate-300 w-12 text-right">{fmtPct(m.model_p)}</span>
+                <span class="text-slate-500 w-14 text-right">{fmtOdds(m.fd_odds)}</span>
                 <span class={evClass(m.ev)}>{fmtEv(m.ev)}</span>
-                <span class="text-slate-500 w-16 text-right">{m.short_by != null ? `-${m.short_by.toFixed(1)}pt` : ''}</span>
-                <span class="text-slate-600 w-24 text-right">needs {fmtOdds(m.needs)}</span>
               </span>
             </div>
           {/each}

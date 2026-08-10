@@ -217,15 +217,48 @@ def test_sharp_starter_vetoes_bvp_picks(slate):
 
 def test_veto_can_be_switched_off_for_backtesting(slate):
     slate(SHARP_FORM)
-    res = batters.screen_for_date(TODAY, veto_sharp_sp=False, verbose=False)
+    res = batters.screen_for_date(
+        TODAY, veto_sharp_sp=False, max_picks=None, verbose=False
+    )
     assert len(res.picks) == 2
 
 
 def test_hittable_starter_still_produces_picks(slate):
+    """Both fixtures face the *same* starter, so one pick — two batters in one
+    game are a single bet on that pitcher having a bad day, not two reads."""
     slate(HITTABLE_FORM)
     res = batters.screen_for_date(TODAY, verbose=False)
-    assert len(res.picks) == 2
+    assert len(res.picks) == 1
     assert set(res.today["p_form"]) == {"HITTABLE"}
+
+
+def test_both_batters_survive_when_one_per_game_is_off(slate):
+    slate(HITTABLE_FORM)
+    res = batters.screen_for_date(TODAY, one_pick_per_game=False, verbose=False)
+    assert len(res.picks) == 2
+
+
+def test_the_slate_is_capped(slate):
+    """Qualifying and being worth betting are different things: everything
+    that clears the filters hits 67.4% together, the best 3 a day 72.5%."""
+    slate(HITTABLE_FORM)
+    res = batters.screen_for_date(
+        TODAY, max_picks=1, one_pick_per_game=False, verbose=False
+    )
+    assert len(res.picks) == 1
+    uncapped = batters.screen_for_date(
+        TODAY, max_picks=None, one_pick_per_game=False, verbose=False
+    )
+    assert len(uncapped.picks) == 2
+
+
+def test_picks_are_ranked_by_probability_of_a_hit(slate):
+    slate(HITTABLE_FORM)
+    res = batters.screen_for_date(
+        TODAY, max_picks=None, one_pick_per_game=False, verbose=False
+    )
+    ps = list(res.picks["model_p"])
+    assert ps == sorted(ps, reverse=True)
 
 
 def test_hittable_edge_is_on_by_default(slate, monkeypatch):
@@ -238,7 +271,7 @@ def test_hittable_edge_is_on_by_default(slate, monkeypatch):
 
     res = batters.screen_for_date(TODAY, verbose=False)
     assert res.today["hittable_sp_edge"].all()
-    assert len(res.picks) == 2
+    assert len(res.picks) == 1      # same starter, so one bet
 
     res_off = batters.screen_for_date(
         TODAY, include_hittable_edge=False, verbose=False

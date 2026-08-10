@@ -340,6 +340,27 @@ MIN_HITTABLE_H9: float = 11.00
 MIN_HITTABLE_BAA: float = 0.310
 MIN_SHARP_STARTS: int = 2
 
+# How many picks a slate is allowed to produce.
+#
+# Qualifying and being worth betting are different things. Everything that
+# clears the filters together hits 67.4%, which at -207 is break-even; the
+# best 3 a day, ranked by the model's probability that the batter records a
+# hit, hit 72.5%. The extra volume was buying nothing and costing five points,
+# and it landed hardest on exactly the wrong days — the 26-pick slate hit
+# 36.4% and the 23-pick slate 55.0%, while 5-pick days went 80% and 100%.
+#
+# Measured over the 125-day backtest, cross-game, ranked by model probability:
+#
+#     top 1/day   1.0 picks   76.9%
+#     top 3/day   2.8 picks   72.5%     <- here
+#     top 4/day   3.6 picks   69.6%
+#     top 5/day   4.1 picks   67.1%
+#     everything 12.5 picks   67.4%
+#
+# Note that top 5 is already back to taking-everything territory. Set to None
+# to restore the old behaviour of picking everything that qualifies.
+MAX_PICKS_PER_DAY: Optional[int] = 3
+
 
 def _sp_band(
     form: dict,
@@ -395,6 +416,8 @@ def screen_today(
     min_sharp_starts: int = MIN_SHARP_STARTS,
     veto_sharp_sp: bool = True,
     include_hittable_edge: bool = True,
+    max_picks: Optional[int] = MAX_PICKS_PER_DAY,
+    one_pick_per_game: bool = True,
     days: int = 7,
     workers: int = 12,
     verbose: bool = True,
@@ -415,6 +438,8 @@ def screen_today(
         min_sharp_starts=min_sharp_starts,
         veto_sharp_sp=veto_sharp_sp,
         include_hittable_edge=include_hittable_edge,
+        max_picks=max_picks,
+        one_pick_per_game=one_pick_per_game,
         days=days,
         workers=workers,
         verbose=verbose,
@@ -458,6 +483,8 @@ def screen_for_date(
     min_sharp_starts: int = MIN_SHARP_STARTS,
     veto_sharp_sp: bool = True,
     include_hittable_edge: bool = True,
+    max_picks: Optional[int] = MAX_PICKS_PER_DAY,
+    one_pick_per_game: bool = True,
     days: int = 7,
     workers: int = 12,
     verbose: bool = True,
@@ -715,10 +742,30 @@ def screen_for_date(
             mask = mask & ~today_df["p_sharp"]
         picks = today_df[mask].copy()
         if not picks.empty:
+            # Rank by the model's probability that the batter records a hit —
+            # the thing actually being bet — and keep only the best few.
+            #
+            # Qualifying is not the same as being worth betting. Everything
+            # that clears the filters together hits 67.4%, which at -207 is
+            # break-even; the top 3 a day hit 72.5%. The extra volume was
+            # costing five points of hit rate, and the worst days were the
+            # biggest ones (26 picks -> 36.4%, 23 -> 55.0%).
+            from . import pricing
+
+            picks["model_p"] = [
+                pricing.model_probability(r)
+                for r in picks.to_dict(orient="records")
+            ]
             picks = picks.sort_values(
-                ["bvp_edge", "bvp_avg", "vs_hand_avg", "recent_avg"],
-                ascending=[False, False, False, False],
-            ).reset_index(drop=True)
+                ["model_p", "recent_avg"], ascending=[False, False]
+            )
+            if max_picks:
+                if one_pick_per_game:
+                    # Two batters in one game are one bet on that pitcher
+                    # having a bad day, not two independent reads.
+                    picks = picks.groupby("pitcher_id", sort=False).head(1)
+                picks = picks.head(max_picks)
+            picks = picks.reset_index(drop=True)
 
     if verbose:
         bands = today_df["p_form"].value_counts().to_dict() if not today_df.empty else {}
