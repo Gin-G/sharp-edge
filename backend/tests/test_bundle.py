@@ -196,3 +196,13 @@ def test_near_misses_are_ranked_by_probability():
              _board_row("mid", 0.66, 3)]
     assert [m["batter"] for m in bundle.near_misses(board, [])] == \
         ["high", "mid", "low"]
+
+
+def test_no_leg_cap_by_default():
+    """The screen already gates on probability and takes one batter per game,
+    so capping again would silently drop the 4th-best bet on a good slate for
+    no reason anyone could see."""
+    rows = [_pick(f"p{i}", None, -200, pitcher=i, model_p=0.72 - i * 0.001)
+            for i in range(8)]
+    assert len(bundle.build(rows)) == 8
+    assert len(bundle.build(rows, max_legs=3)) == 3

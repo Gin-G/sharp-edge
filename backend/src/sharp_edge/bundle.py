@@ -31,7 +31,11 @@ from urllib.parse import quote
 # state bounces a user whose account is registered in another.
 BETSLIP_BASE = "https://{state}.sportsbook.fanduel.com/addToBetslip"
 
-DEFAULT_MAX_LEGS = 3
+# No cap. The screen already gates picks on probability and takes one batter
+# per game, so whatever arrives here has cleared the bar — capping again would
+# silently drop the 4th-best bet on a good slate for no reason anyone could
+# see. Pass max_legs explicitly to trim.
+DEFAULT_MAX_LEGS: Optional[int] = None
 
 
 def betslip_url(selections: Iterable[dict], state: str = "co") -> Optional[str]:
@@ -62,7 +66,7 @@ def betslip_url(selections: Iterable[dict], state: str = "co") -> Optional[str]:
 
 def build(
     records: list[dict],
-    max_legs: int = DEFAULT_MAX_LEGS,
+    max_legs: Optional[int] = DEFAULT_MAX_LEGS,
     min_edge_pts: float | None = None,
     cross_game: bool = True,
 ) -> list[dict]:
@@ -111,7 +115,7 @@ def build(
             if game is not None:
                 seen_games.add(game)
         out.append(r)
-        if len(out) >= max_legs:
+        if max_legs and len(out) >= max_legs:
             break
     return out
 

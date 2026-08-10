@@ -257,10 +257,10 @@
     <section class="card overflow-hidden p-0">
       <div class="px-5 py-4 border-b border-border flex items-baseline justify-between">
         <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-          Picks
+          Today's Bets — detail
         </h2>
         <span class="text-xs text-slate-500">
-          {data.picks.length} hot bat{data.picks.length === 1 ? '' : 's'} with ≥1 edge
+          the same {data.picks.length} pick{data.picks.length === 1 ? '' : 's'}, with the numbers behind them
           {#if data.odds}
             {#if data.odds.error}
               · <span class="text-amber-500/80">odds unavailable</span>
@@ -406,7 +406,7 @@
           Hot Bats vs Hittable Starters
         </h2>
         <span class="text-xs text-slate-500">
-          {hotVsHittable.length} pick{hotVsHittable.length === 1 ? '' : 's'} on this edge alone
+          {hotVsHittable.length} qualified on this edge — most won't clear the bar
         </span>
       </div>
       {#if hotVsHittable.length === 0}
@@ -453,7 +453,9 @@
         <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
           BvP Edges
         </h2>
-        <span class="text-xs text-slate-500">{bvpEdges.length} batter{bvpEdges.length === 1 ? '' : 's'} ≥.400 vs today's SP</span>
+        <span class="text-xs text-slate-500">
+          {bvpEdges.length} batter{bvpEdges.length === 1 ? '' : 's'} ≥.400 vs today's SP — qualified, not picked
+        </span>
       </div>
       {#if bvpEdges.length === 0}
         <div class="px-5 py-6 text-sm text-slate-500">None.</div>
