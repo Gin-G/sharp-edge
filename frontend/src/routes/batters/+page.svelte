@@ -62,6 +62,18 @@
     return v > 0 ? `+${v}` : `${v}`;
   }
 
+  // Whether tapping the bet-slip link will hand off to the FanDuel app rather
+  // than open a browser tab. Detected from the pointer type rather than a
+  // user-agent string: it's what actually distinguishes the case we care
+  // about (a phone with the app installed) and it doesn't rot the way UA
+  // sniffing does. Resolved on mount so SSR renders the desktop form.
+  let opensInApp = false;
+  onMount(() => {
+    opensInApp =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(pointer: coarse)').matches === true;
+  });
+
   let copied = false;
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -201,12 +213,20 @@
 
       <div class="px-5 py-4 border-t border-border flex items-center gap-3 flex-wrap">
         {#if data.bundle.betslip_url}
+          <!-- No target="_blank" on touch devices. FanDuel's association files
+               claim /* on this domain for com.fanduel.sportsbook, so the https
+               link is already a Universal Link / App Link and the OS will hand
+               it straight to the app — but only on a normal top-level
+               navigation. Opened in a new tab it falls back to the web page,
+               which then JS-redirects into the app, and that redirect is the
+               extra step. Desktop keeps the new tab, where there's no app to
+               hand off to and losing the board would just be annoying. -->
           <a
             href={data.bundle.betslip_url}
-            target="_blank"
-            rel="noopener noreferrer"
+            target={opensInApp ? undefined : '_blank'}
+            rel={opensInApp ? undefined : 'noopener noreferrer'}
             class="px-3 py-1.5 rounded-lg text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-500"
-          >Open in FanDuel bet slip</a>
+          >Open in FanDuel{opensInApp ? ' app' : ' bet slip'}</a>
           <button
             class="px-3 py-1.5 rounded-lg text-sm font-medium bg-surface-700 text-slate-300 hover:bg-surface-600"
             on:click={copyBetslip}
