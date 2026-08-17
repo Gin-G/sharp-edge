@@ -283,3 +283,47 @@ def test_a_strong_hitter_is_still_allowed_an_edge():
 
 
 
+
+
+# --------------------------------------------------------------------------
+# Snapshot exit codes
+# --------------------------------------------------------------------------
+
+def _run_snapshot_main(tmp_path, monkeypatch, date_str, prices, make_existing):
+    """Drive snapshot_odds.main() with a stubbed fetch."""
+    import sys
+    snap = _snap()
+    if make_existing:
+        (tmp_path / f"odds_{date_str}.parquet").write_bytes(b"x")
+
+    class _FD:
+        def __init__(self, *a, **k): pass
+        async def hit_prices_detailed(self, target=None): return prices
+
+    monkeypatch.setattr(snap, "FanDuelOdds", _FD)
+    monkeypatch.setattr(sys, "argv", [
+        "snapshot_odds.py", "--date", date_str, "--dir", str(tmp_path),
+        "--prices-only",
+    ])
+    try:
+        snap.main()
+        return 0
+    except SystemExit as e:
+        return e.code or 0
+
+
+def test_a_late_pass_with_nothing_pre_game_is_not_a_failure(tmp_path, monkeypatch):
+    """The 23:55 pass runs after most first pitches. On 2026-08-16 it found
+    nothing and exited 1 having already captured all six earlier passes — a
+    red X on a healthy day, which teaches you to ignore the ones that matter.
+    """
+    code = _run_snapshot_main(tmp_path, monkeypatch, "2026-08-16",
+                              prices={}, make_existing=True)
+    assert code == 0
+
+
+def test_a_day_with_no_snapshot_at_all_still_fails(tmp_path, monkeypatch):
+    """Every pass coming back empty points at the fetch, not the clock."""
+    code = _run_snapshot_main(tmp_path, monkeypatch, "2026-08-16",
+                              prices={}, make_existing=False)
+    assert code == 1

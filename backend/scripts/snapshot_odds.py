@@ -302,6 +302,24 @@ def main() -> None:
         date.fromisoformat(args.date), args.dir, args.state, args.prices_only
     )
     if written is None:
+        # An empty result is usually not a fault: the late closing passes run
+        # after most first pitches, and a slate with nothing left pre-game has
+        # no prices to post. On 2026-08-16 the 23:55 pass failed on exactly
+        # that, having already captured all six earlier passes, and a red X on
+        # a healthy day is worse than no alarm at all — it teaches you to skip
+        # the ones that matter.
+        #
+        # A day with no file at all is the real failure: it means every pass
+        # came back empty, which points at the fetch rather than the clock.
+        existing = args.dir / f"odds_{args.date}.parquet"
+        if existing.exists():
+            logger.info(
+                "%s: nothing left pre-game this pass; %s already has today's "
+                "earlier captures", args.date, existing.name,
+            )
+            return
+        logger.error("%s: no prices, and no snapshot from any earlier pass",
+                     args.date)
         sys.exit(1)
 
 
