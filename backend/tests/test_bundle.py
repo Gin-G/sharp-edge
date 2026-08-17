@@ -198,11 +198,15 @@ def test_near_misses_are_ranked_by_probability():
         ["high", "mid", "low"]
 
 
-def test_no_leg_cap_by_default():
-    """The screen already gates on probability and takes one batter per game,
-    so capping again would silently drop the 4th-best bet on a good slate for
-    no reason anyone could see."""
+def test_the_parlay_is_capped_short():
+    """A parlay wants few legs — the opposite of a pick list. Every extra leg
+    is another chance to lose the whole ticket, and over 129 days the sweep
+    rate falls from 50% at two legs to 35.9% taking every gated pick."""
     rows = [_pick(f"p{i}", None, -200, pitcher=i, model_p=0.72 - i * 0.001)
             for i in range(8)]
-    assert len(bundle.build(rows)) == 8
+    got = bundle.build(rows)
+    assert len(got) == bundle.DEFAULT_MAX_LEGS == 2
+    # ...and it takes the two most likely, not just the first two seen.
+    assert [r["batter"] for r in got] == ["p0", "p1"]
     assert len(bundle.build(rows, max_legs=3)) == 3
+    assert len(bundle.build(rows, max_legs=None)) == 8

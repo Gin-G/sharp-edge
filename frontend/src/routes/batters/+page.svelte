@@ -179,9 +179,9 @@
     <section class="card p-0 overflow-hidden border-emerald-800/50">
       <div class="px-5 py-4 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
         <h2 class="text-sm font-semibold text-emerald-300 uppercase tracking-wider">
-          Today's Bets
+          Today's Parlay
           <span class="ml-2 normal-case font-normal text-xs text-slate-500">
-            ≥68% to record a hit, one per game
+            the 2 most likely to record a hit
           </span>
         </h2>
         {#if data.bundle.summary.american != null}
@@ -244,7 +244,7 @@
              blank one. -->
         <div class="px-5 py-3 border-t border-border bg-surface-800/40">
           <div class="text-xs text-slate-500 mb-2">
-            Qualified for the screen but under the 68% bar:
+            Qualified for the screen but under the 68% bar — not picks:
           </div>
           {#each data.bundle.near_misses as m}
             <div class="flex items-center justify-between text-xs py-0.5 tabular-nums">
@@ -277,10 +277,10 @@
     <section class="card overflow-hidden p-0">
       <div class="px-5 py-4 border-b border-border flex items-baseline justify-between">
         <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-          Today's Bets — detail
+          All Qualifying Picks
         </h2>
         <span class="text-xs text-slate-500">
-          the same {data.picks.length} pick{data.picks.length === 1 ? '' : 's'}, with the numbers behind them
+          {data.picks.length} clearing 68% — the parlay takes the best 2
           {#if data.odds}
             {#if data.odds.error}
               · <span class="text-amber-500/80">odds unavailable</span>

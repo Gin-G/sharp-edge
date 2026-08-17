@@ -50,7 +50,10 @@ from sharp_edge._data import (
 
 logger = logging.getLogger(__name__)
 
-SCREENS = ("hr", "batter")
+# "batter_simple" is a shadow of "batter": the original hot-bat + BvP rules,
+# recorded daily and settled the same way so the two can be compared on live
+# results rather than on backtests of the same 129 days.
+SCREENS = ("hr", "batter", "batter_simple")
 
 _db = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
@@ -554,9 +557,17 @@ def _do_backfill(plan: dict[date, list[str]]) -> None:
                 try:
                     if screen == "hr":
                         result = homers.screen_hr_for_date(d, verbose=False)
+                        picks = result.picks
                     else:
                         result = batters.screen_for_date(d, verbose=False)
-                    n = persist_screen_result(screen, result.picks, d, source="backfill")
+                        # batter_simple is the shadow control — the original
+                        # rules, derived from the same board so it costs no
+                        # extra scraping.
+                        picks = (
+                            batters.simple_picks(result.today)
+                            if screen == "batter_simple" else result.picks
+                        )
+                    n = persist_screen_result(screen, picks, d, source="backfill")
                     with _backfill_lock:
                         _backfill_state["picks_written"] += n
                 except Exception as e:

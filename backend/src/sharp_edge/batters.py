@@ -170,6 +170,12 @@ def _do_warm(target_date: date, replace: bool = False) -> None:
                 tracking.persist_screen_result(
                     "batter", result.picks, target_date, replace=replace
                 )
+                # Shadow control: what the original rules would have picked
+                # today, recorded alongside and settled identically.
+                tracking.persist_screen_result(
+                    "batter_simple", simple_picks(result.today),
+                    target_date, replace=replace,
+                )
             tracking.resolve_pending()
         except Exception:
             logger.exception("[batters] pick tracking failed")
@@ -804,6 +810,33 @@ def screen_for_date(
         print(f"[screen] sp_form={bands} picks={len(picks)}")
 
     return ScreenResult(picks=picks, hot_bats=hot_df, today=today_df)
+
+
+def simple_picks(today_df: pd.DataFrame) -> pd.DataFrame:
+    """The original screen, as a control: hot bat with a BvP or hand+slump edge.
+
+    No veto, no probability gate, no one-per-game, no cap — the rules as they
+    stood before any of it. Derived from a board that has already been built,
+    so running it alongside the real screen costs nothing.
+
+    It exists to settle an argument with evidence instead of backtests. Every
+    improvement claimed since traces back to the same 129 days of boards, and
+    only a handful of live picks have tested any of it; recording what the old
+    rules would have picked, on the same days, under the same settlement, is
+    the only way to find out which is actually better.
+    """
+    if today_df is None or today_df.empty:
+        return pd.DataFrame()
+    mask = today_df["is_hot"] & (
+        today_df["bvp_edge"] | today_df["hand_slump_edge"]
+    )
+    picks = today_df[mask].copy()
+    if picks.empty:
+        return picks
+    return picks.sort_values(
+        ["bvp_edge", "bvp_avg", "vs_hand_avg", "recent_avg"],
+        ascending=[False, False, False, False],
+    ).reset_index(drop=True)
 
 
 def lookup_pitcher_form(

@@ -31,11 +31,27 @@ from urllib.parse import quote
 # state bounces a user whose account is registered in another.
 BETSLIP_BASE = "https://{state}.sportsbook.fanduel.com/addToBetslip"
 
-# No cap. The screen already gates picks on probability and takes one batter
-# per game, so whatever arrives here has cleared the bar — capping again would
-# silently drop the 4th-best bet on a good slate for no reason anyone could
-# see. Pass max_legs explicitly to trim.
-DEFAULT_MAX_LEGS: Optional[int] = None
+# The bundle is a *parlay*, and a parlay wants few legs. That is a different
+# objective from the pick list, which is why they now differ: hit rate rewards
+# taking every good bet, a parlay punishes it, because every extra leg is
+# another chance to lose the whole ticket.
+#
+# Sweep rate over 129 days — the share of days where every leg won, which is
+# the only outcome a parlay pays on:
+#
+#     all gated picks   3.5 legs   35.9% of days swept
+#     best 3            2.5 legs   41.9%
+#     best 2            1.8 legs   50.0%     <- here
+#     best 1            1.0 legs   73.6%     (not a parlay)
+#
+# Two legs at around -200 each is roughly +125, so this still clears the
+# plus-odds bar while sweeping half the days instead of a third.
+#
+# Three legs has the higher expected value at those prices (+0.41 per dollar
+# against +0.13) because the payout grows faster than the sweep rate falls.
+# Two is the choice for cashing more often; three is the choice for making
+# more money slowly. Change it here.
+DEFAULT_MAX_LEGS: Optional[int] = 2
 
 
 def betslip_url(selections: Iterable[dict], state: str = "co") -> Optional[str]:
