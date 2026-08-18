@@ -17,6 +17,11 @@ spec:
     size: {{ .Values.cnpg.storage.size }}
     storageClass: {{ .Values.cnpg.storage.storageClass }}
 
+  {{- with .Values.cnpg.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
   bootstrap:
     initdb:
       database: sharpedge

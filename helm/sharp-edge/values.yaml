@@ -87,6 +87,18 @@ cnpg:
   storage:
     size: 5Gi
     storageClass: rook-ceph-block
+  # Bounds added 2026-08-18. Observed peak working set was 91Mi
+  # (postgres runs shared_buffers=128MB + work_mem=4MB), so 256Mi requests
+  # sits above real usage and the 1Gi limit leaves ~10x headroom for vacuum,
+  # index builds and query bursts. CPU limit is loose on purpose: throttling
+  # a database is worse than the overcommit it prevents.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
   postgresql:
     shared_buffers: "128MB"
     effective_cache_size: "256MB"
