@@ -1,21 +1,24 @@
 """Turn a pick plus a price into an expected value.
 
-Hit rate is not ROI. The batter screen sits around 67% and break-even at -207
-is 67.4%, so "the screen is right two times in three" and "the screen makes
-money" are very nearly the same sentence — which means the price decides, not
-the pick. This module is the part that decides.
+Hit rate is not ROI, and for a long time that framing hid the real problem.
+The old screen hit 64.8% and its legs came back priced at a median of -260,
+which is a break-even of 72% — so it was not a good bet that needed a better
+price, it was a bet the market had already marked up past the read. The
+picks were shortest exactly where the screen was most confident, because
+"hot bat versus battered starter" is a story the book prices too.
 
 Three steps:
 
   model_probability   a logistic regression over 29,777 settled board rows —
-                      batter quality first, pitcher form second — recalibrated
-                      onto the pick population.
+                      batter quality first, pitcher form second. Reported as
+                      fit; see below for why there is no longer a correction
+                      layered on top.
   devig               strip the book's margin out of the quoted price, so the
                       comparison is model-vs-market rather than model-vs-vig.
   expected_value      profit per $1 staked at the quoted price.
 
 Coefficients come from scripts/calibrate_model.py over the 125-day backtest in
-EXPERIMENTS.md, and should be refit whenever the screen's rules change — a
+EXPERIMENTS.md, and should be refit whenever the selection rule changes — a
 calibration is only valid for the population that produced it.
 """
 
@@ -26,8 +29,10 @@ from typing import Optional
 
 from .fanduel.odds import american_to_decimal, american_to_implied
 
-# Base rate of the current rule set: 1,241 decided picks, 67.4%.
-BASE_RATE = 0.674
+# Base rate of the population actually bet — the top of the board, one batter
+# per game — measured over 129 days: 77.1% per leg, against 64.8% for the
+# retired screen's rows on the same days. Documentation only; nothing reads it.
+BASE_RATE = 0.771
 
 # Logistic regression over 29,777 settled board rows, fit by
 # scripts/calibrate_model.py. Re-run it whenever the screen's rules change.
@@ -60,17 +65,36 @@ _MEDIANS = {
     "p_l3_k9": 8.3100,
 }
 
-# Platt correction, fit on the pick population alone, and **applied only to
-# picks**. The logistic is fit over the whole board (60.6% base rate) but picks
-# hit 68%, and selection the features don't fully explain pulls pick
-# predictions 4.7 points low. Ranking is unaffected — Platt is monotone — but
-# EV is computed from the *level*, so without this the model would essentially
-# never find a bet.
+# The Platt correction is gone, and its removal is the point.
 #
-# Applying it board-wide instead was measurably wrong: it lifts every
-# non-pick toward a 68% population they aren't in, and 44% of the board came
-# back +EV against a book that holds ~5%. Scope matters as much as the fit.
-_PLATT = (0.226436, 0.893979)
+# It existed to fix a selection effect: the logistic was fit over the whole
+# board, the *screen* bet a filtered sub-population that hit 4.7 points higher
+# than the features explained, so pick-level predictions had to be pushed up
+# or the model would never find a bet. That correction was only ever valid for
+# the population it was fit on, and it was applied by asking
+# ``is_screen_pick`` — which is why it had to be scoped so carefully.
+#
+# Bets are now taken from the top of the whole board rather than from the
+# screen, so the selection effect it corrected for no longer exists, and the
+# raw logistic is what the population needs. Measured on 30,783 settled board
+# rows it is already honest end to end:
+#
+#     predicted   actual      n
+#      50.9%      49.8%     4,636
+#      57.7%      57.3%     8,328
+#      62.5%      63.2%    11,082
+#      67.0%      67.1%     5,796
+#      71.5%      72.8%       860
+#
+# At the very top — the two legs that actually get bet — it reads 74.4% and
+# they land 76.7%, so it is about two points conservative exactly where it
+# matters. That is the safe direction: it understates the parlay and so
+# understates EV, rather than talking the stake up.
+#
+# Refitting Platt on the new population was tried and is worse. Fit over the
+# top 8 of each day it returns (0.4849, 0.4913), which shrinks hard toward
+# that pool's mean and drags the top-2 estimate *down* to 73.3% against a 76.7%
+# outcome. The uncorrected number is the better one.
 
 _FEATURES = ["vs_hand_avg", "recent_ab", "p_l3_h9", "p_l3_k9"]
 
@@ -122,12 +146,7 @@ def model_probability(rec) -> float:
             v = _MEDIANS[f]
         z += _COEF[f] * v
 
-    raw = _sigmoid(z)
-    if not is_screen_pick(rec):
-        return raw
-    a, b = _PLATT
-    lo = min(max(raw, 1e-6), 1 - 1e-6)
-    return _sigmoid(a + b * math.log(lo / (1 - lo)))
+    return _sigmoid(z)
 
 
 def devig_probability(american: int, overround: float = 1.0) -> float:
@@ -160,11 +179,13 @@ def kelly_fraction(p: float, american: int) -> float:
 
 
 def is_screen_pick(rec: dict) -> bool:
-    """Is this row one the screen actually bets?
+    """Does this row carry the old screen's tags?
 
-    No longer gates pricing — the model knows who the batter is, so it can be
-    trusted on any row. Kept because the bundle and the odds snapshot both
-    need to know which rows are picks.
+    **This no longer selects anything.** It gates neither pricing nor betting;
+    bets come from the top of the board by probability. It survives as a
+    label — the odds snapshot records it so the archive can still tell which
+    rows the old rules would have flagged, which is what makes the shipped
+    rule and the retired one comparable on the same days.
     """
     return bool(
         rec.get("is_hot")

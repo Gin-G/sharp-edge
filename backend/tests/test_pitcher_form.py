@@ -203,25 +203,48 @@ HITTABLE_FORM = {"era": 6.00, "ip": 16.0, "er": 11, "starts": 3,
 TODAY = date.today()
 
 
-def test_sharp_starter_vetoes_bvp_picks(slate):
-    """A 6.00 ERA over three starts *and* a .164 average against: the old
-    rules saw a slumping pitcher plus a .500 BvP line and picked both bats.
-    The BvP edge is still flagged on the board — it just isn't a pick."""
+def test_sharp_starter_is_still_banded_and_tagged(slate):
+    """A 6.00 ERA over three starts *and* a .164 average against — the Cease
+    profile. The banding is the thing under test and it still fires; what it
+    no longer does is decide the card."""
     slate(SHARP_FORM)
     res = batters.screen_for_date(TODAY, verbose=False)
-    assert len(res.picks) == 0
     assert set(res.today["p_form"]) == {"SHARP"}
     assert res.today["bvp_edge"].all()
     assert all("SHARP-SP" in t for t in res.today["tags"])
 
 
-def test_veto_can_be_switched_off_for_backtesting(slate):
+def test_a_sharp_starter_no_longer_vetoes_the_card(slate):
+    """This used to return zero picks, and that was the bug in miniature.
+
+    Filtering on the starter cost more than it saved: over 129 days,
+    requiring a battered arm (L3 BAA >= .250) dropped the two-leg sweep from
+    58.9% to 52.0%. A good hitter against a good pitcher is still one of the
+    likeliest bets on the board, and it is priced far better than a good
+    hitter against a bad one, because the book prices the bad one too.
+
+    The model already reads the starter — ``p_l3_h9`` and ``p_l3_k9`` are
+    terms in it. It weighs him; it doesn't get vetoed by him."""
     slate(SHARP_FORM)
-    res = batters.screen_for_date(
-        TODAY, veto_sharp_sp=False, min_pick_probability=0.0,
-        one_pick_per_game=False, verbose=False
+    res = batters.screen_for_date(TODAY, verbose=False)
+    assert len(res.picks) == 1          # one per game, not zero
+    assert set(res.today["p_form"]) == {"SHARP"}
+
+
+def test_the_retired_screen_flags_are_accepted_and_inert(slate):
+    """``veto_sharp_sp`` and ``include_hittable_edge`` configured the retired
+    screen. Callers still pass them, so they must not raise — and they must
+    not quietly change the picks either."""
+    slate(SHARP_FORM)
+    base = batters.screen_for_date(
+        TODAY, one_pick_per_game=False, verbose=False
     )
-    assert len(res.picks) == 2
+    for kwargs in ({"veto_sharp_sp": False}, {"include_hittable_edge": False},
+                   {"veto_sharp_sp": False, "include_hittable_edge": False}):
+        res = batters.screen_for_date(
+            TODAY, one_pick_per_game=False, verbose=False, **kwargs
+        )
+        assert list(res.picks["batter"]) == list(base.picks["batter"])
 
 
 def test_hittable_starter_still_produces_picks(slate):
@@ -241,10 +264,12 @@ def test_both_batters_survive_when_one_per_game_is_off(slate):
     assert len(res.picks) == 2
 
 
-def test_the_bar_is_a_probability_not_a_count(slate):
-    """A fixed count is arbitrary in both directions — it throws away real
-    picks on a loaded slate and pads a thin one. The gate is how likely the
-    batter is to get a hit."""
+def test_the_probability_bar_is_off_but_still_honoured(slate):
+    """Off by default: re-measured against the ranked board a gate is at best
+    neutral and mostly just skips days (>= 0.72 sat out 38 of 129 for a point
+    and a half, with halves disagreeing by twelve). Kept as a knob for anyone
+    who wants to sit out thin slates."""
+    assert batters.MIN_PICK_PROBABILITY is None
     slate(HITTABLE_FORM)
     # An impossible bar clears the board even though both still qualify.
     none_clear = batters.screen_for_date(
@@ -259,11 +284,11 @@ def test_the_bar_is_a_probability_not_a_count(slate):
     assert len(both.picks) == 2
 
 
-def test_volume_is_not_capped_by_default(slate):
-    """Days producing 5-6 picks hit 72.6% and 7+ hit 69.8%, against 67.6% on
-    1-2 pick days — a busy slate is busy because more matchups are good, so
-    there's nothing to cap."""
-    assert batters.MAX_PICKS_PER_DAY is None
+def test_the_pick_list_is_capped_now_that_it_comes_from_the_board(slate):
+    """Uncapped made sense when picks were whatever cleared the filters. The
+    board is the whole slate, so an uncapped list would record a couple of
+    hundred "picks" a day and drown the track record in bets nobody made."""
+    assert batters.MAX_PICKS_PER_DAY == 10
     slate(HITTABLE_FORM)
     res = batters.screen_for_date(
         TODAY, min_pick_probability=0.0, one_pick_per_game=False, verbose=False
@@ -276,6 +301,42 @@ def test_volume_is_not_capped_by_default(slate):
     assert len(capped.picks) == 1
 
 
+def test_a_bench_bat_cannot_be_a_pick(slate, monkeypatch):
+    """The live board is the whole active roster, not the lineup, so without a
+    playing-time floor the top of it can be a backup with a flattering career
+    split who isn't starting. A backtest can never surface this: on a past
+    date the board is built from the boxscore, so every row already played."""
+    import pandas as pd
+    slate(HITTABLE_FORM)
+    # Hoerner has barely played this week; Crow-Armstrong is a regular.
+    monkeypatch.setattr(batters, "_batting_stats_range", lambda s, e: pd.DataFrame([
+        {"Name": "Nico Hoerner", "Tm": "CHC", "BA": 0.500, "AB": 4,
+         "H": 2, "HR": 0, "OBP": 0.500, "OPS": 1.100},
+        {"Name": "Pete Crow-Armstrong", "Tm": "CHC", "BA": 0.320, "AB": 25,
+         "H": 8, "HR": 2, "OBP": 0.360, "OPS": 0.900},
+    ]))
+    res = batters.screen_for_date(
+        TODAY, one_pick_per_game=False, verbose=False
+    )
+    assert list(res.picks["batter"]) == ["Pete Crow-Armstrong"]
+    # He is still on the board — the floor decides bets, not visibility.
+    assert "Nico Hoerner" in set(res.today["batter"])
+
+
+def test_the_floor_yields_rather_than_hand_back_an_empty_card(slate, monkeypatch):
+    """A thin or broken stats feed should not silently cancel the day."""
+    import pandas as pd
+    slate(HITTABLE_FORM)
+    monkeypatch.setattr(batters, "_batting_stats_range", lambda s, e: pd.DataFrame([
+        {"Name": "Nico Hoerner", "Tm": "CHC", "BA": 0.500, "AB": 2,
+         "H": 1, "HR": 0, "OBP": 0.500, "OPS": 1.100},
+    ]))
+    res = batters.screen_for_date(
+        TODAY, one_pick_per_game=False, verbose=False
+    )
+    assert len(res.picks) == 2
+
+
 def test_picks_are_ranked_by_probability_of_a_hit(slate):
     slate(HITTABLE_FORM)
     res = batters.screen_for_date(
@@ -285,22 +346,18 @@ def test_picks_are_ranked_by_probability_of_a_hit(slate):
     assert ps == sorted(ps, reverse=True)
 
 
-def test_hittable_edge_is_on_by_default(slate, monkeypatch):
-    """A hot bat with no BvP history vs. a hittable starter is a pick. Run 1 of
-    the backtest turned this on: 67.4% at 12.5 picks/day against 66.2% at 2.7
-    for BvP alone, over 125 days. See EXPERIMENTS.md."""
-    slate(HITTABLE_FORM)
-    # Strip the BvP edge so hittable_sp_edge is the only thing left.
+def test_a_batter_with_no_edge_tag_at_all_can_still_be_a_pick(slate, monkeypatch):
+    """The heart of the change. Picks are the top of the board by probability,
+    so carrying no tag is not disqualifying — over 129 days the tagged pool
+    swept 49.6% of two-leg days and the untagged board swept 58.1%."""
+    slate(MIDDLING_FORM)
     monkeypatch.setattr(batters, "_bvp", lambda bid, pid, df=None: None)
 
-    res = batters.screen_for_date(TODAY, min_pick_probability=0.0, verbose=False)
-    assert res.today["hittable_sp_edge"].all()
-    assert len(res.picks) == 1      # same starter, so one bet
-
-    res_off = batters.screen_for_date(
-        TODAY, include_hittable_edge=False, min_pick_probability=0.0, verbose=False
-    )
-    assert len(res_off.picks) == 0
+    res = batters.screen_for_date(TODAY, verbose=False)
+    assert not res.today["bvp_edge"].any()
+    assert not res.today["hittable_sp_edge"].any()
+    assert not res.today["hand_slump_edge"].any()
+    assert len(res.picks) == 1
 
 
 # Between the old 9.50 bar and the new 11.00 one. Run 1 found hot bats facing
@@ -319,7 +376,6 @@ def test_middling_starter_is_no_longer_hittable(slate, monkeypatch):
     res = batters.screen_for_date(TODAY, verbose=False)
     assert set(res.today["p_form"]) == {"NEUTRAL"}
     assert not res.today["hittable_sp_edge"].any()
-    assert len(res.picks) == 0
 
 
 def test_baa_arm_alone_cannot_reopen_the_band(slate, monkeypatch):
@@ -332,7 +388,6 @@ def test_baa_arm_alone_cannot_reopen_the_band(slate, monkeypatch):
 
     res = batters.screen_for_date(TODAY, verbose=False)
     assert set(res.today["p_form"]) == {"NEUTRAL"}
-    assert len(res.picks) == 0
 
 
 def test_one_start_does_not_brand_a_starter_hittable():

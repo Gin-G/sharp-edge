@@ -122,27 +122,41 @@ def snapshot(
                 "team": rec.get("team"),
                 "opposing_pitcher": rec.get("opposing_pitcher"),
                 "pitcher_id": rec.get("pitcher_id"),
-                # Only picks get a probability. The calibration was fit on
-                # screen picks, and handing every batter on the board the same
-                # pitcher-derived ~66% would make a .190 hitter at -125 look
-                # like a huge edge. The price is still recorded for everyone —
-                # non-picks are the control group a price model needs.
-                "model_p": (
-                    pricing.model_probability(rec)
-                    if pricing.is_screen_pick(rec) else None
-                ),
+                # Every row gets a probability now, and it has to.
+                #
+                # This used to be written for screen picks only, back when the
+                # calibration was a pick-population fit that would have been
+                # nonsense elsewhere on the board. That restriction outlived
+                # its reason twice over: the correction is gone, the logistic
+                # is fit on and honest across the whole board, and — the part
+                # that bites — the card is now drawn from the whole board, so
+                # a file that scores only the old screen's rows cannot be used
+                # to backtest the rule actually shipping.
+                "model_p": pricing.model_probability(rec),
                 "recent_avg": rec.get("recent_avg"),
                 "recent_ab": rec.get("recent_ab"),
                 "vs_hand_avg": rec.get("vs_hand_avg"),
+                # Sample size behind vs_hand_avg, and the strikeout rate: the
+                # ranking's tie-breaker and the model's fourth feature. Both
+                # were missing, which meant this archive could not reproduce
+                # ``model_probability`` from its own columns — the k9 term had
+                # to be imputed from a training median to score a stored row.
+                # A file you have to guess at is not a record of the model.
+                "vs_hand_pa": rec.get("vs_hand_pa"),
+                "p_l3_k9": rec.get("p_l3_k9"),
                 "bvp_avg": rec.get("bvp_avg"),
                 "bvp_pa": rec.get("bvp_pa"),
                 "p_l3_h9": rec.get("p_l3_h9"),
                 "p_l3_baa": rec.get("p_l3_baa"),
                 "p_form": rec.get("p_form"),
                 "tags": rec.get("tags"),
-                # The actual pick rule, not "has a tag" — a row tagged only
-                # SHARP-SP is one the veto *held back*, and counting it as a
-                # pick would quietly poison any backtest built on this file.
+                # The retired screen's rule, kept as a *label* so the archive
+                # can still reconstruct what the old rules would have flagged
+                # on any given day. It is deliberately not renamed: files
+                # written before the change carry this column with exactly
+                # this meaning, and redefining it in place would silently
+                # change the past. What is actually bet is the top of the
+                # board by ``model_p``, which every row now carries.
                 "is_pick": bool(
                     rec.get("is_hot")
                     and (
@@ -190,8 +204,9 @@ def snapshot(
             # batter's matchup columns from whichever pass did have it.
             ctx = [c for c in ("batter", "batter_id", "team", "opposing_pitcher",
                                "pitcher_id", "model_p", "recent_avg", "recent_ab",
-                               "vs_hand_avg", "bvp_avg", "bvp_pa", "p_l3_h9",
-                               "p_l3_baa", "p_form", "tags", "is_pick")
+                               "vs_hand_avg", "vs_hand_pa", "bvp_avg", "bvp_pa",
+                               "p_l3_h9", "p_l3_baa", "p_l3_k9", "p_form",
+                               "tags", "is_pick")
                    if c in df.columns]
             df[ctx] = df.groupby("batter_key")[ctx].transform(
                 lambda s: s.ffill().bfill()
@@ -259,7 +274,7 @@ def summarise(outdir: Path) -> None:
         q = close["implied_p"].quantile([0.1, 0.5, 0.9]).round(3)
         print(f"closing implied   p10 {q.iloc[0]}   median {q.iloc[1]}   p90 {q.iloc[2]}")
     if "is_pick" in close:
-        print(f"screen picks with a closing price: {int(close['is_pick'].sum())}")
+        print(f"rows carrying the retired screen's tags: {int(close['is_pick'].sum())}")
     if "mins_to_start" in close and close["mins_to_start"].notna().any():
         m = close["mins_to_start"].dropna()
         print(f"closes taken {m.min():.0f}–{m.max():.0f} min before first pitch "

@@ -526,6 +526,200 @@ at 65.6%.
 
 ---
 
+## Run 3 — 2026-08-18: the screen was the problem
+
+Boards 2026-04-01 → 2026-08-09 (129 days, 30,783 settled rows), plus 12 days of
+FanDuel closing snapshots for prices. Objective is the parlay's: **sweep rate**,
+the share of days where every leg won, since that is the only outcome a parlay
+pays on.
+
+The question was "which two legs are most likely to win". The answer turned out
+to be "not the ones the screen was picking".
+
+### The headline
+
+One batter per game, ranked by `model_p`:
+
+| pool | 1 leg | 2 legs | per leg |
+|---|---|---|---|
+| full screen (what was shipping) | 71.0% | 49.6% | 70.5% |
+| screen minus the SHARP veto | 71.8% | 49.2% | 69.9% |
+| hot bat only | 73.4% | 52.8% | 72.8% |
+| edge tags only, no hot-bat requirement | 70.3% | 47.7% | 69.1% |
+| **whole board, no filter** | **78.3%** | **58.1%** | **77.1%** |
+
+Split halves: 56.2% / 60.0% for the board against 47.3% / 51.6% for the screen.
+By month the board wins or ties every one — April 70.0/57.1, May 51.6/35.5,
+June 63.3/63.3, July 51.7/42.3, August 55.6/55.6. Nothing about it is a lucky
+cut of the sample.
+
+### Why — the two filters were pulling opposite ways
+
+`recent_avg`, the hot-bat gate, is not monotone in the outcome, which is the
+tell that it is noise:
+
+| recent_avg (>= 10 AB) | n | hit% |
+|---|---|---|
+| under .200 | 7,138 | 61.3 |
+| .200–.250 | 4,321 | 61.6 |
+| .250–.300 | 4,644 | 62.7 |
+| .300–.350 | 3,539 | 64.4 |
+| .350+ | 3,961 | **61.1** |
+
+`vs_hand_avg` — career average against the hand, already the model's dominant
+term at roughly ten times the weight of the next feature — is clean:
+
+| vs_hand_avg | n | hit% |
+|---|---|---|
+| under .230 | 6,674 | 52.4 |
+| .230–.260 | 12,150 | 59.9 |
+| .260–.280 | 7,686 | 65.1 |
+| .280–.300 | 3,120 | 65.8 |
+| .300–.320 | 786 | 71.8 |
+| .320+ | 358 | 74.6 |
+
+The screen was gating hard on the noisy one and letting the real one break
+ties. Filtering on the *pitcher* is worse still: requiring a battered starter
+(L3 BAA >= .250) drops the two-leg sweep to 52.0%, and L3 H/9 >= 8 to 56.7%.
+
+### The part the hit-rate framing hid: price
+
+129 days of outcomes against 12 days of closing snapshots. Median leg price and
+the resulting median parlay, one batter per game:
+
+| rule | median leg | 2-leg parlay |
+|---|---|---|
+| screen picks, by `model_p` | -250 | **-104** |
+| whole board, by `model_p` | -185 | **+130** |
+| whole board, by shortest price | -350 | -157 |
+
+The old card was not a good bet at a bad price — at those prices it was a
+**losing bet**, and the sweep rate on its own could never show that. "Hot bat
+versus battered starter" is a story the book prices too, so the screen was
+paying a premium for exactly the narrative it was selecting on.
+
+Full frontier on the new rule (sweep from 129 days, price from the snapshots):
+
+| legs | sweep | median parlay | EV/$1 |
+|---|---|---|---|
+| 1 | 80.6% | -177 | +0.26 |
+| **2** | **58.9%** | **+130** | **+0.36** |
+| 3 | 41.7% | +216 | +0.32 |
+| 4 | 29.9% | +370 | +0.41 |
+
+Against the retired screen at the same prices: 1 leg -0.02, 2 legs -0.03.
+
+### Two things that did *not* survive contact
+
+**A probability gate earns nothing.** Re-measured against the ranked board
+rather than against screen qualifiers, where 0.68 was originally fit:
+
+| gate | days played | 2-leg sweep | halves |
+|---|---|---|---|
+| none | 129 | 58.9% | 62.5% / 55.4% |
+| >= 0.70 | 124 | 58.9% | 61.9% / 55.7% |
+| >= 0.72 | 91 | 60.4% | 67.6% / 55.6% |
+| >= 0.74 | 31 | 48.4% | 28.6% / 54.2% |
+
+`MIN_PICK_PROBABILITY` is now `None`. The 0.72 row is the trap — a point and a
+half for sitting out 38 days, with halves twelve points apart.
+
+**The Platt correction had to go.** It existed to fix a selection effect in the
+*screen's* sub-population. Bets now come from the board, so the effect is gone,
+and the raw logistic is honest across it: 50.9/49.8, 57.7/57.3, 62.5/63.2,
+67.0/67.1, 71.5/72.8 (predicted/actual). At the top two it reads 74.4% against
+76.7% actual — about two points conservative, which is the safe direction.
+Refitting Platt on the top-8 pool returns (0.4849, 0.4913) and makes it *worse*,
+dragging the top-2 estimate down to 73.3%.
+
+### One thing the backtest could not have told us
+
+Historical boards are built from the boxscore, so every row is a batter who
+actually played. **Live, the board is `_roster_batters` — the entire active
+roster**, bench included. With the hot-bat gate removed, nothing was left that
+answered "does this man start", and the top of a live board could be a backup
+with a flattering career split.
+
+`recent_ab >= 10` is now a **playing-time** floor, kept explicitly separate from
+the hot-hand rule it used to be welded to. It costs one day of the sample and
+nothing in accuracy (59.4% two-leg, 77.3% per leg), and leaves 234 of 258 chosen
+legs unchanged. It is a guard, not a selector.
+
+### Shipped
+
+Replaying the shipped code path over the 129 days: **59.7% sweep, 77.5% per
+leg**, against 49.6% / 70.5% before.
+
+Caveats worth keeping in view: outcomes come from 129 days but prices from 12,
+so the two halves of the EV table are not measured on the same slates; and the
+price comparison assumes the median leg is representative. The odds archive now
+records `model_p` for every board row (plus `vs_hand_pa` and `p_l3_k9`, without
+which it could not reproduce the model from its own columns), so the next pass
+can measure this on matched days instead.
+
+### Three attempts to push the sweep rate higher — all failed
+
+Recorded so they aren't retried. All held out: each half scored by a model that
+never saw it, one batter per game, `recent_ab >= 10`.
+
+**1. A better ranking model.** The shipped logistic uses raw `vs_hand_avg` at
+roughly ten times the weight of anything else. Regressing it toward league
+average by `vs_hand_pa`, and adding the rest of the pitcher block, both hurt:
+
+| feature set | held-out A | held-out B | pooled | per leg |
+|---|---|---|---|---|
+| shipped (in-sample fit) | 62.5% | 56.2% | 59.4% | 77.3% |
+| `vs_hand_avg` raw, alone | 59.4% | 60.9% | 60.2% | 77.7% |
+| shrunk k=100 | 57.8% | 51.6% | 54.7% | 75.4% |
+| shrunk k=250 | 54.7% | 51.6% | 53.1% | 74.6% |
+| shipped four features, refit | 59.4% | 57.8% | 58.6% | 76.6% |
+| `vs_hand_avg` + `recent_ab` + `p_l3_h9` | 62.5% | 59.4% | **60.9%** | 77.7% |
+
+Shrinkage fails because career PA is not an error term here — elite bats have
+both a high average and a long record, so regressing by sample size mostly
+reorders on career length, which is noise. The full pitcher block fails on
+collinearity: fit together, `p_l3_baa` lands at −0.216 and `p_l3_h9` at +0.188,
+a large cancelling pair that is fitting the residual.
+
+The best row is +1.5 points on the shipped model — about two days. Paired
+day-by-day it is nothing: 76 sweeps against 78, discordant 10/12, **McNemar
+p = 0.83**, and the two rules pick identical cards on 106 of 128 days. The
+ranking is at the ceiling these features support.
+
+**2. Sizing the card by how strong the second leg is.** There is no signal to
+condition on — leg 2's own probability does not predict the pair sweeping, and
+what little it does say points the wrong way:
+
+| leg-2 probability | n | pair sweeps | leg 2 alone wins |
+|---|---|---|---|
+| 0.70–0.73 | 80 | 63.7% | 76.2% |
+| 0.73–0.76 | 36 | 52.8% | 77.8% |
+
+Dropping to one leg when leg 2 is weak does raise the share of days where the
+whole card wins — to 65.6% at a 0.72 bar, 78.9% always-single — but that is
+arithmetic, not skill: fewer legs win more often. It costs money in the same
+motion, EV/$1 falling +0.366 → +0.320 → +0.235. **Counting "days that went
+100%" rewards shrinking the bet, so it cannot be the objective on its own; it
+is only meaningful at a fixed leg count.**
+
+**3. Same-game correlation.** `bundle.build` de-duplicates on `pitcher_id`, so
+two batters in one game on opposite sides can both make the card — an SGP the
+book prices below the product of its legs. Real, but small: the two legs share
+a start time on 10 of 128 days (7.8%, and that is an upper bound, since games
+kick off simultaneously). Those days swept 50.0% against 60.2% for the rest,
+on n=10. Nothing to act on, and no clean game id on the boards to act with —
+`(date, game_time)` collides, resolving only 946 of 1,257 groups to a single
+pairing.
+
+### What to watch
+
+`batter_simple` is still shadow-recording the original rules, and the pick list
+is still tracked, so the live head-to-head continues. The thing to watch is
+whether the live per-leg rate lands near 77% — if it lands near 70%, the
+suspect is the roster/lineup gap above, not the ranking.
+
+---
+
 ## Open questions / not yet tried
 
 - **Bullpen quality.** The starter goes 5–6 innings; two of a batter's four
@@ -533,9 +727,12 @@ at 65.6%.
   the last 7 days is the obvious next feature, and nothing in the screen looks
   at it.
 - **Lineup slot.** Leadoff gets ~4.6 PA, ninth gets ~3.7. That is a large
-  difference in the probability of *any* hit, and the screen ignores it
+  difference in the probability of *any* hit, and the board ignores it
   entirely. Probable lineups aren't posted at warm-up time for every game, but
-  a batter's recent average slot is a decent stand-in.
+  a batter's recent average slot is a decent stand-in. **Promoted to the top of
+  this list by run 3**: now that picks are ranked off the whole board rather
+  than a hot-bat filter, plate appearances are the largest thing the model
+  still cannot see, and `recent_ab >= 10` is only a crude stand-in for it.
 - **Park and weather.** Coors vs. a cold night in Cleveland is not the same bet.
 - ~~**The `.400 vs hand over 50 PA` bar looks near-impossible.**~~ **Answered by
   run 1: it fired 0 times in 125 days.** The screen is BvP-only in practice.

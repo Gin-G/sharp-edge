@@ -426,7 +426,12 @@ def _df_to_records(df) -> list[dict]:
 
 @app.get("/batters/screen")
 async def batter_screen():
-    """Today's MLB batter screen: hot bats, today's matchups, picks.
+    """Today's MLB batter board: hot bats, today's matchups, picks.
+
+    ``picks`` is the board ranked by the probability the batter records a
+    hit, one per game; ``bundle`` is the top two of that list as a parlay.
+    The hot-bat and BvP tags still ride along on every row for display, but
+    they no longer select anything.
 
     Backed by a per-day in-memory cache that's pre-warmed at pod startup.
     If the cache isn't ready yet (cold pod, scrape still running), returns
@@ -488,8 +493,9 @@ async def batter_screen():
         logger.warning("odds enrichment failed: %s", e)
         odds_meta["error"] = str(e)
 
-    # The day's bundle: +EV only, one leg per game, ranked by EV — plus a
-    # link that loads it straight into the bet slip.
+    # The day's bundle: the two most likely to record a hit, one leg per
+    # game — plus a link that loads it straight into the bet slip. Ranked on
+    # probability, not EV; price rides along on each leg but doesn't select.
     from . import bundle as _bundle
 
     legs = _bundle.build(picks)
@@ -504,9 +510,8 @@ async def batter_screen():
             "legs": legs,
             "summary": _bundle.summarise(legs),
             "betslip_url": _bundle.betslip_url(legs, state=settings.fanduel_state),
-            # From the whole board: the screen has already truncated picks
-            # to the day's best few, so anything it dropped is only visible
-            # here.
+            # From the whole board: the card is two legs, so the next-best
+            # runners-up are only visible here.
             "near_misses": _bundle.near_misses(today, legs),
         },
     }

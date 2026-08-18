@@ -8,7 +8,8 @@ a bug we already had to patch around.
 Every batter facing a given starter gets the same number. So the model cannot
 tell Jose Ramirez from a .190-hitting backup catcher, and applied to a whole
 board it invents enormous edges on weak hitters the market has priced
-correctly. ``pricing.is_screen_pick`` currently exists only to stop that.
+correctly. ``pricing.is_screen_pick`` existed only to stop that; it is now a
+label on the retired screen and gates nothing.
 
 And it leans on the weakest available signal. Over 29,777 settled board rows
 the pitcher's H/9 correlates with getting a hit at r=+0.011, while the
@@ -176,7 +177,10 @@ def incumbent(d: pd.DataFrame) -> np.ndarray:
 
 
 def screen_picks(t: pd.DataFrame) -> np.ndarray:
-    """The rows the shipped screen actually bets."""
+    """The retired screen's rows. Kept only to score the old rule for contrast.
+
+    This is no longer the population that gets bet — see ``bet_rows``.
+    """
     from sharp_edge import batters as B
     hot = t["recent_avg"].ge(0.300) & t["recent_ab"].ge(10)
     bvp = t["bvp_avg"].ge(0.400) & t["bvp_pa"].ge(5)
@@ -189,30 +193,40 @@ def screen_picks(t: pd.DataFrame) -> np.ndarray:
     return (hot & (bvp | hittable) & ~sharp).values
 
 
-def _logit(p: np.ndarray) -> np.ndarray:
-    p = np.clip(p, 1e-6, 1 - 1e-6)
-    return np.log(p / (1 - p))
+def bet_rows(t: pd.DataFrame, p: np.ndarray, legs: int = 2) -> np.ndarray:
+    """The rows actually bet: the day's top ``legs``, one batter per game.
 
-
-def fit_platt(p_raw: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """A two-parameter correction fit on the *pick* population.
-
-    The logistic is fit over the whole board, whose base rate is 60.6%, while
-    picks hit 68%. Selection the features don't fully explain pulls pick
-    predictions toward the board mean — measured, 4.7 points low. Ranking is
-    fine; the level is not, and EV is computed from the level, so left alone
-    the model would simply never find a bet.
-
-    Platt scaling is monotone, so it corrects the level without disturbing
-    the ordering the logistic earned.
+    A calibration is only valid for the population that produced it, and that
+    population is no longer "everything the screen flagged" — it is the top of
+    the board under the model being fitted. Which rows those are depends on the
+    model's own scores, so this takes them as an argument rather than
+    recomputing a fixed rule.
     """
-    Z = np.column_stack([np.ones(len(p_raw)), _logit(p_raw)])
-    return fit_logistic(Z, y, l2=0.01)
+    from sharp_edge import batters as B
+    w = t.assign(_p=p, _i=np.arange(len(t)))
+    w = w[w["recent_ab"].fillna(0) >= B.MIN_RECENT_AB_TO_RANK]
+    w = w.sort_values(["pick_date", "_p", "vs_hand_pa"],
+                      ascending=[True, False, False])
+    w = w.groupby(["pick_date", "pitcher_id"], group_keys=False).head(1)
+    keep = w.groupby("pick_date", group_keys=False).head(legs)["_i"].values
+    m = np.zeros(len(t), dtype=bool)
+    m[keep] = True
+    return m
 
 
-def apply_platt(p_raw: np.ndarray, ab: np.ndarray) -> np.ndarray:
-    Z = np.column_stack([np.ones(len(p_raw)), _logit(p_raw)])
-    return predict(Z, ab)
+# The Platt helpers that used to live here are gone, deliberately.
+#
+# They fit a two-parameter correction on the screen's pick population, which
+# ran 4.7 points above what the features explained. That selection effect went
+# away with the screen: the card is now the top of the board, and the logistic
+# is fit on and honest across the board. Refitting a correction for the new
+# population was measured and came out *worse* — over the top 8 of each day it
+# returns (0.4849, 0.4913), which shrinks toward that pool's mean and drags the
+# top-2 estimate down to 73.3% against a 76.7% outcome.
+#
+# Leaving the helpers here would invite exactly that experiment being redone by
+# someone who assumed a missing correction was an oversight. See run 3 in
+# EXPERIMENTS.md.
 
 
 def main() -> None:
@@ -261,28 +275,33 @@ def main() -> None:
     print(f"  logistic:  {len(np.unique(p_new.round(4)))} distinct values, "
           f"range {100*p_new.min():.1f}%–{100*p_new.max():.1f}%")
 
-    # The level, on the population that actually gets bet.
-    mtr, mte = screen_picks(train), screen_picks(test)
-    ab = fit_platt(predict(Xtr, beta)[mtr], ytr[mtr])
-    p_cal = apply_platt(p_new[mte], ab)
+    # The level, on the population that actually gets bet: the top two of the
+    # board each day, one batter per game. Not the retired screen — a
+    # calibration is only valid for the population that produced it, and that
+    # is the one this model will be asked about.
+    mte = bet_rows(test, p_new)
     ym = yte[mte]
-    print(f"\n=== held-out PICKS only (n={mte.sum()}, actual {100*ym.mean():.1f}%) ===")
+    print(f"\n=== held-out BET rows (n={mte.sum()}, actual {100*ym.mean():.1f}%) ===")
     print(f"{'model':<26}{'AUC':>8}{'log-loss':>11}{'mean pred':>11}")
     print("-" * 56)
-    for nm, p in (("incumbent", p_old[mte]), ("logistic raw", p_new[mte]),
-                  ("logistic + Platt", p_cal)):
+    for nm, p in (("incumbent", p_old[mte]), ("logistic", p_new[mte])):
         print(f"{nm:<26}{auc(ym, p):>8.4f}{log_loss(ym, p):>11.5f}{100*p.mean():>10.1f}%")
-    print("\ncalibration after Platt, held-out picks:")
-    print(calibration_table(ym, p_cal, bins=5))
-    resid = abs(100 * (p_cal.mean() - ym.mean()))
-    print(f"\nresidual level error on picks: {resid:.1f} points — the edges being "
-          f"hunted are 1-3 points, so treat EV as indicative, not precise.")
+    print("\ncalibration on held-out bet rows:")
+    print(calibration_table(ym, p_new[mte], bins=5))
+    resid = 100 * (ym.mean() - p_new[mte].mean())
+    print(f"\nlevel error on bet rows: {resid:+.1f} points. Negative means the "
+          f"model talks the card up, which is the direction to worry about; a "
+          f"small positive number is conservative and safe.")
+
+    # For contrast only: what the retired screen's population looked like.
+    ms = screen_picks(test)
+    if ms.sum():
+        print(f"\n(retired screen's rows, for contrast: n={ms.sum()}, "
+              f"actual {100*yte[ms].mean():.1f}%)")
 
     if args.emit:
         full_X, full_med = design(d)
         full_beta = fit_logistic(full_X, d["y"].values)
-        full_ab = fit_platt(predict(full_X, full_beta)[screen_picks(d)],
-                            d["y"].values[screen_picks(d)])
         print("\n# --- paste into pricing.py, refit on the full history ---")
         print("_COEF = {")
         print(f'    "intercept": {full_beta[0]:.6f},')
@@ -293,7 +312,11 @@ def main() -> None:
         for k, v in full_med.items():
             print(f'    "{k}": {v:.4f},')
         print("}")
-        print(f"_PLATT = ({full_ab[0]:.6f}, {full_ab[1]:.6f})")
+        # No _PLATT line. The correction was removed from pricing.py when the
+        # card stopped being drawn from the screen: it corrected a selection
+        # effect in that sub-population, and fitting a fresh one on the top of
+        # the board measured *worse* than leaving the logistic alone. Emitting
+        # a pair here would invite pasting a constant the module no longer has.
 
 
 if __name__ == "__main__":

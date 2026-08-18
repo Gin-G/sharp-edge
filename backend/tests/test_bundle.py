@@ -181,14 +181,33 @@ def _board_row(name, model_p, pitcher, is_pick=True):
 
 
 def test_near_misses_come_from_the_board_not_the_picks():
-    """The screen truncates picks to the day's best few, so anything it
-    dropped is only visible on the board."""
-    board = [_board_row("chosen", 0.75, 1), _board_row("fourth", 0.70, 2),
-             _board_row("fifth", 0.68, 3), _board_row("not a pick", 0.9, 4,
-                                                      is_pick=False)]
+    """The card is two legs, so everything else is only visible on the board."""
+    board = [_board_row("chosen", 0.75, 1), _board_row("third", 0.70, 2),
+             _board_row("fourth", 0.68, 3)]
     chosen = [board[0]]
     misses = bundle.near_misses(board, chosen)
-    assert [m["batter"] for m in misses] == ["fourth", "fifth"]
+    assert [m["batter"] for m in misses] == ["third", "fourth"]
+
+
+def test_near_misses_ignore_the_retired_screen_tags():
+    """The tags no longer select anything, so an untagged row is a legitimate
+    runner-up — and used to be invisible here."""
+    board = [_board_row("chosen", 0.75, 1),
+             _board_row("untagged but likelier", 0.90, 2, is_pick=False),
+             _board_row("tagged", 0.68, 3)]
+    misses = bundle.near_misses(board, [board[0]])
+    assert [m["batter"] for m in misses] == ["untagged but likelier", "tagged"]
+
+
+def test_near_misses_take_one_batter_per_game():
+    """Same rule that chose the card, so these are the actual runners-up: a
+    second batter off a game already on the ticket isn't an alternative to it."""
+    board = [_board_row("chosen", 0.75, 1),
+             _board_row("same game as chosen", 0.74, 1),
+             _board_row("other game", 0.70, 2),
+             _board_row("also other game", 0.69, 2)]
+    misses = bundle.near_misses(board, [board[0]])
+    assert [m["batter"] for m in misses] == ["other game"]
 
 
 def test_near_misses_are_ranked_by_probability():
@@ -200,8 +219,9 @@ def test_near_misses_are_ranked_by_probability():
 
 def test_the_parlay_is_capped_short():
     """A parlay wants few legs — the opposite of a pick list. Every extra leg
-    is another chance to lose the whole ticket, and over 129 days the sweep
-    rate falls from 50% at two legs to 35.9% taking every gated pick."""
+    is another chance to lose the whole ticket: over 129 days the sweep rate
+    runs 80.6% at one leg, 58.9% at two, 41.7% at three, 29.9% at four, and
+    two is the shortest card that still pays plus money."""
     rows = [_pick(f"p{i}", None, -200, pitcher=i, model_p=0.72 - i * 0.001)
             for i in range(8)]
     got = bundle.build(rows)

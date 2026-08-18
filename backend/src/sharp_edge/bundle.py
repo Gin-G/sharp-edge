@@ -1,16 +1,18 @@
 """The day's bets, and a link that loads them into the slip.
 
-**What gets picked.** The batters most likely to record a hit, ranked by the
-model's probability, one per game, capped at a handful. Qualifying for the
-screen and being worth betting are different things: everything that clears
-the filters hits 67.4% together, while the best 3 a day hit 72.5%.
+**What gets picked.** The two batters most likely to record a hit, taken off
+the top of the board by model probability, one per game. Not the two best
+*screen qualifiers* — the filters are gone from selection, because measured
+over 129 days they were picking worse bets and paying more for them. See the
+ranking block in ``batters.screen_for_date`` for the numbers.
 
-**Price is shown, not obeyed.** Odds and EV ride along on every leg because
-they're worth knowing — a pick at -330 is a poor price whatever the read — but
-they don't decide the card. Gating on EV handed selection to the market: legs
-vanished when a line moved a few cents, and a slate of short prices produced
-"bet nothing" even when the reads were good. It was also a finer distinction
-than the model can actually make, its calibration being off by ~1.7 points.
+**Price is shown, not obeyed — and that finally costs nothing.** Odds and EV
+ride along on every leg because they're worth knowing, but they don't decide
+the card; gating on EV handed selection to the market, and legs vanished when
+a line moved a few cents. The reason that used to hurt was that the old picks
+were genuinely badly priced: median leg -260, a 72% break-even against a 70.5%
+read. Betting the board instead moves the median leg to -185, so the card
+clears its own price without the price having to choose it.
 
 **One leg per game.** Two batters facing the same starter are one bet on that
 pitcher having a bad day, not two independent reads. A book prices them as a
@@ -31,26 +33,33 @@ from urllib.parse import quote
 # state bounces a user whose account is registered in another.
 BETSLIP_BASE = "https://{state}.sportsbook.fanduel.com/addToBetslip"
 
-# The bundle is a *parlay*, and a parlay wants few legs. That is a different
-# objective from the pick list, which is why they now differ: hit rate rewards
-# taking every good bet, a parlay punishes it, because every extra leg is
+# The bundle is a *parlay*, and a parlay wants few legs — every extra leg is
 # another chance to lose the whole ticket.
 #
-# Sweep rate over 129 days — the share of days where every leg won, which is
-# the only outcome a parlay pays on:
+# The frontier, re-measured on the ranked board. Sweep rate is the share of
+# days where every leg won, over 129 days of settled boards; the price is the
+# median parlay actually quoted by FanDuel over 12 days of closing snapshots;
+# EV is profit per dollar staked at that price.
 #
-#     all gated picks   3.5 legs   35.9% of days swept
-#     best 3            2.5 legs   41.9%
-#     best 2            1.8 legs   50.0%     <- here
-#     best 1            1.0 legs   73.6%     (not a parlay)
+#     legs   sweep rate   median parlay   EV per $1
+#      1        80.6%         -177          +0.26
+#      2        58.9%         +130          +0.36     <- here
+#      3        41.7%         +216          +0.32
+#      4        29.9%         +370          +0.41
 #
-# Two legs at around -200 each is roughly +125, so this still clears the
-# plus-odds bar while sweeping half the days instead of a third.
+# Two legs is the pick: it is the shortest card that still pays plus money,
+# and it sweeps three days in five. Four legs shows a higher EV, but it is one
+# built out of 30% sweeps and long payouts — the same expected dollar arriving
+# far less often, with a variance a small bankroll feels and a backtest does
+# not.
 #
-# Three legs has the higher expected value at those prices (+0.41 per dollar
-# against +0.13) because the payout grows faster than the sweep rate falls.
-# Two is the choice for cashing more often; three is the choice for making
-# more money slowly. Change it here.
+# For contrast, the retired screen against the same prices: one leg -260 for
+# -0.02 per dollar, two legs -104 for -0.03. It was not a good card being sold
+# short; at those prices it was a losing bet, which is what the sweep rate
+# alone never showed.
+#
+# Change it here. One leg is not a parlay, but it is the highest-probability
+# card on the board and at -177 it is still a good bet.
 DEFAULT_MAX_LEGS: Optional[int] = 2
 
 
@@ -97,9 +106,17 @@ def build(
     That's a deliberate reversal. Gating on expected value meant the market
     chose the card: a leg the model liked vanished the moment the line moved a
     few cents, and on a slate where every price was short the answer was
-    "bet nothing" even when the reads were good. Worse, the gate was only as
-    trustworthy as the model's calibration, which is off by ~1.7 points — so
-    it was discarding real picks on a distinction it couldn't actually make.
+    "bet nothing" even when the reads were good.
+
+    What made the old card lose was never the missing price gate — it was
+    where the picks came from. Filtered on hot bats and battered starters, they
+    came back at a median -260 against a 70.5% read, and no gate saves a bet
+    that dear. Drawn off the board they come back at -185 against 77%. Fix the
+    selection and the price stops needing to be a veto.
+
+    ``records`` is expected in probability order already (the screen ranks
+    before truncating); the sort here is belt-and-braces, and ``ev`` only
+    breaks ties.
 
     ``min_edge_pts`` is still honoured when passed explicitly, for anyone who
     does want a price floor. It just isn't the default any more.
@@ -137,31 +154,46 @@ def build(
 
 
 def near_misses(board: list[dict], chosen: list[dict], limit: int = 5) -> list[dict]:
-    """Batters who qualified but ranked below the cut, best first.
+    """The next-best batters below the cut, best first.
 
-    Pass the whole board, not the picks — the screen already truncates picks
-    to the day's best few, so anything it dropped is only visible here. Worth
-    showing for two reasons: seeing who just missed, and spotting a name you
-    have a read on that the model happened to rank fourth.
+    Pass the whole board, not the picks — the card is only two legs, so
+    everything else is visible only here. Worth showing for two reasons:
+    seeing who just missed, and spotting a name you have a read on that the
+    model happened to rank fourth.
+
+    This used to filter on ``is_screen_pick``, which now would show the wrong
+    list entirely: those tags no longer decide anything, so a row carrying
+    them isn't a near miss and a row without them isn't excluded. Ranking by
+    probability, one per game, is the same rule that chose the card — which is
+    what makes these the actual runners-up.
     """
-    from . import pricing
-
     taken = {(r.get("batter"), r.get("pitcher_id")) for r in chosen}
-    out = [
-        {
+    taken_games = {r.get("pitcher_id") for r in chosen if r.get("pitcher_id") is not None}
+    rows = sorted(
+        (r for r in board if r.get("model_p") is not None),
+        key=lambda r: -r["model_p"],
+    )
+    out: list[dict] = []
+    seen_games = set(taken_games)
+    for r in rows:
+        if (r.get("batter"), r.get("pitcher_id")) in taken:
+            continue
+        game = r.get("pitcher_id") or r.get("fd_event_id")
+        if game is not None:
+            if game in seen_games:
+                continue
+            seen_games.add(game)
+        out.append({
             "batter": r.get("batter"),
             "opposing_pitcher": r.get("opposing_pitcher"),
             "model_p": r.get("model_p"),
             "fd_odds": r.get("fd_odds"),
             "ev": r.get("ev"),
             "edge_pts": r.get("edge_pts"),
-        }
-        for r in board
-        if pricing.is_screen_pick(r)
-        and (r.get("batter"), r.get("pitcher_id")) not in taken
-    ]
-    out.sort(key=lambda r: -(r["model_p"] if r["model_p"] is not None else 0))
-    return out[:limit]
+        })
+        if len(out) >= limit:
+            break
+    return out
 
 
 def summarise(bundle: list[dict]) -> dict:

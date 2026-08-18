@@ -4,9 +4,12 @@
 Two honest limits shape everything here, and they are worth stating before any
 number is read:
 
-1. **There are no historical odds.** FanDuel's public API serves the current
-   board and nothing else, so a genuine price-aware backtest is impossible
-   until enough daily snapshots accumulate (``scripts/snapshot_odds.py``).
+1. **Historical odds are only just starting to exist.** FanDuel's public API
+   serves the current board and nothing else, so prices come from the daily
+   snapshots in ``data/odds/`` (``scripts/snapshot_odds.py``), which began on
+   2026-08-07. Until those overlap the settled boards by a couple of months, a
+   genuinely price-aware backtest is still out of reach and this script keeps
+   reporting return as a function of an assumed price.
 
 2. **Imputed prices cannot resolve the edge.** Fitting the market on a slate's
    worth of real prices gets R2 ~ 0.49 with a residual of ~4.2 implied-prob
@@ -16,8 +19,9 @@ number is read:
 
 So this script does the two things that *are* sound:
 
-  * scores the **selection rule** on hit rate, which needs no prices and is
-    measured exactly against settled outcomes; and
+  * scores the **selection rule** on sweep rate — the share of days where
+    every leg won, which is the only outcome a parlay pays on — which needs no
+    prices and is measured exactly against settled outcomes; and
   * reports return as a **function of the assumed price**, so the reader can
     see precisely which market assumption the strategy needs in order to win
     rather than being handed one number resting on a hidden guess.
@@ -53,8 +57,12 @@ def load(outdir: Path) -> pd.DataFrame:
     return df
 
 
-def current_rules(df: pd.DataFrame) -> pd.Series:
-    """The shipped screen, recomputed from raw columns."""
+def legacy_screen(df: pd.DataFrame) -> pd.Series:
+    """The **retired** screen, recomputed from raw columns.
+
+    Kept so the old rule can still be scored against the new one on the same
+    days. It selects nothing in production any more.
+    """
     hot = df["recent_avg"].ge(0.300) & df["recent_ab"].ge(10)
     bvp = df["bvp_avg"].ge(0.400) & df["bvp_pa"].ge(5)
     hittable = (
@@ -72,25 +80,40 @@ def select(
     top: int | None,
     min_h9: float | None,
     cross_game: bool = False,
+    screen: bool = False,
 ) -> pd.DataFrame:
-    """Apply the screen, then keep the best ``top`` picks per day.
+    """The shipped selection: rank the board, keep the best ``top`` per day.
 
-    Ranking is by the calibrated model probability, which on the current
-    calibration is a monotone function of the starter's H/9 — so this is
-    "prefer the most battered starter", with recent average breaking ties.
+    Ranking is by ``pricing.model_probability`` evaluated on the **whole row**,
+    not on the starter's H/9 alone — the batter's career average against the
+    hand is the dominant term, and the old bare-float call threw it away, which
+    made this script rank on "prefer the most battered starter" and measure a
+    rule nobody ships.
+
+    ``screen=True`` restricts to the retired screen's rows instead, so the two
+    can be scored on the same days. That comparison is the point of the
+    ``--compare`` table.
 
     ``cross_game`` keeps only the single best batter against each starter
     before taking the top N. Without it, 57% of top-2 bundles are two batters
     facing the same pitcher — a same-game parlay, which a book prices below
     the product of its legs because it knows the outcomes are correlated.
-    Forcing one batter per starter costs a little hit rate and makes the
-    parlay pricing in this script actually achievable.
+    Forcing one batter per starter costs a little sweep and makes the parlay
+    pricing in this script actually achievable.
     """
-    sel = df[current_rules(df)].copy()
+    sel = df[legacy_screen(df)].copy() if screen else df.copy()
     if min_h9 is not None:
         sel = sel[sel["p_l3_h9"].ge(min_h9)]
-    sel["model_p"] = sel["p_l3_h9"].map(pricing.model_probability)
-    order = ["pick_date", "model_p", "recent_avg"]
+    # The shipped playing-time floor. Live, the board is the whole active
+    # roster, so this is what keeps a bench bat off the card.
+    if not screen:
+        floor = sel["recent_ab"].fillna(0) >= batters.MIN_RECENT_AB_TO_RANK
+        if floor.any():
+            sel = sel[floor]
+    sel["model_p"] = [
+        pricing.model_probability(r) for r in sel.to_dict(orient="records")
+    ]
+    order = ["pick_date", "model_p", "vs_hand_pa"]
     asc = [True, False, False]
     if cross_game:
         sel = (
@@ -105,6 +128,24 @@ def select(
             .head(top)
         )
     return sel
+
+
+def sweep_rate(sel: pd.DataFrame, legs: int) -> dict:
+    """Share of days where **every** leg won — the only outcome a parlay pays.
+
+    This is the objective, and it is not hit rate: a rule that maximises hit
+    rate rewards taking every good bet, while a parlay punishes it, because
+    each extra leg is another chance to lose the whole ticket.
+    """
+    d = sel[sel["result"].isin(["WIN", "LOSS"])]
+    played = swept = 0
+    for _, g in d.groupby("pick_date"):
+        g = g.head(legs)
+        if len(g) < legs:
+            continue
+        played += 1
+        swept += int(g["result"].eq("WIN").all())
+    return {"days": played, "sweep": 100 * swept / played if played else float("nan")}
 
 
 def straight_roi(sel: pd.DataFrame, implied: float) -> dict:
@@ -168,6 +209,10 @@ def report(df: pd.DataFrame, top: int | None, min_h9: float | None,
     print(f"{len(sel)} picks over {days} days ({len(sel)/days:.1f}/day), "
           f"{len(d)} decided")
     print(f"hit rate {100*wins/len(d):.1f}%  (95% CI {lo:.1f}–{hi:.1f})")
+    if top and top >= 1:
+        sw = sweep_rate(sel, top)
+        print(f"sweep rate {sw['sweep']:.1f}% of {sw['days']} carded days "
+              f"— the objective; hit rate above is context")
 
     print("\nflat-stake ROI vs. the price you'd have to get:")
     print(f"{'avg price':<14}{'implied':>9}{'ROI/bet':>10}")
@@ -196,19 +241,22 @@ def _wilson(w, n, z=1.96):
 
 
 def compare(df: pd.DataFrame) -> None:
-    """Does being choosier actually help? The screen's edge is a tail effect,
-    so in principle fewer-and-better should beat take-everything."""
-    print(f"\n{'strategy':<24}{'picks':>7}{'/day':>7}{'dec':>7}{'hit%':>8}"
-          f"{'95% CI':>15}{'ROI@-200':>10}")
-    print("-" * 78)
+    """The board against the retired screen, on the same days.
+
+    Sweep is the column that decides — the share of carded days where every
+    leg won. Hit rate is shown beside it because the two disagree, and that
+    disagreement is the whole reason the screen was retired.
+    """
+    print(f"\n{'strategy':<28}{'/day':>7}{'dec':>7}{'hit%':>8}{'95% CI':>15}"
+          f"{'sweep':>9}{'ROI@-200':>10}")
+    print("-" * 84)
     imp200 = 1 / american_to_decimal(-200)
-    rows = [("all picks", None, None, False)]
-    rows += [(f"top {k}/day", k, None, False) for k in (1, 2, 3, 5)]
-    rows += [("SP h9 >= 13", None, 13.0, False), ("SP h9 >= 16", None, 16.0, False)]
-    rows += [("top 2/day, h9 >= 13", 2, 13.0, False)]
-    rows += [(f"top {k}/day cross-game", k, None, True) for k in (1, 2, 3)]
-    for label, top, min_h9, xg in rows:
-        sel = select(df, top, min_h9, xg)
+    rows = [(f"board, top {k}/day, x-game", k, None, True, False) for k in (1, 2, 3, 4)]
+    rows += [(f"screen, top {k}/day, x-game", k, None, True, True) for k in (1, 2, 3)]
+    rows += [("board, all, x-game", None, None, True, False),
+             ("screen, all, x-game", None, None, True, True)]
+    for label, top, min_h9, xg, screen in rows:
+        sel = select(df, top, min_h9, xg, screen=screen)
         d = sel[sel["result"].isin(["WIN", "LOSS"])]
         if len(d) < 30:
             continue
@@ -216,8 +264,11 @@ def compare(df: pd.DataFrame) -> None:
         lo, hi = _wilson(w, len(d))
         days = sel["pick_date"].nunique()
         roi = straight_roi(sel, imp200)["roi"]
-        print(f"{label:<24}{len(sel):>7}{len(sel)/days:>7.1f}{len(d):>7}"
-              f"{100*w/len(d):>7.1f}%{f'{lo:.1f}–{hi:.1f}':>15}{roi:>+9.1f}%")
+        sw = sweep_rate(sel, top)["sweep"] if top else float("nan")
+        swtxt = "—" if sw != sw else f"{sw:.1f}%"
+        print(f"{label:<28}{len(sel)/days:>7.1f}{len(d):>7}"
+              f"{100*w/len(d):>7.1f}%{f'{lo:.1f}–{hi:.1f}':>15}{swtxt:>9}"
+              f"{roi:>+9.1f}%")
 
 
 def main() -> None:

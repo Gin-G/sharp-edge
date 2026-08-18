@@ -357,41 +357,62 @@ MIN_HITTABLE_H9: float = 11.00
 MIN_HITTABLE_BAA: float = 0.310
 MIN_SHARP_STARTS: int = 2
 
-# The bar a pick has to clear: the model's probability that the batter records
-# a hit.
+# Minimum at-bats in the trailing week for a batter to be rankable.
 #
-# A quality threshold rather than a fixed count, because a count is arbitrary
-# in both directions — it throws away real picks on a loaded slate and pads a
-# thin one. This lets the day decide how many bets there are.
+# This is a *playing-time* floor, not a form filter, and the distinction is
+# the reason it survived while the hot-bat gate didn't. The old ``is_hot``
+# rule bundled the two together — .300 or better over at least 10 AB — and
+# only the at-bats half was doing any work.
 #
-# Measured over the 129-day backtest, one batter per game, screen qualifiers
-# only:
+# It matters far more live than it looks in the backtest. On a past date the
+# board is built from the boxscore, so every row is a man who actually batted;
+# live it is built from ``_roster_batters``, which is the entire active roster,
+# bench and fresh call-ups included. ``recent_ab`` is the only column on the
+# board that answers "does he play?", and without it the top of a live board
+# can be a backup catcher with a flattering career split against the hand who
+# is not in the lineup — a batter the backtest can never produce and so can
+# never warn about.
 #
-#     >= 0.65   4.5/day   70.4%   split-half drift +4.3
-#     >= 0.67   3.9/day   71.4%   drift +2.2
-#     >= 0.68   3.4/day   71.7%   drift +1.4     <- here
-#     >= 0.69   2.9/day   72.6%   drift +0.9
-#     >= 0.70   2.3/day   70.3%   drift -2.3     <- noise; sample has thinned
-#     (everything that qualifies: 12.0/day, 67.4%)
+# Measured over 129 days it is free, which is the point: it costs one day of
+# the sample and nothing in accuracy.
 #
-# 0.68 is the last point where the bar still buys hit rate and the split-half
-# is tight. Past 0.70 the numbers bounce because there's nothing left to
-# measure — 44 of 129 days produce no pick at all by 0.72.
+#     no floor          129 days   58.9% two-leg   76.7% per leg
+#     recent_ab >= 10   128 days   59.4%           77.3%           <- here
+#     recent_ab >= 15   127 days   58.3%           76.4%
+#     recent_ab >= 20   122 days   59.0%           77.5%
 #
-# The threshold is only meaningful because the model is calibrated: across
-# deciles of picks, predicted tracks actual within about two points. "68%"
-# means 68%, so it can be used as a bar rather than just a ranking.
-#
-# Volume is self-limiting on quality, not capped: days that produce 5-6 picks
-# hit 72.6% and 7+ days hit 69.8%, versus 67.6% on 1-2 pick days. A busy slate
-# is busy because more matchups are genuinely good. That's the opposite of the
-# old take-everything rule, where the 20+ pick days hit 38-55% precisely
-# because volume came from lowering the bar.
-MIN_PICK_PROBABILITY: float = 0.68
+# 234 of the 258 legs it would have chosen are unchanged; it is a guard, not a
+# selector. Ten AB in seven days is roughly "started half the week".
+MIN_RECENT_AB_TO_RANK: int = 10
 
-# Optional hard cap, off by default — the threshold does the work. Set an int
-# to also limit the count on an exceptional slate.
-MAX_PICKS_PER_DAY: Optional[int] = None
+# No probability bar. Picks are the top of the board, and a threshold on top
+# of a ranking earns nothing.
+#
+# The bar used to be 0.68, and it was measured against the wrong pool — screen
+# qualifiers only. Re-measured over the same 129 days against the ranked board,
+# a gate is at best neutral and mostly costs days:
+#
+#     gate        days played   2-leg sweep   split-half
+#     none            129          58.9%      62.5% / 55.4%   <- here
+#     >= 0.70         124          58.9%      61.9% / 55.7%
+#     >= 0.72          91          60.4%      67.6% / 55.6%   unstable
+#     >= 0.74          31          48.4%      28.6% / 54.2%   falls apart
+#
+# The 0.72 row is the trap: a point and a half of sweep for sitting out 38
+# days, and its two halves disagree by twelve points, which is the signature
+# of a threshold fit to the sample rather than to the game. Ranking already
+# says which two bets are best; a bar only decides whether to skip the day,
+# and the evidence doesn't support skipping.
+#
+# Kept as a knob (None = off) for anyone who wants to sit out thin slates.
+MIN_PICK_PROBABILITY: Optional[float] = None
+
+# How many ranked rows to keep as the day's pick list. This is the list shown
+# and tracked, not the parlay — bundle.build takes the top two off the front
+# of it. Uncapped is no longer an option now that picks come from the board
+# rather than from a filter: the board is the whole slate, and recording 240
+# "picks" a day would drown the track record in bets nobody made.
+MAX_PICKS_PER_DAY: Optional[int] = 10
 
 
 def _sp_band(
@@ -448,8 +469,9 @@ def screen_today(
     min_sharp_starts: int = MIN_SHARP_STARTS,
     veto_sharp_sp: bool = True,
     include_hittable_edge: bool = True,
-    min_pick_probability: float = MIN_PICK_PROBABILITY,
+    min_pick_probability: Optional[float] = MIN_PICK_PROBABILITY,
     max_picks: Optional[int] = MAX_PICKS_PER_DAY,
+    min_recent_ab_to_rank: int = MIN_RECENT_AB_TO_RANK,
     one_pick_per_game: bool = True,
     days: int = 7,
     workers: int = 12,
@@ -472,6 +494,7 @@ def screen_today(
         veto_sharp_sp=veto_sharp_sp,
         include_hittable_edge=include_hittable_edge,
         min_pick_probability=min_pick_probability,
+        min_recent_ab_to_rank=min_recent_ab_to_rank,
         max_picks=max_picks,
         one_pick_per_game=one_pick_per_game,
         days=days,
@@ -517,8 +540,9 @@ def screen_for_date(
     min_sharp_starts: int = MIN_SHARP_STARTS,
     veto_sharp_sp: bool = True,
     include_hittable_edge: bool = True,
-    min_pick_probability: float = MIN_PICK_PROBABILITY,
+    min_pick_probability: Optional[float] = MIN_PICK_PROBABILITY,
     max_picks: Optional[int] = MAX_PICKS_PER_DAY,
+    min_recent_ab_to_rank: int = MIN_RECENT_AB_TO_RANK,
     one_pick_per_game: bool = True,
     days: int = 7,
     workers: int = 12,
@@ -533,13 +557,20 @@ def screen_for_date(
     as of now, not as of the target date — career splits move slowly, so the
     lookahead is small.
 
-    ``veto_sharp_sp`` drops batters facing a SHARP starter from ``picks``.
-    They stay in ``today`` tagged SHARP-SP, so the board still shows them and
-    a backfill can be re-run with the veto off to compare hit rates.
+    ``picks`` is the board ranked by the model's probability that the batter
+    records a hit, one batter per game, truncated to ``max_picks``. The
+    edge tags are still computed onto every row of ``today`` — the board
+    displays them and the odds archive records them — but they no longer
+    select anything; see the ranking block below for the measurements that
+    retired them.
 
-    ``include_hittable_edge`` turned on after run 1 of the backtest. It is the
-    volume in this screen: ~12.5 picks/day against ~2.7 for BvP alone, at a
-    higher hit rate (67.4% vs 66.2% over 125 days). See EXPERIMENTS.md.
+    ``veto_sharp_sp`` and ``include_hittable_edge`` are accepted and ignored.
+    They configured the retired screen, and callers (the backtest harness,
+    the tests) still pass them. They are kept rather than removed so those
+    call sites don't break, and are documented as dead rather than quietly
+    honoured, because a flag that looks like it changes the picks and doesn't
+    is worse than no flag at all. ``batters.simple_picks`` is where the old
+    rules still live, as the shadow control.
     """
     today = target_date
     end = today - timedelta(days=1)
@@ -765,45 +796,74 @@ def screen_for_date(
     if today_df.empty:
         picks = pd.DataFrame()
     else:
-        edge = today_df["bvp_edge"] | today_df["hand_slump_edge"]
-        if include_hittable_edge:
-            edge = edge | today_df["hittable_sp_edge"]
-        mask = today_df["is_hot"] & edge
-        if veto_sharp_sp:
-            # The batter still shows on the board tagged SHARP-SP; he just
-            # isn't a pick. A starter holding lineups to a .200 average is
-            # the wrong side of a "records a hit" bet no matter how good the
-            # BvP line looks — five career at-bats don't outweigh it.
-            mask = mask & ~today_df["p_sharp"]
-        picks = today_df[mask].copy()
-        if not picks.empty:
-            # Rank by the model's probability that the batter records a hit —
-            # the thing actually being bet — and keep only the best few.
-            #
-            # Qualifying is not the same as being worth betting. Everything
-            # that clears the filters together hits 67.4%, which at -207 is
-            # break-even; the top 3 a day hit 72.5%. The extra volume was
-            # costing five points of hit rate, and the worst days were the
-            # biggest ones (26 picks -> 36.4%, 23 -> 55.0%).
-            from . import pricing
+        # Picks are the top of the board, not the output of the filters.
+        #
+        # This is a reversal, and it is the whole change. The filters — hot
+        # bat, BvP edge, hittable starter, SHARP veto — were selecting *worse*
+        # bets than plain "who is most likely to get a hit", and charging more
+        # for them. Over 129 days, one batter per game, two legs:
+        #
+        #     pool                        1-leg    2-leg   per leg
+        #     full screen (retired)       71.0%    49.6%     70.5%
+        #     hot bat only                73.4%    52.8%     72.8%
+        #     edge tags only              70.3%    47.7%     69.1%
+        #     whole board (here)          78.3%    58.1%     77.1%
+        #
+        # It beat the screen in every month of the sample — April 70.0/57.1,
+        # May 51.6/35.5, June 63.3/63.3, July 51.7/42.3, August 55.6/55.6 —
+        # which is the part that makes it a finding rather than a lucky cut.
+        #
+        # The reason is visible in the pieces. ``recent_avg``, the hot-bat
+        # gate, barely moves the outcome at all: bats under .200 hit 61.3%,
+        # bats at .300-.350 hit 64.4%, and bats over .350 fall back to 61.1%.
+        # It isn't monotone, so it isn't signal. ``vs_hand_avg`` — career
+        # average against the hand, the model's dominant term — runs 52.4% at
+        # the bottom to 74.6% at the top, cleanly. The screen was gating hard
+        # on the noisy variable and leaving the real one to break ties.
+        #
+        # And filtering on the pitcher makes it worse, not better: requiring a
+        # battered starter (L3 BAA >= .250) drops the two-leg sweep to 52.0%.
+        # A good hitter facing an ordinary arm beats a hot hitter facing a bad
+        # one, and it is much cheaper, because the book prices the bad arm.
+        #
+        # The tags are still computed and still ride along on every row — they
+        # are what the board displays, and the odds snapshot records them so
+        # the retired rule stays measurable. They just don't choose the bets.
+        from . import pricing
 
-            picks["model_p"] = [
-                pricing.model_probability(r)
-                for r in picks.to_dict(orient="records")
-            ]
-            picks = picks.sort_values(
-                ["model_p", "recent_avg"], ascending=[False, False]
-            )
-            if one_pick_per_game:
-                # Two batters in one game are one bet on that pitcher having a
-                # bad day, not two independent reads — and the best of them is
-                # the one to have.
-                picks = picks.groupby("pitcher_id", sort=False).head(1)
-            if min_pick_probability:
-                picks = picks[picks["model_p"] >= min_pick_probability]
-            if max_picks:
-                picks = picks.head(max_picks)
-            picks = picks.reset_index(drop=True)
+        # Playing time first — see MIN_RECENT_AB_TO_RANK. Live, the board is
+        # the whole active roster, and a bench bat cannot be a pick however
+        # good his career split looks.
+        picks = today_df.copy()
+        if min_recent_ab_to_rank:
+            eligible = picks["recent_ab"].fillna(0) >= min_recent_ab_to_rank
+            # Never hand back an empty card because the stats feed was thin;
+            # if nothing clears the floor, rank what there is.
+            if eligible.any():
+                picks = picks[eligible].copy()
+        picks["model_p"] = [
+            pricing.model_probability(r)
+            for r in picks.to_dict(orient="records")
+        ]
+        # Career sample size breaks ties rather than recent form: between two
+        # batters the model likes equally, prefer the one whose number rests
+        # on more plate appearances.
+        picks = picks.sort_values(
+            ["model_p", "vs_hand_pa"], ascending=[False, False]
+        )
+        if one_pick_per_game:
+            # Two batters in one game are one bet on that pitcher having a
+            # bad day, not two independent reads — and the best of them is
+            # the one to have. This costs about 1.6 points of measured sweep
+            # (58.9% against 60.5%) and is still right: the book prices a
+            # same-game pair as an SGP, below the product of its legs, so the
+            # higher number was never available at the quoted price.
+            picks = picks.groupby("pitcher_id", sort=False).head(1)
+        if min_pick_probability:
+            picks = picks[picks["model_p"] >= min_pick_probability]
+        if max_picks:
+            picks = picks.head(max_picks)
+        picks = picks.reset_index(drop=True)
 
     if verbose:
         bands = today_df["p_form"].value_counts().to_dict() if not today_df.empty else {}

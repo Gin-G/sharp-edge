@@ -96,9 +96,11 @@
     return `${(100 * v).toFixed(1)}%`;
   }
 
-  // EV per $1 staked. This is the number that decides whether a pick is a
-  // bet: the screen hits ~67% and break-even at -207 is 67.4%, so a good
-  // matchup at a bad price is still a losing ticket.
+  // EV per $1 staked. Shown, not obeyed — the card is chosen on probability.
+  // Worth showing because it is what caught the old screen out: those picks
+  // hit 70.5% at a median price of -260, whose break-even is 72%, so the card
+  // read well and lost money. Betting the board instead lands the median leg
+  // at -185 against a 77% read.
   function fmtEv(v: number | null): string {
     if (v === null || v === undefined) return '—';
     return `${v >= 0 ? '+' : ''}${v.toFixed(3)}`;
@@ -130,8 +132,11 @@
     .filter((r) => r.hand_slump_edge)
     .sort((a, b) => (b.vs_hand_avg ?? 0) - (a.vs_hand_avg ?? 0));
 
-  // Qualified on the batter side but dropped because the opposing starter has
-  // been suppressing hits. Shown so the veto is visible rather than silent.
+  // Hot bats facing a starter who has been suppressing hits. This used to be
+  // a veto list; nothing is vetoed now — filtering on the starter measured
+  // worse, dropping the two-leg sweep from 58.9% to 52.0% over 129 days. Kept
+  // as a watch list: it is the matchup the model is most often talked out of,
+  // and worth an eye if one of these does reach the card.
   $: vetoed = (data?.today ?? [])
     .filter(
       (r) =>
@@ -141,9 +146,10 @@
     )
     .sort((a, b) => (a.p_l3_h9 ?? 99) - (b.p_l3_h9 ?? 99));
 
-  // Picks that fire on the hittable-starter edge alone — the volume in this
-  // screen since it turned on. Broken out the same way as the BvP and
-  // hand+slump sections, so it's clear which rule produced which pick.
+  // The hittable-starter edge on its own. It no longer produces picks — the
+  // card is ranked off the whole board — but it is still the matchup people
+  // reach for first, so it stays broken out alongside BvP and hand+slump as
+  // board context.
   $: hotVsHittable = (data?.today ?? [])
     .filter((r) => r.hittable_sp_edge && !r.bvp_edge && !r.hand_slump_edge)
     .sort((a, b) => (b.p_l3_h9 ?? 0) - (a.p_l3_h9 ?? 0));
@@ -156,7 +162,7 @@
     <div>
       <h1 class="text-xl font-bold text-white">Batters</h1>
       <p class="text-sm text-slate-400 mt-0.5">
-        Today's MLB screen — hot bats, BvP edges, and pitcher form
+        Today's MLB board — ranked on the probability of a hit
       </p>
     </div>
     <button
@@ -173,9 +179,9 @@
   <PickTrackRecord screen="batter" winLabel="Hit" />
 
   {#if data?.bundle && data.bundle.legs.length > 0}
-    <!-- The day's bundle: +EV only, one leg per game, ranked by EV. Sits
-         above the board because it's the actionable part — the board is
-         ~12 picks and most of them are priced out. -->
+    <!-- The day's bundle: the two most likely to record a hit, one leg per
+         game, ranked on probability. Sits above the board because it is the
+         actionable part — everything below is context for it. -->
     <section class="card p-0 overflow-hidden border-emerald-800/50">
       <div class="px-5 py-4 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
         <h2 class="text-sm font-semibold text-emerald-300 uppercase tracking-wider">
@@ -238,13 +244,12 @@
       </div>
 
       {#if data.bundle.near_misses?.length}
-        <!-- A short bundle is usually the honest answer, since the market
-             already prices most of the screen's edge. Showing what missed,
-             and by how much, makes that a useful message instead of a
-             blank one. -->
+        <!-- The card is two legs, so the next-best names are only visible
+             here. Worth showing for the read you have that the model happened
+             to rank third. -->
         <div class="px-5 py-3 border-t border-border bg-surface-800/40">
           <div class="text-xs text-slate-500 mb-2">
-            Qualified for the screen but under the 68% bar — not picks:
+            Next best on the board — one per game, not on the card:
           </div>
           {#each data.bundle.near_misses as m}
             <div class="flex items-center justify-between text-xs py-0.5 tabular-nums">
@@ -277,10 +282,10 @@
     <section class="card overflow-hidden p-0">
       <div class="px-5 py-4 border-b border-border flex items-baseline justify-between">
         <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-          All Qualifying Picks
+          Today's Board, Ranked
         </h2>
         <span class="text-xs text-slate-500">
-          {data.picks.length} clearing 68% — the parlay takes the best 2
+          top {data.picks.length} by probability of a hit — the parlay takes the best 2
           {#if data.odds}
             {#if data.odds.error}
               · <span class="text-amber-500/80">odds unavailable</span>
@@ -373,14 +378,14 @@
     <section class="card overflow-hidden p-0">
       <div class="px-5 py-4 border-b border-border flex items-baseline justify-between">
         <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-          Held Back — Sharp Starter
+          Hot Bats vs Sharp Starters
         </h2>
         <span class="text-xs text-slate-500">
-          {vetoed.length} qualified bat{vetoed.length === 1 ? '' : 's'} dropped: SP suppressing hits
+          {vetoed.length} hot bat{vetoed.length === 1 ? '' : 's'} facing an SP suppressing hits — flagged, not dropped
         </span>
       </div>
       {#if vetoed.length === 0}
-        <div class="px-5 py-6 text-sm text-slate-500">None — no qualified bat is facing a sharp starter today.</div>
+        <div class="px-5 py-6 text-sm text-slate-500">None — no hot bat is facing a sharp starter today.</div>
       {:else}
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
@@ -426,7 +431,7 @@
           Hot Bats vs Hittable Starters
         </h2>
         <span class="text-xs text-slate-500">
-          {hotVsHittable.length} qualified on this edge — most won't clear the bar
+          {hotVsHittable.length} on this edge — context, not a pick list
         </span>
       </div>
       {#if hotVsHittable.length === 0}
@@ -474,7 +479,7 @@
           BvP Edges
         </h2>
         <span class="text-xs text-slate-500">
-          {bvpEdges.length} batter{bvpEdges.length === 1 ? '' : 's'} ≥.400 vs today's SP — qualified, not picked
+          {bvpEdges.length} batter{bvpEdges.length === 1 ? '' : 's'} ≥.400 vs today's SP — usually small samples
         </span>
       </div>
       {#if bvpEdges.length === 0}

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Sharp Edge</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#1c2032"/>
+      <stop offset="1" stop-color="#0d0f1a"/>
+    </linearGradient>
+    <linearGradient id="gap" x1="0.12" y1="1" x2="1" y2="0">
+      <stop offset="0"    stop-color="#065f46" stop-opacity="0.12"/>
+      <stop offset="0.45" stop-color="#10b981" stop-opacity="0.88"/>
+      <stop offset="1"    stop-color="#5eead4"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="118" fill="url(#tile)"/>
+  <rect x="5" y="5" width="502" height="502" rx="113.5" fill="none"
+        stroke="#2a2d42" stroke-width="10"/>
+
+  <g transform="translate(6,4)">
+    <!-- the edge: everything between our read and the market's -->
+    <path d="M104 396 L418 106 L418 262 Z" fill="url(#gap)"/>
+    <!-- the market -->
+    <path d="M104 396 L418 262" fill="none" stroke="#3b4256"
+          stroke-width="18" stroke-linecap="round"/>
+    <!-- the margin, measured at the close -->
+    <path d="M418 124 L418 250" fill="none" stroke="#5eead4"
+          stroke-width="16" stroke-linecap="round" opacity="0.55"/>
+    <!-- our read -->
+    <path d="M104 396 L418 106" fill="none" stroke="#a7f3d0"
+          stroke-width="26" stroke-linecap="round"/>
+  </g>
+</svg>
