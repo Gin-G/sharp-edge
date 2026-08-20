@@ -33,34 +33,62 @@ from urllib.parse import quote
 # state bounces a user whose account is registered in another.
 BETSLIP_BASE = "https://{state}.sportsbook.fanduel.com/addToBetslip"
 
-# The bundle is a *parlay*, and a parlay wants few legs — every extra leg is
-# another chance to lose the whole ticket.
+# The card is two legs, and grows only to reach a plus price.
 #
-# The frontier, re-measured on the ranked board. Sweep rate is the share of
-# days where every leg won, over 129 days of settled boards; the price is the
-# median parlay actually quoted by FanDuel over 12 days of closing snapshots;
-# EV is profit per dollar staked at that price.
+# Sweep rate — the share of days every leg won, over 129 days of settled
+# boards — against the median parlay actually quoted over 12 days of closing
+# snapshots:
 #
 #     legs   sweep rate   median parlay   EV per $1
 #      1        80.6%         -177          +0.26
-#      2        58.9%         +130          +0.36     <- here
+#      2        58.9%         +130          +0.36     <- the floor
 #      3        41.7%         +216          +0.32
 #      4        29.9%         +370          +0.41
 #
-# Two legs is the pick: it is the shortest card that still pays plus money,
-# and it sweeps three days in five. Four legs shows a higher EV, but it is one
-# built out of 30% sweeps and long payouts — the same expected dollar arriving
-# far less often, with a variance a small bankroll feels and a backtest does
-# not.
+# Two is the shortest card that usually pays plus money. But *usually* is the
+# problem: on real closing prices the two-leg card came back plus on 8 of 12
+# days and minus (-102 to -129) on the other 4, because some days the two best
+# batters are both priced -240 or shorter. On those days a third leg is what
+# makes it a bet worth placing, and a third leg always got there.
+MIN_LEGS: int = 2
+
+# The ceiling. Reached only if the price needs that many, never as a target.
+MAX_LEGS: int = 6
+
+# Grow the card until it pays at least this. 2.0 decimal is +100.
 #
-# For contrast, the retired screen against the same prices: one leg -260 for
-# -0.02 per dollar, two legs -104 for -0.03. It was not a good card being sold
-# short; at those prices it was a losing bet, which is what the sweep rate
-# alone never showed.
+# This is the knob that decides card size. Raise it for longer cards and
+# longer payouts at a lower sweep rate; the frontier above is the trade.
+TARGET_DECIMAL: float = 2.0
+
+# Why extra legs are chosen on **price** rather than on the next-best
+# probability, which is the part that isn't obvious.
 #
-# Change it here. One leg is not a parlay, but it is the highest-probability
-# card on the board and at -177 it is still a good bet.
-DEFAULT_MAX_LEGS: Optional[int] = 2
+# The model cannot tell the top of the board apart. On a real slate its top ten
+# span 71.5% down to 70.0% — a point and a half — and measured over 129 days
+# the ranks below the top two are indistinguishable from each other:
+#
+#     rank 1   78.9%      rank 5   72.2%
+#     rank 2   75.8%      rank 6   69.0%
+#     rank 3   69.8%      rank 7   68.8%
+#     rank 4   70.6%      rank 8   69.6%
+#
+# Ranks 1 and 2 are genuinely better and are always taken. From rank 3 down it
+# is a flat 69-72% whichever name you pick, so ordering that pool by
+# probability is sorting on noise — while their prices on the same slate ran
+# -105 to -425, which is a payout multiplier of 1.95 against 1.24. Picking on
+# price there is free.
+#
+# The test each candidate has to pass is ``model_p * decimal > 1``, which is
+# just "this leg is +EV" written so the reason is visible: a 70% leg at -475
+# multiplies the payout by 1.24 while costing 30% of the ticket, and 0.70 x
+# 1.24 = 0.87 says plainly that it takes more than it gives. A 70% leg at -105
+# scores 1.38. Same risk, and the second one is worth adding.
+MIN_LEG_VALUE: float = 1.0
+
+# Retained so callers that passed an explicit cap keep working; ``build``
+# treats it as the ceiling when given.
+DEFAULT_MAX_LEGS: Optional[int] = MAX_LEGS
 
 
 def betslip_url(selections: Iterable[dict], state: str = "co") -> Optional[str]:
@@ -114,9 +142,11 @@ def build(
     that dear. Drawn off the board they come back at -185 against 77%. Fix the
     selection and the price stops needing to be a veto.
 
-    ``records`` is expected in probability order already (the screen ranks
-    before truncating); the sort here is belt-and-braces, and ``ev`` only
-    breaks ties.
+    The card is built in two stages, because the two stages are answering
+    different questions. Legs 1 and 2 are the two most likely batters, taken on
+    probability alone. Any leg past that is added **only to lift the card to a
+    plus price**, and is chosen on price rather than on rank — see
+    ``MIN_LEG_VALUE`` for why that choice is free.
 
     ``min_edge_pts`` is still honoured when passed explicitly, for anyone who
     does want a price floor. It just isn't the default any more.
@@ -134,7 +164,10 @@ def build(
         ]
     priced.sort(key=lambda r: (-(r.get("model_p") or 0), -(r.get("ev") or -9)))
 
-    out: list[dict] = []
+    ceiling = max_legs if max_legs else MAX_LEGS
+    floor = min(MIN_LEGS, ceiling)
+
+    candidates: list[dict] = []
     seen_games: set = set()
     for r in priced:
         if cross_game:
@@ -147,16 +180,48 @@ def build(
                 continue
             if game is not None:
                 seen_games.add(game)
-        out.append(r)
-        if max_legs and len(out) >= max_legs:
+        candidates.append(r)
+
+    out = candidates[:floor]
+    rest = candidates[floor:]
+
+    # Grow only while the card is short of a plus price, and only with legs
+    # that pay for the risk they add.
+    while len(out) < ceiling and _decimal(out) < TARGET_DECIMAL and rest:
+        best, best_value = None, MIN_LEG_VALUE
+        for r in rest:
+            value = (r.get("model_p") or 0) * _leg_decimal(r)
+            if value > best_value:
+                best, best_value = r, value
+        if best is None:
+            # Nothing left that gives more than it takes. A card below the
+            # target is the honest answer here — padding it with a -400 leg
+            # would buy a plus sign by making the bet worse.
             break
+        out.append(best)
+        rest.remove(best)
     return out
+
+
+def _leg_decimal(r: dict) -> float:
+    """Decimal price of one leg; 1.0 (adds nothing) when it has no price."""
+    odds = r.get("fd_odds")
+    if not odds:
+        return 1.0
+    return 1 + (100 / -odds if odds < 0 else odds / 100)
+
+
+def _decimal(legs: list[dict]) -> float:
+    dec = 1.0
+    for r in legs:
+        dec *= _leg_decimal(r)
+    return dec
 
 
 def near_misses(board: list[dict], chosen: list[dict], limit: int = 5) -> list[dict]:
     """The next-best batters below the cut, best first.
 
-    Pass the whole board, not the picks — the card is only two legs, so
+    Pass the whole board, not the picks — the card is a few legs at most, so
     everything else is visible only here. Worth showing for two reasons:
     seeing who just missed, and spotting a name you have a read on that the
     model happened to rank fourth.
@@ -212,7 +277,7 @@ def summarise(bundle: list[dict]) -> dict:
     p = 1.0
     implied = 1.0
     for r in bundle:
-        dec *= 1 + (100 / -r["fd_odds"] if r["fd_odds"] < 0 else r["fd_odds"] / 100)
+        dec *= _leg_decimal(r)
         p *= r.get("model_p") or 0.0
         implied *= r.get("implied_p") or 0.0
     american = round((dec - 1) * 100) if dec >= 2 else -round(100 / (dec - 1))

@@ -711,6 +711,46 @@ on n=10. Nothing to act on, and no clean game id on the boards to act with —
 `(date, game_time)` collides, resolving only 946 of 1,257 groups to a single
 pairing.
 
+### Card sizing — 2026-08-20
+
+A fixed two-leg card was leaving money on the table in one direction and
+risking it in the other. On real closing prices it came back **plus on 8 of 12
+days and minus (-102 to -129) on the other 4**, because some slates price both
+top batters at -240 or shorter.
+
+**A probability bar cannot size the card.** The model's top ten span 71.5% to
+70.0% — a point and a half — so a bar is a knife edge, not a filter:
+
+| bar | median qualifying | days with >= 6 | avg legs | sweep |
+|---|---|---|---|---|
+| 0.68 | 14 | 93% | 5.8 | 18.8% |
+| 0.70 | 6 | 62% | 5.1 | 25.8% |
+| 0.71 | 4 | 23% | 3.9 | 39.1% |
+| 0.72 | 2 | 4% | 2.7 | 51.6% |
+| 0.73 | 1 | 0% | 2.2 | 55.5% |
+| (always 2) | — | — | 2.0 | 59.4% |
+
+"Six batters qualified" does not mean six good bets. Below the top two the
+board is flat — ranks 3 through 8 hit 69.8, 70.6, 72.2, 69.0, 68.8, 69.6 over
+129 days, indistinguishable from each other, against 78.9% and 75.8% for ranks
+1 and 2. Every leg past the second is a ~70% leg whatever its rank, so each one
+multiplies the sweep rate by about 0.7 and a six-leg card lands near 20%.
+
+**So extra legs are a price decision, not a quality one.** The card takes the
+top two on probability and grows only while it is short of +100, choosing each
+extra leg on ``model_p * decimal`` — the leg's EV, written so the reason shows.
+A 70% leg at -475 multiplies the payout by 1.24 while costing 30% of the
+ticket (0.70 x 1.24 = 0.87, it takes more than it gives); the same read at -105
+scores 1.38. Since that pool is flat in probability, picking on price is free.
+
+Replayed over every priced day, the card is 2 legs on 9 and 3 on 5, and pays
+plus money on **14 of 14** against 8 of 12 before. On 2026-08-18 it takes
+Rodden at -105 for +287, where the next name by rank (Carrigg, -300) would have
+returned about +155 for the same risk.
+
+Expected cost: roughly 6 points of sweep (59.4% -> ~53%) in exchange for never
+placing a minus-money ticket. `TARGET_DECIMAL` in `bundle.py` is the knob.
+
 ### What to watch
 
 `batter_simple` is still shadow-recording the original rules, and the pick list

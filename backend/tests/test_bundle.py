@@ -78,8 +78,9 @@ def test_one_leg_per_game_by_default():
     got = bundle.build(rows, max_legs=3)
     assert [r["batter"] for r in got] == ["a", "c"]
 
+    # Without the rule, the two same-game batters are the whole card.
     same_game = bundle.build(rows, max_legs=3, cross_game=False)
-    assert [r["batter"] for r in same_game] == ["a", "b", "c"]
+    assert [r["batter"] for r in same_game] == ["a", "b"]
 
 
 def test_falls_back_to_the_event_when_the_pitcher_is_unknown():
@@ -91,10 +92,15 @@ def test_falls_back_to_the_event_when_the_pitcher_is_unknown():
     assert [r["batter"] for r in bundle.build(rows)] == ["a", "c"]
 
 
-def test_max_legs_is_respected():
+def test_max_legs_is_a_ceiling_not_a_target():
+    """A card that already pays plus money doesn't grow to fill the cap."""
     rows = [_pick(f"p{i}", None, -200, pitcher=i, model_p=0.7 - i * 0.01)
             for i in range(10)]
-    assert len(bundle.build(rows, max_legs=3)) == 3
+    # two legs at -200 is +125, so there is nothing to fix
+    assert len(bundle.build(rows, max_legs=3)) == 2
+
+    # ...but a ceiling below the floor still binds
+    assert len(bundle.build(rows, max_legs=1)) == 1
 
 
 def test_picks_without_a_market_cannot_enter_a_bundle():
@@ -217,16 +223,65 @@ def test_near_misses_are_ranked_by_probability():
         ["high", "mid", "low"]
 
 
-def test_the_parlay_is_capped_short():
-    """A parlay wants few legs — the opposite of a pick list. Every extra leg
-    is another chance to lose the whole ticket: over 129 days the sweep rate
-    runs 80.6% at one leg, 58.9% at two, 41.7% at three, 29.9% at four, and
-    two is the shortest card that still pays plus money."""
+def test_the_card_stops_at_two_when_two_already_pay_plus():
+    """Every extra leg is another chance to lose the whole ticket — over 129
+    days the sweep rate runs 80.6% at one leg, 58.9% at two, 41.7% at three.
+    So the card grows for one reason only, and this isn't it."""
     rows = [_pick(f"p{i}", None, -200, pitcher=i, model_p=0.72 - i * 0.001)
             for i in range(8)]
     got = bundle.build(rows)
-    assert len(got) == bundle.DEFAULT_MAX_LEGS == 2
+    assert len(got) == bundle.MIN_LEGS == 2
     # ...and it takes the two most likely, not just the first two seen.
     assert [r["batter"] for r in got] == ["p0", "p1"]
-    assert len(bundle.build(rows, max_legs=3)) == 3
-    assert len(bundle.build(rows, max_legs=None)) == 8
+
+
+def test_a_third_leg_is_added_only_to_reach_a_plus_price():
+    """Two legs at -300 is -128 — the case a third leg exists for. The pool
+    has to contain a leg that actually pays for itself, though: at a 71% read
+    break-even is about -245, so the -150 is the only real candidate here."""
+    rows = [
+        _pick("top1", None, -300, pitcher=1, model_p=0.720),
+        _pick("top2", None, -300, pitcher=2, model_p=0.719),
+        _pick("worth_it", None, -150, pitcher=3, model_p=0.710),
+    ]
+    got = bundle.build(rows)
+    assert len(got) == 3
+    assert bundle.summarise(got)["decimal"] >= bundle.TARGET_DECIMAL
+
+
+def test_the_added_leg_is_chosen_on_price_not_on_rank():
+    """Below the top two the model cannot tell the board apart — ranks 3 to 8
+    hit within a point of each other over 129 days — while their prices range
+    from -105 to -425. So the extra leg is picked on what it pays."""
+    rows = [
+        _pick("top1", None, -300, pitcher=1, model_p=0.720),
+        _pick("top2", None, -300, pitcher=2, model_p=0.719),
+        _pick("next_by_rank", None, -260, pitcher=3, model_p=0.718),
+        _pick("best_priced", None, -110, pitcher=4, model_p=0.710),
+        _pick("mid", None, -190, pitcher=5, model_p=0.715),
+    ]
+    got = [r["batter"] for r in bundle.build(rows)]
+    assert got[:2] == ["top1", "top2"]
+    assert got[2] == "best_priced"
+
+
+def test_a_leg_that_takes_more_than_it_gives_is_never_added():
+    """A 70% leg at -475 multiplies the payout by 1.24 and costs 30% of the
+    ticket. Padding the card with it would buy a plus sign by making the bet
+    worse, so a short card is the honest answer."""
+    rows = [
+        _pick("top1", None, -300, pitcher=1, model_p=0.72),
+        _pick("top2", None, -300, pitcher=2, model_p=0.71),
+        _pick("dear", None, -475, pitcher=3, model_p=0.70),
+    ]
+    got = bundle.build(rows)
+    assert [r["batter"] for r in got] == ["top1", "top2"]
+    assert bundle.summarise(got)["american"] < 100
+
+
+def test_the_ceiling_holds_when_the_price_never_gets_there():
+    """Every leg dear enough that the card can't reach +100 — it must still
+    stop at MAX_LEGS rather than eat the whole board."""
+    rows = [_pick(f"p{i}", None, -900, pitcher=i, model_p=0.95)
+            for i in range(12)]
+    assert len(bundle.build(rows)) <= bundle.MAX_LEGS

@@ -494,8 +494,9 @@ async def batter_screen():
         odds_meta["error"] = str(e)
 
     # The day's bundle: the two most likely to record a hit, one leg per
-    # game — plus a link that loads it straight into the bet slip. Ranked on
-    # probability, not EV; price rides along on each leg but doesn't select.
+    # game, plus any further leg needed to lift the card to a plus price —
+    # and a link that loads it straight into the bet slip. The first two are
+    # chosen on probability; anything past them is chosen on what it pays.
     from . import bundle as _bundle
 
     legs = _bundle.build(picks)
@@ -510,8 +511,8 @@ async def batter_screen():
             "legs": legs,
             "summary": _bundle.summarise(legs),
             "betslip_url": _bundle.betslip_url(legs, state=settings.fanduel_state),
-            # From the whole board: the card is two legs, so the next-best
-            # runners-up are only visible here.
+            # From the whole board: the card is a handful of legs at most,
+            # so the next-best runners-up are only visible here.
             "near_misses": _bundle.near_misses(today, legs),
         },
     }

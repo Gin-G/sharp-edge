@@ -202,6 +202,11 @@
             <tr class="border-b border-border text-xs font-medium text-slate-400 uppercase tracking-wider">
               <th class="text-left px-5 py-3">Date</th>
               <th class="text-left px-3 py-3">Batter</th>
+              <!-- The batter's own team, not the starter's. Half these names
+                   don't ring a bell on their own, and without this the only
+                   way to place a pick is to recognise the opposing pitcher and
+                   work backwards from him. -->
+              <th class="text-left px-3 py-3">Team</th>
               <th class="text-left px-3 py-3">Opp SP</th>
               {#if screen === 'hr'}
                 <th class="text-right px-3 py-3">Score</th>
@@ -216,6 +221,7 @@
               <tr class="border-b border-border/50 hover:bg-surface-600/30">
                 <td class="px-5 py-2 text-slate-400 text-xs whitespace-nowrap">{p.pick_date}</td>
                 <td class="px-3 py-2 text-slate-200">{p.batter}</td>
+                <td class="px-3 py-2 text-slate-400 whitespace-nowrap">{p.team ?? '—'}</td>
                 <td class="px-3 py-2 text-slate-400">{p.opposing_pitcher ?? '—'}</td>
                 {#if screen === 'hr'}
                   <td class="px-3 py-2 text-right tabular-nums text-slate-300">{p.score?.toFixed(1) ?? '—'}</td>
