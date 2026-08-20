@@ -737,19 +737,42 @@ board is flat — ranks 3 through 8 hit 69.8, 70.6, 72.2, 69.0, 68.8, 69.6 over
 multiplies the sweep rate by about 0.7 and a six-leg card lands near 20%.
 
 **So extra legs are a price decision, not a quality one.** The card takes the
-top two on probability and grows only while it is short of +100, choosing each
-extra leg on ``model_p * decimal`` — the leg's EV, written so the reason shows.
-A 70% leg at -475 multiplies the payout by 1.24 while costing 30% of the
-ticket (0.70 x 1.24 = 0.87, it takes more than it gives); the same read at -105
-scores 1.38. Since that pool is flat in probability, picking on price is free.
+top two on probability — the only two ranks the model can separate — and then
+every other leg that pays for the risk it adds, judged on ``model_p * decimal``:
+the leg's EV, written so the reason shows. A 70% leg at -475 multiplies the
+payout by 1.24 while costing 30% of the ticket (0.70 x 1.24 = 0.87, it takes
+more than it gives); the same read at -105 scores 1.38. Since that pool is flat
+in probability, picking on price is free.
 
-Replayed over every priced day, the card is 2 legs on 9 and 3 on 5, and pays
-plus money on **14 of 14** against 8 of 12 before. On 2026-08-18 it takes
-Rodden at -105 for +287, where the next name by rank (Carrigg, -300) would have
-returned about +155 for the same risk.
+**No cap, and the bar does the sizing.** Break-even is far too loose a
+definition of "qualifies" — the model reads most of the board near 70% while
+the market prices those names nearer 63%, so a bar at 1.0 admits ten to
+fourteen legs and the card becomes the whole board. Measured over the priced
+days, with the two-leg floor always applied:
 
-Expected cost: roughly 6 points of sweep (59.4% -> ~53%) in exchange for never
-placing a minus-money ticket. `TARGET_DECIMAL` in `bundle.py` is the knob.
+| bar | median legs | range | est. sweep |
+|---|---|---|---|
+| 1.00 | 10 | 3–14 | ~3% |
+| 1.05 | 5 | 2–7 | ~21% |
+| **1.10** | **3** | **2–5** | **~42%** |
+| 1.15 | 2 | 2–4 | ~60% |
+| 1.25 | 2 | 2–2 | ~60% |
+
+1.10 ships: a good slate produces the five-leg card, a thin one still produces
+two. Sweep there is estimated, not measured — 78.9% x 75.8% for the top two and
+~70% per leg after, since the board below rank 2 is flat. Replayed over every
+priced day it gives 2 to 5 legs, median 4, plus money on 13 of 14.
+
+This is a deliberate trade against sweep rate, made by the owner: a five-leg
+card lands about one day in five, and pays several times what two legs pay.
+`MIN_LEG_VALUE` in `bundle.py` is the knob.
+
+**No padding to reach a plus price.** An earlier version extended the card
+until it cleared +100. That was wrong: on a slate where the top two are both
+-300 and nothing qualifies, the only way to reach +100 is a -475 leg scoring
+0.87 — buying the plus sign by making the bet worse. A short, minus-money card
+is now an allowed and honest outcome (2026-08-17, -105); the price is on the
+card so it is visible rather than silently padded.
 
 ### What to watch
 

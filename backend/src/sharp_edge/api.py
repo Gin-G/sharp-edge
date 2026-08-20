@@ -494,9 +494,10 @@ async def batter_screen():
         odds_meta["error"] = str(e)
 
     # The day's bundle: the two most likely to record a hit, one leg per
-    # game, plus any further leg needed to lift the card to a plus price —
-    # and a link that loads it straight into the bet slip. The first two are
-    # chosen on probability; anything past them is chosen on what it pays.
+    # game, plus every other leg that pays for the risk it adds — and a link
+    # that loads it straight into the bet slip. The first two are chosen on
+    # probability, which is the only place the model can separate the board;
+    # everything past them is chosen on what it pays. No cap.
     from . import bundle as _bundle
 
     legs = _bundle.build(picks)

@@ -187,7 +187,7 @@
         <h2 class="text-sm font-semibold text-emerald-300 uppercase tracking-wider">
           Today's Parlay
           <span class="ml-2 normal-case font-normal text-xs text-slate-500">
-            the 2 most likely, plus any leg needed to reach plus odds
+            the 2 most likely, plus every leg that pays for its own risk
           </span>
         </h2>
         {#if data.bundle.summary.american != null}
@@ -244,9 +244,8 @@
       </div>
 
       {#if data.bundle.near_misses?.length}
-        <!-- The card is two or three legs, so the next-best names are only
-             visible here. Worth showing for the read you have that the model
-             happened to rank fourth. -->
+        <!-- Names that didn't clear the bar to make the card. Worth showing
+             for the read you have that the price happened to argue against. -->
         <div class="px-5 py-3 border-t border-border bg-surface-800/40">
           <div class="text-xs text-slate-500 mb-2">
             Next best on the board — one per game, not on the card:

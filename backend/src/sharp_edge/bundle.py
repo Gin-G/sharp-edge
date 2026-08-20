@@ -1,10 +1,11 @@
 """The day's bets, and a link that loads them into the slip.
 
 **What gets picked.** The two batters most likely to record a hit, taken off
-the top of the board by model probability, one per game. Not the two best
-*screen qualifiers* — the filters are gone from selection, because measured
-over 129 days they were picking worse bets and paying more for them. See the
-ranking block in ``batters.screen_for_date`` for the numbers.
+the top of the board by model probability, one per game — plus every other leg
+that pays for the risk it adds, with no cap. Not the best *screen qualifiers*:
+the filters are gone from selection, because measured over 129 days they were
+picking worse bets and paying more for them. See the ranking block in
+``batters.screen_for_date`` for the numbers.
 
 **Price is shown, not obeyed — and that finally costs nothing.** Odds and EV
 ride along on every leg because they're worth knowing, but they don't decide
@@ -33,61 +34,89 @@ from urllib.parse import quote
 # state bounces a user whose account is registered in another.
 BETSLIP_BASE = "https://{state}.sportsbook.fanduel.com/addToBetslip"
 
-# The card is two legs, and grows only to reach a plus price.
+# The floor. Always at least two legs, so the card is always a parlay.
 #
-# Sweep rate — the share of days every leg won, over 129 days of settled
-# boards — against the median parlay actually quoted over 12 days of closing
-# snapshots:
+# One leg is the likeliest bet on the board — 80.6% over 129 days — but at a
+# median -177 it is not a plus-odds ticket, which is the point of playing
+# these as a parlay at all.
 #
-#     legs   sweep rate   median parlay   EV per $1
-#      1        80.6%         -177          +0.26
-#      2        58.9%         +130          +0.36     <- the floor
-#      3        41.7%         +216          +0.32
-#      4        29.9%         +370          +0.41
-#
-# Two is the shortest card that usually pays plus money. But *usually* is the
-# problem: on real closing prices the two-leg card came back plus on 8 of 12
-# days and minus (-102 to -129) on the other 4, because some days the two best
-# batters are both priced -240 or shorter. On those days a third leg is what
-# makes it a bet worth placing, and a third leg always got there.
+# Two is also where the card lands when a thin slate offers nothing else worth
+# adding, and on real closing prices two legs came back plus money on 8 of 12
+# days and minus (-102 to -129) on the other 4 — some slates price both top
+# batters at -240 or shorter. When that happens the card extends until it
+# clears a plus price, regardless of how many legs qualified.
 MIN_LEGS: int = 2
 
-# The ceiling. Reached only if the price needs that many, never as a target.
-MAX_LEGS: int = 6
+# No ceiling. Every pick that qualifies goes on the card, so a slate with five
+# good bets produces a five-leg card.
+#
+# This is a deliberate choice against the sweep numbers, and the trade should
+# be visible to whoever reads this next. Sweep rate — the share of days every
+# leg won, over 129 days — falls hard with each leg, because below the top two
+# the board is flat at about 70% and every addition multiplies by roughly that:
+#
+#     legs      1      2      3      4      5      6      7
+#     sweep   80.6%  58.9%  41.7%  29.9%  ~21%   ~15%   ~10%
+#
+# A five-leg card sweeps something like one day in five. That is the cost of
+# listing every qualifier, and it is the owner's call: the upside is that the
+# days it does land pay several times what a two-leg card pays.
+MAX_LEGS: Optional[int] = None
 
-# Grow the card until it pays at least this. 2.0 decimal is +100.
+# What "qualifies" means, and why it is not a probability bar.
 #
-# This is the knob that decides card size. Raise it for longer cards and
-# longer payouts at a lower sweep rate; the frontier above is the trade.
-TARGET_DECIMAL: float = 2.0
+# The obvious rule would be "model_p above some threshold", and it does not
+# work. The model cannot tell the top of the board apart — its top ten span
+# 71.5% to 70.0% — so a bar is a knife edge rather than a filter: at 0.70 it
+# admits six names a day, at 0.72 it admits two, and measured over 129 days
+# the ranks below the top two are indistinguishable from one another (69.8,
+# 70.6, 72.2, 69.0, 68.8, 69.6 against 78.9% and 75.8% for ranks 1 and 2).
+# Sorting that pool by probability is sorting on noise.
+#
+# What does separate them is price, which on the same slate ran -105 to -425.
+# So a leg qualifies when it pays for the risk it adds: ``model_p * decimal``
+# above 1, which is the leg being +EV, written so the reason shows. A 70% read
+# at -475 multiplies the payout by 1.24 while costing 30% of the ticket —
+# 0.70 x 1.24 = 0.87, it takes more than it gives — while the same read at
+# -105 scores 1.38. That is the Pages-at-475 test, generalised.
+#
+# The bar sits above 1.0, and that is the load-bearing part. Break-even alone
+# is far too loose: the model reads most of the board at about 70% while the
+# market prices those names nearer 63%, so on a full slate ten to fourteen
+# legs clear 1.0 and the "card" becomes the whole board. Measured over the
+# priced days, with the two-leg floor always applied:
+#
+#     bar    median legs   range    est. sweep
+#     1.00        10        3-14       ~3%
+#     1.05         5        2-7       ~21%
+#     1.10         3        2-5       ~42%     <- here
+#     1.15         2        2-4       ~60%
+#     1.25         2        2-2       ~60%
+#
+# 1.10 is the setting where a genuinely good slate produces the five-leg card
+# and a thin one still produces two — the range is 2 to 5, which is the shape
+# asked for. Sweep is estimated, not measured: 78.9% x 75.8% for the top two
+# and ~70% per leg after, since the board below rank 2 is flat.
+#
+# Lower it to 1.05 for longer cards, raise it to 1.15 to sit near the two-leg
+# sweep rate. This is the knob.
+MIN_LEG_VALUE: float = 1.10
 
-# Why extra legs are chosen on **price** rather than on the next-best
-# probability, which is the part that isn't obvious.
+# There is deliberately no "pad the card until it reaches +100" rule.
 #
-# The model cannot tell the top of the board apart. On a real slate its top ten
-# span 71.5% down to 70.0% — a point and a half — and measured over 129 days
-# the ranks below the top two are indistinguishable from each other:
+# An earlier version had one, and it was wrong in a way worth recording: on a
+# slate where the two best batters are both -300, nothing qualifies, the card
+# is -128, and a backstop would reach for the next leg to manufacture a plus
+# sign — which on those slates means a -475 leg scoring 0.87. It would buy the
+# plus sign by making the bet worse, which is the exact trade this module
+# refuses everywhere else.
 #
-#     rank 1   78.9%      rank 5   72.2%
-#     rank 2   75.8%      rank 6   69.0%
-#     rank 3   69.8%      rank 7   68.8%
-#     rank 4   70.6%      rank 8   69.6%
-#
-# Ranks 1 and 2 are genuinely better and are always taken. From rank 3 down it
-# is a flat 69-72% whichever name you pick, so ordering that pool by
-# probability is sorting on noise — while their prices on the same slate ran
-# -105 to -425, which is a payout multiplier of 1.95 against 1.24. Picking on
-# price there is free.
-#
-# The test each candidate has to pass is ``model_p * decimal > 1``, which is
-# just "this leg is +EV" written so the reason is visible: a 70% leg at -475
-# multiplies the payout by 1.24 while costing 30% of the ticket, and 0.70 x
-# 1.24 = 0.87 says plainly that it takes more than it gives. A 70% leg at -105
-# scores 1.38. Same risk, and the second one is worth adding.
-MIN_LEG_VALUE: float = 1.0
+# So a short, minus-money card is an allowed outcome and an honest one: it is
+# the board saying today is not a good day to play. The price is on the card
+# in the UI, so it is visible rather than silently padded.
 
 # Retained so callers that passed an explicit cap keep working; ``build``
-# treats it as the ceiling when given.
+# treats it as a hard ceiling when given, and there is none by default.
 DEFAULT_MAX_LEGS: Optional[int] = MAX_LEGS
 
 
@@ -142,11 +171,15 @@ def build(
     that dear. Drawn off the board they come back at -185 against 77%. Fix the
     selection and the price stops needing to be a veto.
 
-    The card is built in two stages, because the two stages are answering
-    different questions. Legs 1 and 2 are the two most likely batters, taken on
-    probability alone. Any leg past that is added **only to lift the card to a
-    plus price**, and is chosen on price rather than on rank — see
-    ``MIN_LEG_VALUE`` for why that choice is free.
+    The card is built in two stages, because the two stages answer different
+    questions. Legs 1 and 2 are the two most likely batters, taken on
+    probability alone — those two ranks are the only ones the model can
+    actually separate. Everything past them is every remaining leg that pays
+    for the risk it adds, ordered by how well it pays; see ``MIN_LEG_VALUE``
+    for why that pool is sorted on price rather than probability.
+
+    There is no cap: five qualifying picks make a five-leg card. What that
+    costs in sweep rate is documented on ``MAX_LEGS``.
 
     ``min_edge_pts`` is still honoured when passed explicitly, for anyone who
     does want a price floor. It just isn't the default any more.
@@ -164,8 +197,14 @@ def build(
         ]
     priced.sort(key=lambda r: (-(r.get("model_p") or 0), -(r.get("ev") or -9)))
 
-    ceiling = max_legs if max_legs else MAX_LEGS
-    floor = min(MIN_LEGS, ceiling)
+    ceiling = max_legs if max_legs is not None else MAX_LEGS
+    floor = MIN_LEGS if ceiling is None else min(MIN_LEGS, ceiling)
+
+    def _room() -> bool:
+        return ceiling is None or len(out) < ceiling
+
+    def _value(r: dict) -> float:
+        return (r.get("model_p") or 0) * _leg_decimal(r)
 
     candidates: list[dict] = []
     seen_games: set = set()
@@ -185,21 +224,15 @@ def build(
     out = candidates[:floor]
     rest = candidates[floor:]
 
-    # Grow only while the card is short of a plus price, and only with legs
-    # that pay for the risk they add.
-    while len(out) < ceiling and _decimal(out) < TARGET_DECIMAL and rest:
-        best, best_value = None, MIN_LEG_VALUE
-        for r in rest:
-            value = (r.get("model_p") or 0) * _leg_decimal(r)
-            if value > best_value:
-                best, best_value = r, value
-        if best is None:
-            # Nothing left that gives more than it takes. A card below the
-            # target is the honest answer here — padding it with a -400 leg
-            # would buy a plus sign by making the bet worse.
+    # Every remaining leg that pays for the risk it adds, best value first.
+    # Five qualifiers means a five-leg card; see MAX_LEGS for what that costs.
+    for r in sorted(rest, key=_value, reverse=True):
+        if not _room():
             break
-        out.append(best)
-        rest.remove(best)
+        if _value(r) <= MIN_LEG_VALUE:
+            # Sorted by value, so nothing after this one qualifies either.
+            break
+        out.append(r)
     return out
 
 
@@ -209,13 +242,6 @@ def _leg_decimal(r: dict) -> float:
     if not odds:
         return 1.0
     return 1 + (100 / -odds if odds < 0 else odds / 100)
-
-
-def _decimal(legs: list[dict]) -> float:
-    dec = 1.0
-    for r in legs:
-        dec *= _leg_decimal(r)
-    return dec
 
 
 def near_misses(board: list[dict], chosen: list[dict], limit: int = 5) -> list[dict]:
