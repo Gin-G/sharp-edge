@@ -72,18 +72,53 @@ spec:
             - name: pybaseball-cache
               mountPath: {{ .Values.backend.pybaseballCache.mountPath }}
           {{- end }}
+          # Probe budgets are sized for the batter screen's cold warm-up, not
+          # for a healthy idle pod, because the warm-up is what kills it.
+          #
+          # The screen scrapes Statcast through pybaseball on a background
+          # thread, and that work is pandas — it holds the GIL. The container
+          # is capped at 1 CPU, so while it runs the event loop cannot answer
+          # /health inside the default 1s timeout. With the defaults (1s,
+          # 3 failures, 30s period) three probes fail in a row and the kubelet
+          # SIGKILLs the pod about 90 seconds in. It restarts, starts the same
+          # warm-up, and is killed again: the screen can never finish, and the
+          # picks list is empty all day while the track record still shows the
+          # picks from a day the warm-up did survive. That is the crash loop
+          # seen on 2026-08-21, and the same mechanism EXPERIMENTS.md records
+          # for the backfill.
+          #
+          # startupProbe holds liveness off entirely until the first warm-up
+          # lands — 10 minutes of headroom, and the pod is killed only if it
+          # genuinely never comes up.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          # After startup, a mid-day re-warm can still starve the loop for a
+          # while. Three minutes of silence before a restart is tolerant of
+          # that and still catches a genuinely wedged process.
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 10
             periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          # Deliberately slack. The API answers 503 with a Retry-After while
+          # the cache is cold, which the frontend knows how to poll — that is
+          # a far better experience than being pulled out of the Service and
+          # serving "no available server" from the ingress.
           readinessProbe:
             httpGet:
               path: /health
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}
       {{- if .Values.backend.pybaseballCache.enabled }}
