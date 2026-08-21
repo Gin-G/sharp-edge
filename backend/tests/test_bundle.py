@@ -145,12 +145,15 @@ def test_betslip_url_indexes_each_leg():
         assert frag in url
 
 
-def test_betslip_url_is_state_specific():
-    """A link built for the wrong state bounces the user."""
+def test_betslip_url_uses_the_host_that_opens_the_app():
+    """Measured on a phone: this host opens the FanDuel app straight into the
+    loaded slip, while the state subdomain lands on the mobile website and
+    makes you press a second "open in app" button. No state in the path —
+    the session resolves it."""
     legs = [_pick("a", 0.02, -200, 1)]
-    assert bundle.betslip_url(legs, state="NJ").startswith(
-        "https://nj.sportsbook.fanduel.com/addToBetslip?"
-    )
+    url = bundle.betslip_url(legs)
+    assert url.startswith("https://account.sportsbook.fanduel.com/sportsbook/addToBetslip?")
+    assert "co.sportsbook" not in url
 
 
 def test_no_link_rather_than_a_broken_one():

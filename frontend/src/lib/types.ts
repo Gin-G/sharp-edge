@@ -142,7 +142,6 @@ export interface BatterScreen {
     frozen_at: string | null;
     result: 'WIN' | 'LOSS' | 'VOID' | null;
     betslip_url: string | null;
-    betslip_url_alt: string | null;
     near_misses: {
       batter: string;
       opposing_pitcher: string;

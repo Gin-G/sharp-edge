@@ -550,14 +550,7 @@ async def batter_screen():
             "frozen_at": (frozen or {}).get("created_at"),
             "result": (frozen or {}).get("result"),
             "summary": _bundle.summarise(legs),
-            "betslip_url": _bundle.betslip_url(legs, state=settings.fanduel_state),
-            # Same legs, same payload, FanDuel's account host instead of the
-            # state subdomain — an A/B on the slip-persistence bug. See
-            # bundle.BETSLIP_ALT_BASE; one of the two links goes away once we
-            # know which address the app treats as one-shot.
-            "betslip_url_alt": _bundle.betslip_url(
-                legs, state=settings.fanduel_state, alt=True
-            ),
+            "betslip_url": _bundle.betslip_url(legs),
             # From the whole board: the card is a handful of legs at most,
             # so the next-best runners-up are only visible here.
             "near_misses": _bundle.near_misses(today, legs),

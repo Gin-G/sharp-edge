@@ -234,33 +234,18 @@
 
       <div class="px-5 py-4 border-t border-border flex items-center gap-3 flex-wrap">
         {#if data.bundle.betslip_url}
-          <!-- No target="_blank" on touch devices. FanDuel's association files
-               claim /* on this domain for com.fanduel.sportsbook, so the https
-               link is already a Universal Link / App Link and the OS will hand
-               it straight to the app — but only on a normal top-level
-               navigation. Opened in a new tab it falls back to the web page,
-               which then JS-redirects into the app, and that redirect is the
-               extra step. Desktop keeps the new tab, where there's no app to
-               hand off to and losing the board would just be annoying. -->
+          <!-- No target="_blank" on touch devices. The link has to be a normal
+               top-level navigation for the OS to hand it to the app; opened in
+               a new tab it falls back to the mobile website. Desktop keeps the
+               new tab, where there's no app to hand off to and losing the
+               board would just be annoying. The host does the rest — see
+               bundle.BETSLIP_BASE for why it is the account one. -->
           <a
             href={data.bundle.betslip_url}
             target={opensInApp ? undefined : '_blank'}
             rel={opensInApp ? undefined : 'noopener noreferrer'}
             class="px-3 py-1.5 rounded-lg text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-500"
           >Open in FanDuel{opensInApp ? ' app' : ' bet slip'}</a>
-        {/if}
-        {#if data.bundle.betslip_url_alt}
-          <!-- Same legs against FanDuel's account host. Temporary: our normal
-               link leaves the selections in the app's slip after the bet is
-               placed, and a link that uses this host doesn't. Whichever of the
-               two is responsible, one of these buttons goes away. -->
-          <a
-            href={data.bundle.betslip_url_alt}
-            target={opensInApp ? undefined : '_blank'}
-            rel={opensInApp ? undefined : 'noopener noreferrer'}
-            class="px-3 py-1.5 rounded-lg text-sm font-medium bg-surface-700 text-slate-300 hover:bg-surface-600"
-            title="Same bet, FanDuel's account host — testing the slip-persistence bug"
-          >Open (alt link)</a>
           <button
             class="px-3 py-1.5 rounded-lg text-sm font-medium bg-surface-700 text-slate-300 hover:bg-surface-600"
             on:click={copyBetslip}
