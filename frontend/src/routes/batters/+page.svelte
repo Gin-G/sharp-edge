@@ -4,6 +4,7 @@
   import { cached, peek } from '$lib/cache';
   import type { BatterScreen, BatterRow, HotBatRow } from '$lib/types';
   import PickTrackRecord from '$lib/components/PickTrackRecord.svelte';
+  import ParlayRecord from '$lib/components/ParlayRecord.svelte';
 
   const CACHE_KEY = 'batters:screen';
 
@@ -52,12 +53,12 @@
     return v.toFixed(3).replace(/^0/, '');
   }
 
-  function fmtNum(v: number | null, digits = 2): string {
+  function fmtNum(v: number | null | undefined, digits = 2): string {
     if (v === null || v === undefined) return '—';
     return v.toFixed(digits);
   }
 
-  function fmtOdds(v: number | null): string {
+  function fmtOdds(v: number | null | undefined): string {
     if (v === null || v === undefined) return '—';
     return v > 0 ? `+${v}` : `${v}`;
   }
@@ -91,7 +92,7 @@
     }
   }
 
-  function fmtPct(v: number | null): string {
+  function fmtPct(v: number | null | undefined): string {
     if (v === null || v === undefined) return '—';
     return `${(100 * v).toFixed(1)}%`;
   }
@@ -101,12 +102,12 @@
   // hit 70.5% at a median price of -260, whose break-even is 72%, so the card
   // read well and lost money. Betting the board instead lands the median leg
   // at -185 against a 77% read.
-  function fmtEv(v: number | null): string {
+  function fmtEv(v: number | null | undefined): string {
     if (v === null || v === undefined) return '—';
     return `${v >= 0 ? '+' : ''}${v.toFixed(3)}`;
   }
 
-  function evClass(v: number | null): string {
+  function evClass(v: number | null | undefined): string {
     if (v === null || v === undefined) return 'text-slate-500';
     if (v >= 0.03) return 'text-emerald-400 font-semibold';
     if (v > 0) return 'text-emerald-500/80';
@@ -176,6 +177,8 @@
     <div class="card border-red-800 bg-red-950/30 text-red-300 text-sm">{error}</div>
   {/if}
 
+  <ParlayRecord />
+
   <PickTrackRecord screen="batter" winLabel="Hit" />
 
   {#if data?.bundle && data.bundle.legs.length > 0}
@@ -196,6 +199,11 @@
             <span class="text-slate-200 font-semibold">{fmtOdds(data.bundle.summary.american)}</span>
             · model {fmtPct(data.bundle.summary.model_p)} vs implied {fmtPct(data.bundle.summary.implied_p)}
             · <span class={evClass(data.bundle.summary.ev)}>EV {fmtEv(data.bundle.summary.ev)}</span>
+            {#if data.bundle.result}
+              · <span class="px-1.5 py-0.5 rounded border text-[10px] {data.bundle.result === 'WIN'
+                  ? 'bg-emerald-600/20 text-emerald-300 border-emerald-600/30'
+                  : 'bg-rose-600/20 text-rose-300 border-rose-600/30'}">{data.bundle.result}</span>
+            {/if}
           </span>
         {/if}
       </div>
@@ -205,7 +213,14 @@
           <div class="px-5 py-2.5 flex items-center justify-between gap-4 text-sm">
             <div class="min-w-0">
               <span class="text-slate-200 font-medium">{r.batter}</span>
+              {#if r.team}<span class="text-slate-500 text-xs"> ({r.team})</span>{/if}
               <span class="text-slate-500 text-xs"> vs {r.opposing_pitcher}</span>
+              {#if r.market_open === false}
+                <!-- The card is frozen at the morning's board, so a leg whose
+                     game has started is still shown — it is what we said —
+                     but FanDuel has pulled the market and it can't be bet. -->
+                <span class="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-surface-600 text-slate-400 whitespace-nowrap">started</span>
+              {/if}
             </div>
             <div class="flex items-center gap-4 tabular-nums text-xs shrink-0">
               <span class="text-emerald-300 font-semibold">{fmtPct(r.model_p)}</span>
@@ -233,6 +248,19 @@
             rel={opensInApp ? undefined : 'noopener noreferrer'}
             class="px-3 py-1.5 rounded-lg text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-500"
           >Open in FanDuel{opensInApp ? ' app' : ' bet slip'}</a>
+        {/if}
+        {#if data.bundle.betslip_url_alt}
+          <!-- Same legs against FanDuel's account host. Temporary: our normal
+               link leaves the selections in the app's slip after the bet is
+               placed, and a link that uses this host doesn't. Whichever of the
+               two is responsible, one of these buttons goes away. -->
+          <a
+            href={data.bundle.betslip_url_alt}
+            target={opensInApp ? undefined : '_blank'}
+            rel={opensInApp ? undefined : 'noopener noreferrer'}
+            class="px-3 py-1.5 rounded-lg text-sm font-medium bg-surface-700 text-slate-300 hover:bg-surface-600"
+            title="Same bet, FanDuel's account host — testing the slip-persistence bug"
+          >Open (alt link)</a>
           <button
             class="px-3 py-1.5 rounded-lg text-sm font-medium bg-surface-700 text-slate-300 hover:bg-surface-600"
             on:click={copyBetslip}

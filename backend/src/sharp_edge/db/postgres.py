@@ -7,7 +7,7 @@ from typing import Optional
 
 import asyncpg
 
-from .base import PICK_COLUMNS, BetDatabase
+from .base import PARLAY_COLUMNS, PICK_COLUMNS, BetDatabase
 
 
 def _to_dt(v):
@@ -18,6 +18,21 @@ def _to_dt(v):
     if isinstance(v, str):
         return datetime.fromisoformat(v.replace("Z", "+00:00"))
     raise TypeError(f"unsupported timestamp type: {type(v).__name__}")
+
+
+def _parlay_row(row) -> dict:
+    """Normalise a model_parlays row for JSON: dates to ISO, legs to a list.
+
+    ``legs`` is JSONB, which asyncpg hands back as a string unless a codec is
+    registered, so it is decoded here rather than at every call site.
+    """
+    d = dict(row)
+    for k in ("pick_date", "created_at", "resolved_at"):
+        if d.get(k) is not None and not isinstance(d[k], str):
+            d[k] = d[k].isoformat()
+    if isinstance(d.get("legs"), str):
+        d["legs"] = json.loads(d["legs"])
+    return d
 
 
 SCHEMA = """
@@ -89,6 +104,19 @@ CREATE TABLE IF NOT EXISTS screen_runs (
     picks INTEGER NOT NULL DEFAULT 0,
     ran_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (screen, pick_date)
+);
+CREATE TABLE IF NOT EXISTS model_parlays (
+    pick_date DATE PRIMARY KEY,
+    legs JSONB NOT NULL,
+    leg_count INTEGER NOT NULL,
+    american INTEGER,
+    decimal_odds DOUBLE PRECISION,
+    model_p DOUBLE PRECISION,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    result TEXT,
+    legs_won INTEGER,
+    legs_settled INTEGER,
+    resolved_at TIMESTAMPTZ
 );
 """
 
@@ -342,6 +370,55 @@ class PostgresDatabase(BetDatabase):
                 # asyncpg returns e.g. "INSERT 0 1"; 0 rows means conflict-skipped
                 inserted += int(status.rsplit(" ", 1)[-1])
         return inserted
+
+    async def insert_parlay(self, row: dict) -> bool:
+        from datetime import date as _date
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """INSERT INTO model_parlays (
+                    pick_date, legs, leg_count, american, decimal_odds, model_p
+                ) VALUES ($1,$2,$3,$4,$5,$6)
+                ON CONFLICT (pick_date) DO NOTHING""",
+                _date.fromisoformat(row["pick_date"]), row["legs"],
+                row["leg_count"], row.get("american"),
+                row.get("decimal_odds"), row.get("model_p"),
+            )
+        return int(status.rsplit(" ", 1)[-1]) > 0
+
+    async def get_parlay(self, pick_date: str):
+        from datetime import date as _date
+        async with self._pool.acquire() as conn:
+            r = await conn.fetchrow(
+                f"SELECT {PARLAY_COLUMNS} FROM model_parlays WHERE pick_date = $1",
+                _date.fromisoformat(pick_date),
+            )
+        return _parlay_row(r) if r else None
+
+    async def list_parlays(self, since=None, limit: int = 400) -> list[dict]:
+        from datetime import date as _date
+        sql = f"SELECT {PARLAY_COLUMNS} FROM model_parlays"
+        args: list = []
+        if since:
+            sql += " WHERE pick_date >= $1"
+            args.append(_date.fromisoformat(since))
+        sql += f" ORDER BY pick_date DESC LIMIT ${len(args) + 1}"
+        args.append(limit)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+        return [_parlay_row(r) for r in rows]
+
+    async def settle_parlay(
+        self, pick_date: str, result: str, legs_won: int, legs_settled: int
+    ) -> None:
+        from datetime import date as _date
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE model_parlays
+                   SET result = $1, legs_won = $2, legs_settled = $3,
+                       resolved_at = NOW()
+                 WHERE pick_date = $4""",
+                result, legs_won, legs_settled, _date.fromisoformat(pick_date),
+            )
 
     async def delete_picks(
         self, screen: str, pick_date: str, unresolved_only: bool = True

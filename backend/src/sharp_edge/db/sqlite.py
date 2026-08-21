@@ -7,7 +7,7 @@ from typing import Optional
 
 import aiosqlite
 
-from .base import PICK_COLUMNS, BetDatabase
+from .base import PARLAY_COLUMNS, PICK_COLUMNS, BetDatabase
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bets (
@@ -70,6 +70,19 @@ CREATE TABLE IF NOT EXISTS model_picks (
     created_at TEXT DEFAULT (datetime('now')),
     resolved_at TEXT,
     PRIMARY KEY (screen, pick_date, batter_id)
+);
+CREATE TABLE IF NOT EXISTS model_parlays (
+    pick_date TEXT PRIMARY KEY,
+    legs TEXT NOT NULL,
+    leg_count INTEGER NOT NULL,
+    american INTEGER,
+    decimal_odds REAL,
+    model_p REAL,
+    created_at TEXT DEFAULT (datetime('now')),
+    result TEXT,
+    legs_won INTEGER,
+    legs_settled INTEGER,
+    resolved_at TEXT
 );
 CREATE TABLE IF NOT EXISTS screen_runs (
     screen TEXT NOT NULL,
@@ -309,6 +322,49 @@ class SQLiteDatabase(BetDatabase):
             inserted += cursor.rowcount if cursor.rowcount > 0 else 0
         await self._db.commit()
         return inserted
+
+    async def insert_parlay(self, row: dict) -> bool:
+        cursor = await self._db.execute(
+            """INSERT INTO model_parlays (
+                pick_date, legs, leg_count, american, decimal_odds, model_p
+            ) VALUES (
+                :pick_date, :legs, :leg_count, :american, :decimal_odds, :model_p
+            ) ON CONFLICT(pick_date) DO NOTHING""",
+            row,
+        )
+        await self._db.commit()
+        return bool(cursor.rowcount)
+
+    async def get_parlay(self, pick_date: str):
+        cursor = await self._db.execute(
+            f"SELECT {PARLAY_COLUMNS} FROM model_parlays WHERE pick_date = ?",
+            (pick_date,),
+        )
+        r = await cursor.fetchone()
+        return dict(r) if r else None
+
+    async def list_parlays(self, since=None, limit: int = 400) -> list[dict]:
+        sql = f"SELECT {PARLAY_COLUMNS} FROM model_parlays"
+        args: list = []
+        if since:
+            sql += " WHERE pick_date >= ?"
+            args.append(since)
+        sql += " ORDER BY pick_date DESC LIMIT ?"
+        args.append(limit)
+        cursor = await self._db.execute(sql, args)
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def settle_parlay(
+        self, pick_date: str, result: str, legs_won: int, legs_settled: int
+    ) -> None:
+        await self._db.execute(
+            """UPDATE model_parlays
+               SET result = ?, legs_won = ?, legs_settled = ?,
+                   resolved_at = datetime('now')
+             WHERE pick_date = ?""",
+            (result, legs_won, legs_settled, pick_date),
+        )
+        await self._db.commit()
 
     async def delete_picks(
         self, screen: str, pick_date: str, unresolved_only: bool = True

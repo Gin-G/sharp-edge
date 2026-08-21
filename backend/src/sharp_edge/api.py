@@ -501,6 +501,33 @@ async def batter_screen():
     from . import bundle as _bundle
 
     legs = _bundle.build(picks)
+
+    # Freeze the day's card the first time it is built, then serve the frozen
+    # one. Rebuilding live looks right and isn't: FanDuel pulls the market on
+    # every game that starts, so a card re-derived in the afternoon is made of
+    # whoever is left rather than what was recommended. The MIN_LEGS guard is
+    # what stops a late first request freezing that residue as the day's card.
+    from . import tracking as _tracking
+    try:
+        if len(legs) >= _bundle.MIN_LEGS:
+            _tracking.freeze_parlay(
+                date.fromisoformat(status["cached_date"]), legs,
+                _bundle.summarise(legs),
+            )
+        frozen = _tracking.get_parlay(date.fromisoformat(status["cached_date"]))
+        if frozen and frozen.get("legs"):
+            open_now = {
+                r.get("batter_id") for r in picks
+                if r.get("fd_market_id") is not None
+            }
+            legs = [
+                {**leg, "market_open": leg.get("batter_id") in open_now}
+                for leg in frozen["legs"]
+            ]
+    except Exception as e:
+        logger.warning("parlay freeze/read failed: %s", e)
+        frozen = None
+
     return {
         "picks": picks,
         "hot_bats": _df_to_records(hot),
@@ -510,8 +537,17 @@ async def batter_screen():
         "odds": odds_meta,
         "bundle": {
             "legs": legs,
+            "frozen_at": (frozen or {}).get("created_at"),
+            "result": (frozen or {}).get("result"),
             "summary": _bundle.summarise(legs),
             "betslip_url": _bundle.betslip_url(legs, state=settings.fanduel_state),
+            # Same legs, same payload, FanDuel's account host instead of the
+            # state subdomain — an A/B on the slip-persistence bug. See
+            # bundle.BETSLIP_ALT_BASE; one of the two links goes away once we
+            # know which address the app treats as one-shot.
+            "betslip_url_alt": _bundle.betslip_url(
+                legs, state=settings.fanduel_state, alt=True
+            ),
             # From the whole board: the card is a handful of legs at most,
             # so the next-best runners-up are only visible here.
             "near_misses": _bundle.near_misses(today, legs),
@@ -637,6 +673,18 @@ async def picks_track_record(
         raise HTTPException(400, f"screen must be one of {tracking.SCREENS}")
     rows = await db.list_picks(screen=screen, since=since)
     return tracking.build_track_record(screen, rows)
+
+
+@app.get("/picks/parlay-record")
+async def picks_parlay_record(since: Optional[str] = None):
+    """Track record for the day's card, settled as one bet.
+
+    A parlay is not an average of its legs — every leg wins or the ticket is
+    dead — so this is the only honest way to score how the card actually did.
+    Hit rate on the pick list answers a different question.
+    """
+    from . import tracking
+    return await asyncio.to_thread(tracking.parlay_track_record, since)
 
 
 @app.post("/picks/resolve")

@@ -117,7 +117,17 @@ export interface BatterScreen {
     count: number;
   };
   bundle?: {
-    legs: BatterRow[];
+    // The card is served from the frozen record once one exists, and those
+    // rows carry only what the card displays — not the full board row.
+    // ``market_open`` is false when FanDuel has pulled the leg's market,
+    // which happens the moment its game starts.
+    legs: (Partial<BatterRow> & {
+      batter: string;
+      opposing_pitcher: string | null;
+      fd_odds: number | null;
+      model_p: number | null;
+      market_open?: boolean;
+    })[];
     summary: {
       legs: number;
       decimal: number | null;
@@ -126,7 +136,13 @@ export interface BatterScreen {
       implied_p: number | null;
       ev: number | null;
     };
+    // When the card was first written, and how it settled. The card is frozen
+    // before first pitch because the live board can't reproduce it later —
+    // FanDuel pulls the market on every game that starts.
+    frozen_at: string | null;
+    result: 'WIN' | 'LOSS' | 'VOID' | null;
     betslip_url: string | null;
+    betslip_url_alt: string | null;
     near_misses: {
       batter: string;
       opposing_pitcher: string;
@@ -199,6 +215,29 @@ export interface TrackRecordBucket {
   pending: number;
   decided: number;
   hit_rate: number | null;
+}
+
+export interface ParlayRecord {
+  cards: number;
+  decided: number;
+  wins: number;
+  losses: number;
+  pending: number;
+  void: number;
+  sweep_rate: number | null;
+  roi: number | null;
+  avg_legs: number | null;
+  parlays: {
+    pick_date: string;
+    leg_count: number;
+    american: number | null;
+    decimal_odds: number | null;
+    model_p: number | null;
+    result: 'WIN' | 'LOSS' | 'VOID' | null;
+    legs_won: number | null;
+    legs_settled: number | null;
+    legs: { batter: string; team: string | null; fd_odds: number | null }[];
+  }[];
 }
 
 export interface TrackRecordPick {

@@ -34,6 +34,32 @@ from urllib.parse import quote
 # state bounces a user whose account is registered in another.
 BETSLIP_BASE = "https://{state}.sportsbook.fanduel.com/addToBetslip"
 
+# A second host/path for the same payload, to settle a live question.
+#
+# Our link, once opened on a phone, leaves the selections sitting in the app's
+# bet slip: place the bet, quit the app, reopen it, and they are back. A link
+# shared by another tout does not do this — open it, quit, reopen, and the slip
+# is clean. That link differs from ours in *two* ways at once, so which one
+# matters is not yet known:
+#
+#   ours    co.sportsbook.fanduel.com/addToBetslip?marketId[0]=..&selectionId[0]=..
+#   theirs  account.sportsbook.fanduel.com/sportsbook/addToBetslip?shareCode=..
+#
+# Different host and path, and a different payload — an explicit selection list
+# against an opaque code for a saved slip. The payload theory is that an
+# explicit list is a standing instruction the app replays on cold start while a
+# share code is a one-shot lookup, and acting on it means building share codes
+# through FanDuel's authenticated API. The host theory costs one line.
+#
+# So this emits our existing payload against their host and path. If the slip
+# stops persisting, the host was the whole story and no API work is needed. If
+# it still persists, the payload is the cause and the share-code route is worth
+# the effort. Both hosts serve the same apple-app-site-association claiming /*
+# for the sportsbook apps, so both are equally eligible to open the app.
+#
+# Delete whichever of these two turns out to be wrong.
+BETSLIP_ALT_BASE = "https://account.sportsbook.fanduel.com/sportsbook/addToBetslip"
+
 # The floor. Always at least two legs, so the card is always a parlay.
 #
 # One leg is the likeliest bet on the board — 80.6% over 129 days — but at a
@@ -120,12 +146,18 @@ MIN_LEG_VALUE: float = 1.10
 DEFAULT_MAX_LEGS: Optional[int] = MAX_LEGS
 
 
-def betslip_url(selections: Iterable[dict], state: str = "co") -> Optional[str]:
+def betslip_url(
+    selections: Iterable[dict], state: str = "co", alt: bool = False
+) -> Optional[str]:
     """Build an addToBetslip link from rows carrying FanDuel ids.
 
     Each selection needs ``fd_market_id`` and ``fd_selection_id``; rows
     missing either are skipped, since a half-built link is worse than none.
     Returns ``None`` when nothing usable is left.
+
+    ``alt`` swaps the state subdomain for the account host and its
+    ``/sportsbook`` path — same payload, different address. See
+    ``BETSLIP_ALT_BASE`` for what that is testing.
     """
     parts: list[str] = []
     i = 0
@@ -143,7 +175,8 @@ def betslip_url(selections: Iterable[dict], state: str = "co") -> Optional[str]:
         i += 1
     if not parts:
         return None
-    return f"{BETSLIP_BASE.format(state=state.lower())}?{'&'.join(parts)}"
+    base = BETSLIP_ALT_BASE if alt else BETSLIP_BASE.format(state=state.lower())
+    return f"{base}?{'&'.join(parts)}"
 
 
 def build(

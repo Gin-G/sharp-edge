@@ -8,6 +8,11 @@ it via the get_uid dependency.
 from abc import ABC, abstractmethod
 from typing import Optional
 
+PARLAY_COLUMNS = (
+    "pick_date, legs, leg_count, american, decimal_odds, model_p, "
+    "created_at, result, legs_won, legs_settled, resolved_at"
+)
+
 # Every model_picks column except `metrics` — see BetDatabase.list_picks.
 PICK_COLUMNS = (
     "screen, pick_date, batter_id, batter, team, pitcher_id, opposing_pitcher, "
@@ -127,6 +132,36 @@ class BetDatabase(ABC):
         """Settle picks for one date. Each result dict carries batter_id,
         result ('WIN'/'LOSS'/'VOID'), hr_actual, hits_actual, pa_actual.
         Returns the number of rows updated."""
+
+    @abstractmethod
+    # ------------------------------------------------------------------
+    # The day's card, frozen.
+    #
+    # A parlay is one row per day, not one per leg, because it settles as one
+    # thing: every leg wins or the ticket is dead. Keyed on pick_date so the
+    # first write of the day sticks — the card has to be a record of what was
+    # recommended before first pitch, and the live board stops being able to
+    # show that within hours, as FanDuel pulls the market on every game that
+    # starts. Re-deriving it at 4pm yields whoever is left, which is not the
+    # same bet and never was.
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def insert_parlay(self, row: dict) -> bool:
+        """Freeze one day's card. Returns False if the day already has one."""
+
+    @abstractmethod
+    async def get_parlay(self, pick_date: str) -> Optional[dict]: ...
+
+    @abstractmethod
+    async def list_parlays(
+        self, since: Optional[str] = None, limit: int = 400
+    ) -> list[dict]: ...
+
+    @abstractmethod
+    async def settle_parlay(
+        self, pick_date: str, result: str, legs_won: int, legs_settled: int
+    ) -> None: ...
 
     @abstractmethod
     async def delete_picks(

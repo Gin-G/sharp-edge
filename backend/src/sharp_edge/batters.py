@@ -177,6 +177,8 @@ def _do_warm(target_date: date, replace: bool = False) -> None:
                     target_date, replace=replace,
                 )
             tracking.resolve_pending()
+            # Legs are graded above; the card they belong to settles from them.
+            tracking.resolve_parlays()
         except Exception:
             logger.exception("[batters] pick tracking failed")
     except Exception as e:

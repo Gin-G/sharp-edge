@@ -246,6 +246,136 @@ def _boxscore_batting_for_date(dstr: str) -> dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# The day's card, frozen and settled as one bet
+# ---------------------------------------------------------------------------
+
+
+def freeze_parlay(pick_date: date, legs: list[dict], summary: dict) -> bool:
+    """Record the day's card once, the first time it is built.
+
+    Returns True if this call is the one that wrote it.
+
+    The card has to be frozen because the live board cannot reproduce it. Legs
+    are only bettable while FanDuel keeps the market open, so every game that
+    starts removes its batters, and by late afternoon rebuilding from the board
+    yields whoever is left rather than what was recommended — on 2026-08-20
+    that was a single leg ranked 8th, while the seven names above it had
+    already played (six of them hit). A record of what we said has to be
+    written while it is still true.
+    """
+    if not legs:
+        return False
+    rows = [
+        {
+            "batter_id": int(r["batter_id"]) if r.get("batter_id") is not None else None,
+            "batter": r.get("batter"),
+            "team": r.get("team"),
+            "opposing_pitcher": r.get("opposing_pitcher"),
+            "pitcher_id": r.get("pitcher_id"),
+            "fd_odds": r.get("fd_odds"),
+            "model_p": r.get("model_p"),
+            # Kept so the bet-slip link still builds from the frozen card.
+            # They stop working once FanDuel pulls the market, which is the
+            # same moment the leg stops being bettable, so nothing is lost.
+            "fd_market_id": r.get("fd_market_id"),
+            "fd_selection_id": r.get("fd_selection_id"),
+            "fd_event_id": r.get("fd_event_id"),
+            "implied_p": r.get("implied_p"),
+            "ev": r.get("ev"),
+            # Shown on the card; kept so the frozen version renders the same
+            # as the live one did.
+            "p_l3_h9": r.get("p_l3_h9"),
+            "game_time": r.get("game_time"),
+        }
+        for r in legs
+    ]
+    if any(r["batter_id"] is None for r in rows):
+        # Without an id there is nothing to settle against later.
+        logger.warning("[tracking] parlay not frozen: a leg has no batter_id")
+        return False
+    wrote = _run_db(_db.insert_parlay({
+        "pick_date": pick_date.isoformat(),
+        "legs": json.dumps(rows),
+        "leg_count": len(rows),
+        "american": summary.get("american"),
+        "decimal_odds": summary.get("decimal"),
+        "model_p": summary.get("model_p"),
+    }))
+    if wrote:
+        logger.info(
+            "[tracking] parlay frozen for %s: %d legs at %s",
+            pick_date.isoformat(), len(rows), summary.get("american"),
+        )
+    return bool(wrote)
+
+
+def get_parlay(pick_date: date) -> Optional[dict]:
+    """The frozen card for a date, or None if one was never written."""
+    par = _run_db(_db.get_parlay(pick_date.isoformat()))
+    if par and isinstance(par.get("legs"), str):
+        par["legs"] = json.loads(par["legs"])
+    return par
+
+
+def resolve_parlays() -> dict:
+    """Settle frozen cards whose legs have all come in.
+
+    A parlay is one outcome, not an average: every leg wins or the ticket is
+    dead. Voided legs are dropped rather than counted as losses, which is how
+    a sportsbook treats a scratched player — the parlay reprices down and the
+    rest of it stands. A card whose legs *all* voided is itself VOID.
+    """
+    pending = [p for p in _run_db(_db.list_parlays()) if not p.get("result")]
+    settled = 0
+    for par in pending:
+        pick_date = par["pick_date"]
+        legs = par["legs"]
+        if isinstance(legs, str):
+            legs = json.loads(legs)
+        picks = {
+            p["batter_id"]: p.get("result")
+            for p in _run_db(_db.list_picks(screen="batter", since=pick_date,
+                                            until=pick_date))
+        }
+        outcomes = [picks.get(l["batter_id"]) for l in legs]
+        if any(o is None for o in outcomes):
+            continue                      # a leg hasn't been graded yet
+        decided = [o for o in outcomes if o != "VOID"]
+        if not decided:
+            result, won = "VOID", 0
+        elif all(o == "WIN" for o in decided):
+            result, won = "WIN", len(decided)
+        else:
+            result, won = "LOSS", sum(1 for o in decided if o == "WIN")
+        _run_db(_db.settle_parlay(pick_date, result, won, len(decided)))
+        settled += 1
+        logger.info("[tracking] parlay %s settled %s (%d/%d legs)",
+                    pick_date, result, won, len(decided))
+    return {"pending": len(pending), "settled": settled}
+
+
+def parlay_track_record(since: Optional[str] = None) -> dict:
+    """Cards played, cards cashed, and what a flat stake would have returned."""
+    rows = _run_db(_db.list_parlays(since=since))
+    decided = [r for r in rows if r.get("result") in ("WIN", "LOSS")]
+    wins = [r for r in decided if r["result"] == "WIN"]
+    staked = len(decided)
+    returned = sum((r.get("decimal_odds") or 1.0) for r in wins)
+    return {
+        "cards": len(rows),
+        "decided": staked,
+        "wins": len(wins),
+        "losses": staked - len(wins),
+        "pending": sum(1 for r in rows if not r.get("result")),
+        "void": sum(1 for r in rows if r.get("result") == "VOID"),
+        "sweep_rate": round(100 * len(wins) / staked, 1) if staked else None,
+        "roi": round(100 * (returned - staked) / staked, 1) if staked else None,
+        "avg_legs": round(sum(r["leg_count"] for r in rows) / len(rows), 1) if rows else None,
+        "parlays": rows,
+    }
+
+
 def resolve_pending() -> dict:
     """Settle every unresolved pick from before today against what actually
     happened. HR picks win on ≥1 home run, batter picks on ≥1 hit.
@@ -512,6 +642,7 @@ def schedule_catchup(max_wait_seconds: int = 3600) -> None:
 def _safe_resolve() -> None:
     try:
         resolve_pending()
+        resolve_parlays()
     except Exception:
         logger.exception("[tracking] resolve sweep failed")
 
@@ -586,6 +717,7 @@ def _do_backfill(plan: dict[date, list[str]]) -> None:
             time.sleep(_BACKFILL_PAUSE_SECONDS)
 
         resolve_pending()
+        resolve_parlays()
     except Exception as e:
         logger.exception("[tracking] backfill aborted")
         with _backfill_lock:

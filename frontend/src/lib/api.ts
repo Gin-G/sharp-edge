@@ -1,4 +1,4 @@
-import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord } from './types';
+import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord, ParlayRecord } from './types';
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || 'http://localhost:8000';
 
@@ -84,6 +84,12 @@ export function getHomerScreen(params: Record<string, string> = {}): Promise<Hom
 
 export function getHomerScreenStatus(): Promise<BatterScreenStatus> {
   return req<BatterScreenStatus>('/homers/screen/status');
+}
+
+export function getParlayRecord(since?: string): Promise<ParlayRecord> {
+  const p = new URLSearchParams();
+  if (since) p.set('since', since);
+  return req<ParlayRecord>(`/picks/parlay-record${p.toString() ? `?${p}` : ''}`);
 }
 
 export function getTrackRecord(screen: 'hr' | 'batter', since?: string): Promise<TrackRecord> {

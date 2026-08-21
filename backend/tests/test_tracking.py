@@ -381,3 +381,110 @@ def test_screen_rows_carry_ids():
     bat_src = inspect.getsource(batters.screen_for_date)
     for src in (hr_src, bat_src):
         assert '"batter_id"' in src and '"pitcher_id"' in src
+
+
+# ---------------------------------------------------------------------------
+# The day's card, frozen and settled as one bet
+# ---------------------------------------------------------------------------
+
+def _batter_picks(*ids) -> pd.DataFrame:
+    return pd.DataFrame([
+        {"batter": f"Batter {i}", "batter_id": i, "team": "Test Team",
+         "opposing_pitcher": "Test Pitcher", "pitcher_id": 900 + i,
+         "tags": "", "recent_avg": 0.320}
+        for i in ids
+    ])
+
+
+def _grade(ids_to_results: dict, pick_date):
+    """Settle legs directly, so these tests exercise parlay settlement only.
+
+    Going through resolve_pending() would drag in the shared _resolve_lock and
+    the box-score path, which the catch-up tests leave background threads
+    working on — a source of cross-test coupling, not of signal here.
+    """
+    tracking._run_db(tracking._db.update_pick_results(
+        "batter", pick_date.isoformat(),
+        [{"batter_id": bid, "result": res, "hr_actual": 0,
+          "hits_actual": 1 if res == "WIN" else 0,
+          "pa_actual": 0 if res == "VOID" else 3}
+         for bid, res in ids_to_results.items()],
+    ))
+
+
+def _legs(*ids) -> list[dict]:
+    return [
+        {"batter_id": i, "batter": f"Batter {i}", "team": "Test Team",
+         "opposing_pitcher": "Test Pitcher", "pitcher_id": 900 + i,
+         "fd_odds": -150, "model_p": 0.72, "fd_market_id": "m", 
+         "fd_selection_id": "s"}
+        for i in ids
+    ]
+
+
+_SUMMARY = {"american": 156, "decimal": 2.56, "model_p": 0.518}
+
+
+def test_the_card_is_frozen_once_and_only_once(tracked_db):
+    """The live board stops being able to reproduce the card within hours, as
+    FanDuel pulls the market on every game that starts. First write wins."""
+    assert tracking.freeze_parlay(YESTERDAY, _legs(111, 222), _SUMMARY) is True
+    # A later rebuild — made of whoever is still bettable — must not overwrite.
+    assert tracking.freeze_parlay(YESTERDAY, _legs(444), _SUMMARY) is False
+    par = tracking.get_parlay(YESTERDAY)
+    assert [l["batter_id"] for l in par["legs"]] == [111, 222]
+    assert par["leg_count"] == 2 and par["american"] == 156
+
+
+def test_an_empty_card_is_not_frozen(tracked_db):
+    assert tracking.freeze_parlay(YESTERDAY, [], _SUMMARY) is False
+    assert tracking.get_parlay(YESTERDAY) is None
+
+
+def test_a_parlay_wins_only_when_every_leg_wins(tracked_db):
+    """A voided leg is dropped rather than counted against the card, which is
+    how a book treats a scratch: the parlay reprices and the rest stands."""
+    tracking.persist_screen_result("batter", _batter_picks(111, 222), YESTERDAY)
+    tracking.freeze_parlay(YESTERDAY, _legs(111, 222), _SUMMARY)
+    _grade({111: "WIN", 222: "VOID"}, YESTERDAY)
+    tracking.resolve_parlays()
+    par = tracking.get_parlay(YESTERDAY)
+    assert par["result"] == "WIN"
+    assert par["legs_won"] == 1 and par["legs_settled"] == 1
+
+
+def test_one_losing_leg_kills_the_ticket(tracked_db):
+    """One leg down kills the ticket however well the others did."""
+    tracking.persist_screen_result("batter", _batter_picks(111, 222), TWO_DAYS_AGO)
+    tracking.freeze_parlay(TWO_DAYS_AGO, _legs(111, 222), _SUMMARY)
+    _grade({111: "WIN", 222: "LOSS"}, TWO_DAYS_AGO)
+    tracking.resolve_parlays()
+    par = tracking.get_parlay(TWO_DAYS_AGO)
+    assert par["result"] == "LOSS"
+    assert par["legs_won"] == 1 and par["legs_settled"] == 2
+
+
+def test_a_card_stays_pending_until_every_leg_is_graded(tracked_db):
+    """333 never played and has no box-score line, so it cannot be graded and
+    the card must not be settled on a partial read."""
+    today = date.today()
+    tracking.persist_screen_result("batter", _batter_picks(111, 333), today)
+    tracking.freeze_parlay(today, _legs(111, 333), _SUMMARY)
+    tracking.resolve_parlays()
+    assert tracking.get_parlay(today)["result"] is None
+
+
+def test_the_track_record_counts_tickets_not_legs(tracked_db):
+    """A parlay is one outcome. Two legs winning out of three is a loss, not
+    67% — which is the whole reason this is tracked separately."""
+    tracking.persist_screen_result("batter", _batter_picks(111, 222), TWO_DAYS_AGO)
+    tracking.freeze_parlay(TWO_DAYS_AGO, _legs(111, 222), _SUMMARY)
+    _grade({111: "WIN", 222: "LOSS"}, TWO_DAYS_AGO)
+    tracking.persist_screen_result("batter", _batter_picks(111), YESTERDAY)
+    tracking.freeze_parlay(YESTERDAY, _legs(111), _SUMMARY)
+    _grade({111: "WIN"}, YESTERDAY)
+    tracking.resolve_parlays()
+    rec = tracking.parlay_track_record()
+    assert rec["decided"] == 2
+    assert rec["wins"] == 1 and rec["losses"] == 1
+    assert rec["sweep_rate"] == 50.0
