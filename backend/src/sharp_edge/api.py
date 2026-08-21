@@ -507,14 +507,24 @@ async def batter_screen():
     # every game that starts, so a card re-derived in the afternoon is made of
     # whoever is left rather than what was recommended. The MIN_LEGS guard is
     # what stops a late first request freezing that residue as the day's card.
+    # tracking's helpers are *sync* and reach the database through
+    # tracking._run_db, which schedules onto this loop with
+    # run_coroutine_threadsafe and blocks on the result. That is safe from a
+    # worker thread, which is what its docstring says, and a deadlock from
+    # here: the loop cannot run the coroutine it is blocked waiting for, so it
+    # sits until the 300s timeout and every other request on the process waits
+    # with it. Always cross to a thread first.
     from . import tracking as _tracking
     try:
         if len(legs) >= _bundle.MIN_LEGS:
-            _tracking.freeze_parlay(
+            await asyncio.to_thread(
+                _tracking.freeze_parlay,
                 date.fromisoformat(status["cached_date"]), legs,
                 _bundle.summarise(legs),
             )
-        frozen = _tracking.get_parlay(date.fromisoformat(status["cached_date"]))
+        frozen = await asyncio.to_thread(
+            _tracking.get_parlay, date.fromisoformat(status["cached_date"])
+        )
         if frozen and frozen.get("legs"):
             open_now = {
                 r.get("batter_id") for r in picks
@@ -525,7 +535,7 @@ async def batter_screen():
                 for leg in frozen["legs"]
             ]
     except Exception as e:
-        logger.warning("parlay freeze/read failed: %s", e)
+        logger.warning("parlay freeze/read failed: %r", e)
         frozen = None
 
     return {
