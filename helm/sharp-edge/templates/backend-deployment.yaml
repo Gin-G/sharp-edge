@@ -72,60 +72,33 @@ spec:
             - name: pybaseball-cache
               mountPath: {{ .Values.backend.pybaseballCache.mountPath }}
           {{- end }}
-          # Probe budgets are sized for the batter screen's cold warm-up, not
-          # for a healthy idle pod, because the warm-up is what kills it.
+          # No liveness or readiness probe, deliberately.
           #
-          # The screen scrapes Statcast through pybaseball on a background
-          # thread, and that work is pandas — it holds the GIL. The container
-          # is capped at 1 CPU, so while it runs the event loop cannot answer
-          # /health inside the default 1s timeout. With the defaults (1s,
-          # 3 failures, 30s period) three probes fail in a row and the kubelet
-          # SIGKILLs the pod about 90 seconds in. It restarts, starts the same
-          # warm-up, and is killed again: the screen can never finish, and the
-          # picks list is empty all day while the track record still shows the
-          # picks from a day the warm-up did survive. That is the crash loop
-          # seen on 2026-08-21, and the same mechanism EXPERIMENTS.md records
-          # for the backfill.
+          # Measured during a cold warm-up, /health takes 30+ seconds to
+          # answer — three consecutive 30s curl timeouts, then 15.4s, then
+          # instant once the scrape passed. The event loop is not slow, it is
+          # blocked outright: the batter screen's background thread holds the
+          # GIL through long stretches of DataFrame work. No probe timeout can
+          # sensibly cover a 30-second stall.
           #
-          # startupProbe holds liveness off entirely until the first warm-up
-          # lands — 10 minutes of headroom, and the pod is killed only if it
-          # genuinely never comes up.
-          startupProbe:
-            httpGet:
-              path: /health
-              port: http
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 60
-          # After startup, a mid-day re-warm can still starve the loop for a
-          # while. Three minutes of silence before a restart is tolerant of
-          # that and still catches a genuinely wedged process.
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: http
-            periodSeconds: 30
-            timeoutSeconds: 5
-            failureThreshold: 6
-          # Very slack, deliberately, and the numbers are measured rather than
-          # guessed: with a 5s timeout the probe still times out during a
-          # warm-up, so the event loop is blocked for longer than that at a
-          # stretch. Five minutes of tolerance keeps it from flapping.
+          # Given that, both probes only did harm. Liveness read the stall as a
+          # dead process and SIGKILLed the pod (exit 137) about 90 seconds in;
+          # it restarted, began the same warm-up, and was killed again — six
+          # restarts on 2026-08-21, and the picks list stayed empty all day
+          # while the track record still showed picks from a day the warm-up
+          # had survived. Readiness emptied the Service, and with one replica
+          # there is nowhere else to send traffic, so the ingress answered "no
+          # available server" instead of the 503-with-Retry-After the pod would
+          # have served and the frontend already polls.
           #
-          # There is one replica. Readiness failing therefore has nowhere to
-          # send traffic — it empties the Service and the ingress answers "no
-          # available server", which is strictly worse than what the pod would
-          # have served: a 503 with a Retry-After, which the frontend already
-          # polls. Liveness is what catches a genuinely dead process; this only
-          # needs to catch one that never came up at all.
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 10
-            failureThreshold: 30
+          # So nothing here restarts the pod automatically any more. That is a
+          # real trade: a genuinely wedged process now stays wedged until
+          # someone restarts it. It is the better trade while a healthy pod is
+          # indistinguishable from a wedged one for half a minute at a time.
+          #
+          # Put a liveness probe back once the scrape no longer runs inside the
+          # API process — at that point /health answers in milliseconds and a
+          # stall means something is actually wrong.
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}
       {{- if .Values.backend.pybaseballCache.enabled }}
