@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "info"
+    # Uvicorn's auto-reloader. Off by default because this same entry point
+    # runs in production, where it was doing real harm: WatchFiles polls /app
+    # continuously, the reloader adds a second process, and any write under
+    # the watched tree restarts the worker — which throws away the in-memory
+    # day cache and sends the batter screen back to the start of a warm-up
+    # that takes minutes of sequential network fetches. Set RELOAD=1 (or
+    # reload=true in .env) for local development.
+    reload: bool = False
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
     # Sessions — signed cookie used to scope every user's data.

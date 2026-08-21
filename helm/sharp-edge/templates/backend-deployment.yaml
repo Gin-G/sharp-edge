@@ -107,18 +107,25 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 6
-          # Deliberately slack. The API answers 503 with a Retry-After while
-          # the cache is cold, which the frontend knows how to poll — that is
-          # a far better experience than being pulled out of the Service and
-          # serving "no available server" from the ingress.
+          # Very slack, deliberately, and the numbers are measured rather than
+          # guessed: with a 5s timeout the probe still times out during a
+          # warm-up, so the event loop is blocked for longer than that at a
+          # stretch. Five minutes of tolerance keeps it from flapping.
+          #
+          # There is one replica. Readiness failing therefore has nowhere to
+          # send traffic — it empties the Service and the ingress answers "no
+          # available server", which is strictly worse than what the pod would
+          # have served: a 503 with a Retry-After, which the frontend already
+          # polls. Liveness is what catches a genuinely dead process; this only
+          # needs to catch one that never came up at all.
           readinessProbe:
             httpGet:
               path: /health
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 6
+            timeoutSeconds: 10
+            failureThreshold: 30
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}
       {{- if .Values.backend.pybaseballCache.enabled }}
