@@ -385,6 +385,26 @@ MIN_SHARP_STARTS: int = 2
 #
 # 234 of the 258 legs it would have chosen are unchanged; it is a guard, not a
 # selector. Ten AB in seven days is roughly "started half the week".
+# How many threads scan the slate.
+#
+# Twelve was chosen for throughput and measured badly. The screen runs inside
+# the API process, which is capped at 1 CPU, and each scan does DataFrame work
+# between its network calls — so twelve scanning threads and the asyncio event
+# loop all compete for one GIL, and the loop loses. Measured from inside the
+# cluster during a cold warm-up, /health took 30+ seconds to answer: three
+# consecutive 30s timeouts, then 15.4s, then instant once the scrape passed.
+# That stall read as a dead process to the liveness probe, which SIGKILLed the
+# pod about 90 seconds in, restarting the same warm-up to be killed again.
+#
+# Four trades warm-up duration for a responsive process. It is a mitigation
+# rather than a cure and should be read as one: fewer threads means shorter
+# stalls, not no stalls, because the contention is structural. More CPU would
+# not help either — the GIL serialises Python bytecode however many cores the
+# container is given, so this is a process-isolation problem, not a capacity
+# one. The cure is to stop running a multi-minute scrape inside the process
+# that serves the site.
+SCAN_WORKERS: int = 4
+
 MIN_RECENT_AB_TO_RANK: int = 10
 
 # No probability bar. Picks are the top of the board, and a threshold on top
@@ -476,7 +496,7 @@ def screen_today(
     min_recent_ab_to_rank: int = MIN_RECENT_AB_TO_RANK,
     one_pick_per_game: bool = True,
     days: int = 7,
-    workers: int = 12,
+    workers: int = SCAN_WORKERS,
     verbose: bool = True,
 ) -> ScreenResult:
     return screen_for_date(
@@ -547,7 +567,7 @@ def screen_for_date(
     min_recent_ab_to_rank: int = MIN_RECENT_AB_TO_RANK,
     one_pick_per_game: bool = True,
     days: int = 7,
-    workers: int = 12,
+    workers: int = SCAN_WORKERS,
     verbose: bool = True,
 ) -> ScreenResult:
     """Run the batter screen for an arbitrary slate date.

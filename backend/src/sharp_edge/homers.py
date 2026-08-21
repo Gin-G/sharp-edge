@@ -49,6 +49,10 @@ from sharp_edge._data import (
 
 logger = logging.getLogger(__name__)
 
+# Same GIL contention, same process — see batters.SCAN_WORKERS for the
+# measurements behind the number.
+from .batters import SCAN_WORKERS  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Module-level thresholds — tune here, one touch
 # ---------------------------------------------------------------------------
@@ -583,7 +587,9 @@ def _bvp_hr(batter_id: int, pitcher_id: int, sc_df: pd.DataFrame) -> dict:
 # Main screen
 # ---------------------------------------------------------------------------
 
-def screen_today_hr(workers: int = 12, verbose: bool = True) -> HRScreenResult:
+def screen_today_hr(
+    workers: int = SCAN_WORKERS, verbose: bool = True
+) -> HRScreenResult:
     """Run the full HR probability screen for today's slate.
 
     Returns an HRScreenResult with three DataFrames:
@@ -595,7 +601,7 @@ def screen_today_hr(workers: int = 12, verbose: bool = True) -> HRScreenResult:
 
 
 def screen_hr_for_date(
-    target_date: date, workers: int = 12, verbose: bool = True
+    target_date: date, workers: int = SCAN_WORKERS, verbose: bool = True
 ) -> HRScreenResult:
     """Run the HR screen for an arbitrary slate date.
 
