@@ -9,7 +9,7 @@ metadata:
     group: {{ .Values.app.group }}
   annotations:
     cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | quote }}
-    external-dns.alpha.kubernetes.io/target: "8.44.158.127"
+    external-dns.alpha.kubernetes.io/target: "75c20a42-2dd1-4297-8a51-3aefbcb3f004.cfargotunnel.com"
     {{- if .Values.backend.enabled }}
     traefik.ingress.kubernetes.io/router.middlewares: {{ printf "%s-%s-strip-api@kubernetescrd" .Release.Namespace .Values.app.name | quote }}
     {{- end }}
