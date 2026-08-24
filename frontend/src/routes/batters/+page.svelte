@@ -177,14 +177,11 @@
     <div class="card border-red-800 bg-red-950/30 text-red-300 text-sm">{error}</div>
   {/if}
 
-  <ParlayRecord />
-
-  <PickTrackRecord screen="batter" winLabel="Hit" />
-
   {#if data?.bundle && data.bundle.legs.length > 0}
-    <!-- The day's bundle: the two most likely to record a hit, one leg per
-         game, ranked on probability. Sits above the board because it is the
-         actionable part — everything below is context for it. -->
+    <!-- The day's card, first on the page: it is the only thing here that is
+         actually a bet. The record panels below say how these have been doing
+         and the board below that is where the legs came from — both are
+         context for this, so both sit under it. -->
     <section class="card p-0 overflow-hidden border-emerald-800/50">
       <div class="px-5 py-4 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
         <h2 class="text-sm font-semibold text-emerald-300 uppercase tracking-wider">
@@ -279,6 +276,10 @@
       {/if}
     </section>
   {/if}
+
+  <ParlayRecord />
+
+  <PickTrackRecord screen="batter" winLabel="Hit" />
 
   {#if loading && !data}
     <div class="card text-slate-400 text-sm flex items-center gap-3">
