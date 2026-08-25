@@ -1,6 +1,6 @@
 ---
 status: active
-progress: 60
+progress: 65
 ---
 
 # Sharp Edge
@@ -63,10 +63,14 @@ interface with DraftKings first, then line shopping across books.
 - [x] Helm chart on K3s: CNPG, ExternalSecrets via OpenBao, Cilium ingress, cert-manager TLS, Recreate strategy
 - [x] GitHub Actions: pytest, image build, automatic image bump, smoke probe against the origin
 - [x] Batter backtest run 1 (125 days): hot-bat-vs-hittable-starter edge on by default, HITTABLE bands retuned to 11.00 H/9 / .310 BAA (EXPERIMENTS.md)
-- [ ] Attach odds to picks — hit rate isn't ROI, and the screen sits near break-even at -160
-- [ ] Retire or re-bar `hand_slump_edge`: it fired 0 times in 125 days
-- [ ] Decide whether the BvP edge survives — it's +2.2 over "any hot bat" with 8.7pts of split-half drift
-- [ ] Bullpen quality and lineup slot as batter-screen features
+- [x] Attach odds to picks — FanDuel price, model probability, EV and edge on every row, archived daily
+- [x] Retire `hand_slump_edge` — .400 vs hand over 50 PA fired 0 times in 30,783 rows; removed entirely
+- [x] Decide whether the BvP edge survives — it doesn't: +2.4 on n=391 (CI ±4.8), non-monotone in sample size, now a label not a filter
+- [x] Rank the whole board on model probability instead of screening — +8.5pts of two-leg sweep and a better price (EXPERIMENTS.md run 3)
+- [x] Size the card on price: two legs minimum, no cap, every leg that pays for its own risk
+- [x] Freeze the day's card and settle it as one bet — sweep rate and flat-stake ROI, not leg hit rate
+- [x] Bet-slip link opens the FanDuel app directly (account host, no state subdomain)
+- [ ] Bullpen quality and lineup slot as batter-screen features — lineup slot is now the largest thing the model can't see
 - [ ] Extract a Sportsbook provider interface from the FanDuel client (auth, history sync, odds, balance)
 - [ ] DraftKings integration: login/session handling, bet history sync, canonical schema mapping
 - [ ] Normalize book-specific market and bet-type codes into the shared MARKET_TYPE_MAP
@@ -77,7 +81,7 @@ interface with DraftKings first, then line shopping across books.
 - [ ] Attach live odds to each screen pick so the track record reports ROI, not just hit rate
 - [ ] Arbitrage and middling detection across books
 - [ ] Closing line value tracking
-- [ ] Bankroll management and Kelly criterion sizing
+- [x] Kelly sizing on the card — quarter-Kelly stake shown with the parlay price
 - [ ] Scheduled sync as a K8s CronJob instead of startup-only warm-up
 - [ ] NBA model: nba_api PRA projections
 - [ ] NFL model integration reusing the existing nfl_data_py projections

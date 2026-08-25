@@ -193,7 +193,7 @@ def _board_row(name, model_p, pitcher, is_pick=True):
             "pitcher_id": pitcher, "model_p": model_p, "fd_odds": -200,
             "ev": 0.05, "edge_pts": 3.3,
             "is_hot": is_pick, "hittable_sp_edge": is_pick,
-            "bvp_edge": False, "hand_slump_edge": False, "p_sharp": False}
+            "bvp_edge": False, "p_sharp": False}
 
 
 def test_near_misses_come_from_the_board_not_the_picks():
@@ -306,3 +306,31 @@ def test_dear_legs_never_pad_the_card_however_many_there_are():
     rows = [_pick(f"p{i}", None, -900, pitcher=i, model_p=0.70)
             for i in range(12)]
     assert len(bundle.build(rows)) == bundle.MIN_LEGS
+
+
+def test_summarise_sizes_the_stake_at_quarter_kelly():
+    """Full Kelly on these cards routinely computes above 30% of bankroll,
+    which is not a stake. The quarter is returned already divided rather than
+    left as a note nobody applies."""
+    legs = [_pick("a", None, -160, pitcher=1, model_p=0.72),
+            _pick("b", None, -115, pitcher=2, model_p=0.71),
+            _pick("c", None, -160, pitcher=3, model_p=0.70)]
+    s = bundle.summarise(legs)
+    assert s["kelly"] > 0
+    assert s["kelly_quarter"] == pytest.approx(s["kelly"] / 4, abs=1e-4)
+    assert s["kelly_quarter"] < s["kelly"]
+
+
+def test_a_card_with_no_edge_is_sized_at_zero():
+    """Kelly goes negative when the price is worse than the read; the helper
+    floors it, so a bad card asks for no money rather than a short position."""
+    legs = [_pick("a", None, -400, pitcher=1, model_p=0.60),
+            _pick("b", None, -400, pitcher=2, model_p=0.60)]
+    s = bundle.summarise(legs)
+    assert s["ev"] < 0
+    assert s["kelly"] == 0 and s["kelly_quarter"] == 0
+
+
+def test_an_empty_bundle_reports_no_stake():
+    s = bundle.summarise([])
+    assert s["kelly"] is None and s["kelly_quarter"] is None

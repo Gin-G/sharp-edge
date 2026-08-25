@@ -132,7 +132,7 @@ def test_enrich_records_joins_on_normalised_names():
 
     def _pick(name, h9):
         return {"batter": name, "p_l3_h9": h9, "is_hot": True,
-                "bvp_edge": False, "hand_slump_edge": False,
+                "bvp_edge": False,
                 "hittable_sp_edge": True, "p_sharp": False}
 
     records = [_pick("José Ramírez", 16.2), _pick("Nobody At All", 12.0)]

@@ -300,7 +300,10 @@ def summarise(bundle: list[dict]) -> dict:
     """
     if not bundle:
         return {"legs": 0, "decimal": None, "american": None,
-                "model_p": None, "ev": None, "implied_p": None}
+                "model_p": None, "ev": None, "implied_p": None,
+                "kelly": None, "kelly_quarter": None}
+
+    from . import pricing
 
     dec = 1.0
     p = 1.0
@@ -317,4 +320,20 @@ def summarise(bundle: list[dict]) -> dict:
         "model_p": round(p, 4),
         "implied_p": round(implied, 4),
         "ev": round(p * (dec - 1) - (1 - p), 4),
+        # Stake sizing, and it wants reading with the caveats attached.
+        #
+        # Kelly is only ever as good as the probability fed to it, and this one
+        # is a product of per-leg estimates, so two errors compound. The legs
+        # come from different games, which is what cross-game selection buys,
+        # but "different game" is not quite "independent" — a cold night moves
+        # every bat on the slate together. Both effects push ``model_p`` above
+        # the truth, and Kelly is asymmetric about that: overstating p
+        # overstakes fast, understating it merely leaves money on the table.
+        #
+        # So the quarter is the number to use, and it is returned already
+        # divided rather than left as a note nobody applies. Full Kelly on a
+        # three-leg card at these prices routinely computes above 30% of
+        # bankroll, which is not a stake, it is a coin flip with extra steps.
+        "kelly": round(pricing.kelly_fraction(p, american), 4),
+        "kelly_quarter": round(pricing.kelly_fraction(p, american) / 4, 4),
     }

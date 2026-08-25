@@ -77,7 +77,6 @@ export interface BatterRow {
   p_hittable: boolean;
   is_hot: boolean;
   bvp_edge: boolean;
-  hand_slump_edge: boolean;
   hittable_sp_edge: boolean;
   tags: string;
   game_time: string;
@@ -135,6 +134,10 @@ export interface BatterScreen {
       model_p: number | null;
       implied_p: number | null;
       ev: number | null;
+      // Already quartered. Full Kelly on these cards routinely lands above
+      // 30% of bankroll, so the quarter is the one to show.
+      kelly: number | null;
+      kelly_quarter: number | null;
     };
     // When the card was first written, and how it settled. The card is frozen
     // before first pitch because the live board can't reproduce it later —

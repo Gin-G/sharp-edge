@@ -129,10 +129,6 @@
     .filter((r) => r.bvp_edge)
     .sort((a, b) => (b.bvp_avg ?? 0) - (a.bvp_avg ?? 0));
 
-  $: handSlumpEdges = (data?.today ?? [])
-    .filter((r) => r.hand_slump_edge)
-    .sort((a, b) => (b.vs_hand_avg ?? 0) - (a.vs_hand_avg ?? 0));
-
   // Hot bats facing a starter who has been suppressing hits. This used to be
   // a veto list; nothing is vetoed now — filtering on the starter measured
   // worse, dropping the two-leg sweep from 58.9% to 52.0% over 129 days. Kept
@@ -143,7 +139,7 @@
       (r) =>
         r.p_sharp &&
         r.is_hot &&
-        (r.bvp_edge || r.hand_slump_edge || r.hittable_sp_edge)
+        (r.bvp_edge || r.hittable_sp_edge)
     )
     .sort((a, b) => (a.p_l3_h9 ?? 99) - (b.p_l3_h9 ?? 99));
 
@@ -152,7 +148,7 @@
   // reach for first, so it stays broken out alongside BvP and hand+slump as
   // board context.
   $: hotVsHittable = (data?.today ?? [])
-    .filter((r) => r.hittable_sp_edge && !r.bvp_edge && !r.hand_slump_edge)
+    .filter((r) => r.hittable_sp_edge && !r.bvp_edge)
     .sort((a, b) => (b.p_l3_h9 ?? 0) - (a.p_l3_h9 ?? 0));
 </script>
 
@@ -196,6 +192,11 @@
             <span class="text-slate-200 font-semibold">{fmtOdds(data.bundle.summary.american)}</span>
             · model {fmtPct(data.bundle.summary.model_p)} vs implied {fmtPct(data.bundle.summary.implied_p)}
             · <span class={evClass(data.bundle.summary.ev)}>EV {fmtEv(data.bundle.summary.ev)}</span>
+            {#if data.bundle.summary.kelly_quarter}
+              · <span class="text-slate-300" title="Quarter-Kelly. Sizing is only as good as the model's probability, and a parlay compounds each leg's error — treat it as a ceiling.">
+                stake {(100 * data.bundle.summary.kelly_quarter).toFixed(1)}%
+              </span>
+            {/if}
             {#if data.bundle.result}
               · <span class="px-1.5 py-0.5 rounded border text-[10px] {data.bundle.result === 'WIN'
                   ? 'bg-emerald-600/20 text-emerald-300 border-emerald-600/30'
@@ -522,54 +523,6 @@
                   <td class="px-4 py-2.5 text-right tabular-nums text-slate-400">{r.bvp_pa}</td>
                   <td class="px-4 py-2.5 text-right tabular-nums text-slate-400">{r.bvp_hits}</td>
                   <td class="px-4 py-2.5 text-right tabular-nums text-slate-300">{fmtAvg(r.recent_avg)}</td>
-                  <td class="px-4 py-2.5 text-right text-slate-400 text-xs">{r.game_time}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-    </section>
-
-    <!-- Hand+Slump edges -->
-    <section class="card overflow-hidden p-0">
-      <div class="px-5 py-4 border-b border-border flex items-baseline justify-between">
-        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-          Hand + Slump Edges
-        </h2>
-        <span class="text-xs text-slate-500">{handSlumpEdges.length} batter{handSlumpEdges.length === 1 ? '' : 's'} ≥.400 vs hand & SP giving up runs or hits (not sharp)</span>
-      </div>
-      {#if handSlumpEdges.length === 0}
-        <div class="px-5 py-6 text-sm text-slate-500">None.</div>
-      {:else}
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="border-b border-border text-xs font-medium text-slate-400 uppercase tracking-wider">
-                <th class="text-left px-4 py-3">Batter</th>
-                <th class="text-left px-4 py-3">Team</th>
-                <th class="text-left px-4 py-3">Opp SP</th>
-                <th class="text-center px-4 py-3">Hand</th>
-                <th class="text-right px-4 py-3">vs Hand AVG</th>
-                <th class="text-right px-4 py-3">PA</th>
-                <th class="text-right px-4 py-3">SP L3 ERA</th>
-                <th class="text-right px-4 py-3">SP L3 H/9</th>
-                <th class="text-right px-4 py-3">SP L3 IP</th>
-                <th class="text-right px-4 py-3">Time</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each handSlumpEdges as r (r.batter + r.opposing_pitcher)}
-                <tr class="border-b border-border/50 hover:bg-surface-600/30">
-                  <td class="px-4 py-2.5 text-slate-200 font-medium">{r.batter}</td>
-                  <td class="px-4 py-2.5 text-slate-400">{r.team}</td>
-                  <td class="px-4 py-2.5 text-slate-300">{r.opposing_pitcher}</td>
-                  <td class="px-4 py-2.5 text-center text-slate-400">{r.p_hand ?? '—'}</td>
-                  <td class="px-4 py-2.5 text-right tabular-nums text-emerald-400 font-medium">{fmtAvg(r.vs_hand_avg)}</td>
-                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-400">{r.vs_hand_pa}</td>
-                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-300">{fmtNum(r.p_l3_era)}</td>
-                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-300">{fmtNum(r.p_l3_h9)}</td>
-                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-400">{fmtNum(r.p_l3_ip, 1)}</td>
                   <td class="px-4 py-2.5 text-right text-slate-400 text-xs">{r.game_time}</td>
                 </tr>
               {/each}

@@ -356,7 +356,7 @@ def test_a_batter_with_no_edge_tag_at_all_can_still_be_a_pick(slate, monkeypatch
     res = batters.screen_for_date(TODAY, verbose=False)
     assert not res.today["bvp_edge"].any()
     assert not res.today["hittable_sp_edge"].any()
-    assert not res.today["hand_slump_edge"].any()
+    assert "hand_slump_edge" not in res.today.columns   # retired: fired 0/30,783
     assert len(res.picks) == 1
 
 

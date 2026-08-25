@@ -7,15 +7,24 @@ Returns three frames:
              splits vs the opposing SP's handedness, BvP, and the SP's
              last-3-starts form — with edge flags so you can slice it
              however you want
-  picks    : hot bats facing an advantageous matchup (≥1 edge type) whose
-             starter isn't in a hit-suppressing run
+  picks    : the board ranked by the model's probability that the batter
+             records a hit, one per game, truncated to MAX_PICKS_PER_DAY
 
 Edges:
-  bvp_edge       : bvp_avg ≥ min_bvp_avg & bvp_pa ≥ min_bvp_pa
-  hand_slump_edge: vs_hand_avg ≥ min_hand_avg & vs_hand_pa ≥ min_hand_pa
-                   & the opposing SP is giving up runs (last-3 ERA ≥
-                   min_slump_era) or hits (last-3 H/9 ≥ min_hittable_h9 or
-                   BAA ≥ min_hittable_baa) — and is not sharp
+  bvp_edge         : bvp_avg ≥ min_bvp_avg & bvp_pa ≥ min_bvp_pa
+  hittable_sp_edge : a hot bat facing a HITTABLE starter with ≥3 starts
+
+  These are **labels, not filters**. They ride along on every row of
+  ``today`` so the board can be sliced by them, and the odds archive records
+  them, but they select nothing: measured over 129 days the tagged pool swept
+  49.6% of two-leg days against 58.1% for the untagged board. See the ranking
+  block in ``screen_for_date``.
+
+  BvP in particular does not survive contact. A hot bat carrying the edge hit
+  65.0% (n=391) against 62.6% for a hot bat without it — 2.4 points on a
+  sample whose 95% interval is ±4.8 — and it is not monotone in sample size
+  (61.3% at 1-5 PA, 64.8% at 5-10, 63.7% at 10-20). It is noise, kept only as
+  a label because it is the number people reach for first.
 
 Starting-pitcher form (last 3 starts):
   The bet settles on "did this batter get a hit", so the starter's recent
@@ -481,9 +490,6 @@ def screen_today(
     min_recent_ab: int = 10,
     min_bvp_avg: float = 0.400,
     min_bvp_pa: int = 5,
-    min_hand_avg: float = 0.400,
-    min_hand_pa: int = 50,
-    min_slump_era: float = 5.00,
     max_sharp_h9: float = MAX_SHARP_H9,
     max_sharp_baa: float = MAX_SHARP_BAA,
     min_hittable_h9: float = MIN_HITTABLE_H9,
@@ -505,9 +511,6 @@ def screen_today(
         min_recent_ab=min_recent_ab,
         min_bvp_avg=min_bvp_avg,
         min_bvp_pa=min_bvp_pa,
-        min_hand_avg=min_hand_avg,
-        min_hand_pa=min_hand_pa,
-        min_slump_era=min_slump_era,
         max_sharp_h9=max_sharp_h9,
         max_sharp_baa=max_sharp_baa,
         min_hittable_h9=min_hittable_h9,
@@ -552,9 +555,6 @@ def screen_for_date(
     min_recent_ab: int = 10,
     min_bvp_avg: float = 0.400,
     min_bvp_pa: int = 5,
-    min_hand_avg: float = 0.400,
-    min_hand_pa: int = 50,
-    min_slump_era: float = 5.00,
     max_sharp_h9: float = MAX_SHARP_H9,
     max_sharp_baa: float = MAX_SHARP_BAA,
     min_hittable_h9: float = MIN_HITTABLE_H9,
@@ -741,24 +741,12 @@ def screen_for_date(
             and bvp["avg"] >= min_bvp_avg
             and bvp["pa"] >= min_bvp_pa
         )
-        # "Slumping" now means giving up runs *or* giving up hits — but never
-        # while suppressing hits. A 5.00+ ERA built on homers used to qualify
-        # a pitcher who was otherwise carving lineups up; that's the case this
-        # screen kept losing.
-        p_slumping = (
-            p_l3["starts"] >= 3
-            and not p_sharp
-            and (
-                (p_l3["era"] is not None and p_l3["era"] >= min_slump_era)
-                or p_hittable
-            )
-        )
-        hand_slump_edge = (
-            vs_hand_avg is not None
-            and vs_hand_avg >= min_hand_avg
-            and vs_hand_pa >= min_hand_pa
-            and p_slumping
-        )
+        # hand_slump_edge used to be computed here and is gone. It required a
+        # .400 career average against the hand over 50+ plate appearances, and
+        # that bar is close to impossible: across 129 days and 30,783 settled
+        # board rows it fired exactly **zero** times. It was not a rule that
+        # rarely triggered, it was a rule that could not trigger, and it cost a
+        # column, a tag, three tuning knobs and a table on the page.
         # Hot bat vs. a starter who has been getting hit — no BvP or career
         # split required, so it reaches far more of the board than the two
         # edges above. On by default since run 1 of the backtest, which is also
@@ -770,8 +758,6 @@ def screen_for_date(
         tags = []
         if bvp_edge:
             tags.append("BvP")
-        if hand_slump_edge:
-            tags.append("HAND+SLUMP")
         if hittable_sp_edge:
             tags.append("HOT+HITTABLE")
         if p_sharp:
@@ -807,7 +793,6 @@ def screen_for_date(
             "p_hittable": p_hittable,
             "is_hot": is_hot,
             "bvp_edge": bvp_edge,
-            "hand_slump_edge": hand_slump_edge,
             "hittable_sp_edge": hittable_sp_edge,
             "tags": ",".join(tags),
             "game_time": _local_time_str(gtime),
@@ -910,7 +895,7 @@ def simple_picks(today_df: pd.DataFrame) -> pd.DataFrame:
     if today_df is None or today_df.empty:
         return pd.DataFrame()
     mask = today_df["is_hot"] & (
-        today_df["bvp_edge"] | today_df["hand_slump_edge"]
+        today_df["bvp_edge"]
     )
     picks = today_df[mask].copy()
     if picks.empty:

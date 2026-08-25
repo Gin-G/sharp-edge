@@ -191,7 +191,6 @@ def is_screen_pick(rec: dict) -> bool:
         rec.get("is_hot")
         and (
             rec.get("bvp_edge")
-            or rec.get("hand_slump_edge")
             or rec.get("hittable_sp_edge")
         )
         and not rec.get("p_sharp")
