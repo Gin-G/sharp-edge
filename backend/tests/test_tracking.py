@@ -18,6 +18,8 @@ from sharp_edge.db import create_database
 
 YESTERDAY = date.today() - timedelta(days=1)
 TWO_DAYS_AGO = date.today() - timedelta(days=2)
+# No box score and no Statcast events — an ungradeable day.
+THREE_DAYS_AGO = date.today() - timedelta(days=3)
 
 
 def _synthetic_statcast() -> pd.DataFrame:
@@ -465,12 +467,44 @@ def test_one_losing_leg_kills_the_ticket(tracked_db):
 
 
 def test_a_card_stays_pending_until_every_leg_is_graded(tracked_db):
-    """333 never played and has no box-score line, so it cannot be graded and
-    the card must not be settled on a partial read."""
-    today = date.today()
-    tracking.persist_screen_result("batter", _batter_picks(111, 333), today)
-    tracking.freeze_parlay(today, _legs(111, 333), _SUMMARY)
+    """A day with neither a box score nor a Statcast plate appearance cannot
+    be told apart from a scratch, so the card must not settle on a partial
+    read. THREE_DAYS_AGO has no data of either kind in the fixture."""
+    tracking.persist_screen_result("batter", _batter_picks(111, 333), THREE_DAYS_AGO)
+    tracking.freeze_parlay(THREE_DAYS_AGO, _legs(111, 333), _SUMMARY)
     tracking.resolve_parlays()
+    assert tracking.get_parlay(THREE_DAYS_AGO)["result"] is None
+
+
+def test_a_leg_missing_from_the_picks_table_is_graded_off_the_box_score(tracked_db):
+    """The card outlives the pick rows it was built from.
+
+    An intra-day re-screen persists with replace=True, so a leg the afternoon
+    board dropped loses its pick row — and a leg with no row could never be
+    graded, which pinned the real 2026-08-23 card in pending for good. Here
+    222 is frozen onto the card but absent from the picks table; the box score
+    settles it anyway (2 PA, no hit) and the ticket dies as it should.
+    """
+    tracking.persist_screen_result("batter", _batter_picks(111), TWO_DAYS_AGO)
+    tracking.freeze_parlay(TWO_DAYS_AGO, _legs(111, 222), _SUMMARY)
+    _grade({111: "WIN"}, TWO_DAYS_AGO)
+    tracking.resolve_parlays()
+    par = tracking.get_parlay(TWO_DAYS_AGO)
+    assert par["result"] == "LOSS"
+    assert par["legs_won"] == 1 and par["legs_settled"] == 2
+
+
+def test_todays_card_is_never_settled(tracked_db, monkeypatch):
+    """Grading straight off the box score has to stop at today's card, or a
+    game that hasn't been played reads as "no plate appearance" — a VOID — and
+    tonight's ticket settles this afternoon."""
+    today = date.today()
+    monkeypatch.setattr(
+        tracking, "_boxscore_batting_for_date",
+        lambda dstr: {111: {"pa": 3, "hits": 1, "hr": 0}} if dstr == today.isoformat() else {},
+    )
+    tracking.freeze_parlay(today, _legs(111, 222), _SUMMARY)
+    assert tracking.resolve_parlays() == {"pending": 0, "settled": 0}
     assert tracking.get_parlay(today)["result"] is None
 
 

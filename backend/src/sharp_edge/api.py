@@ -693,9 +693,15 @@ async def picks_parlay_record(since: Optional[str] = None):
 @app.post("/picks/resolve")
 async def picks_resolve():
     """Settle any unresolved picks from before today against actual results.
-    Also runs automatically after each daily screen warm-up."""
+    Also runs automatically after each daily screen warm-up.
+
+    Cards settle here too. Grading the legs and leaving the ticket they belong
+    to unsettled is the kind of split that hides a stuck card for days, and
+    the warm-up already runs the pair together."""
     tracking = _get_tracking()
-    return await asyncio.to_thread(tracking.resolve_pending)
+    picks = await asyncio.to_thread(tracking.resolve_pending)
+    cards = await asyncio.to_thread(tracking.resolve_parlays)
+    return {**picks, "parlays": cards}
 
 
 @app.post("/picks/regenerate-today")

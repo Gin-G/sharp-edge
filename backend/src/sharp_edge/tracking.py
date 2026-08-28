@@ -33,7 +33,7 @@ import threading
 import time
 from collections import defaultdict
 from datetime import date, timedelta
-from typing import Optional
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -325,8 +325,25 @@ def resolve_parlays() -> dict:
     dead. Voided legs are dropped rather than counted as losses, which is how
     a sportsbook treats a scratched player — the parlay reprices down and the
     rest of it stands. A card whose legs *all* voided is itself VOID.
+
+    Legs are read from the picks table where they're there, but the card
+    cannot depend on that table alone. An intra-day re-screen persists with
+    ``replace=True``, so a leg the afternoon board dropped — its game had
+    started, or its probable was swapped — loses its pick row, and a leg with
+    no row can never be graded. One such leg pinned 2026-08-23's six-leg card
+    in pending for good, five days after it settled. The card is frozen
+    precisely because the board can't reproduce it, so whatever the table is
+    missing is graded straight off the box score instead.
+
+    Only cards from before today are touched. Grading direct from the box
+    score would otherwise settle this evening's card off a game that hasn't
+    been played, reading "no plate appearance yet" as VOID.
     """
-    pending = [p for p in _run_db(_db.list_parlays()) if not p.get("result")]
+    today_iso = date.today().isoformat()
+    pending = [
+        p for p in _run_db(_db.list_parlays())
+        if not p.get("result") and p["pick_date"] < today_iso
+    ]
     settled = 0
     for par in pending:
         pick_date = par["pick_date"]
@@ -339,6 +356,15 @@ def resolve_parlays() -> dict:
                                             until=pick_date))
         }
         outcomes = [picks.get(l["batter_id"]) for l in legs]
+        orphans = [
+            l["batter_id"] for l, o in zip(legs, outcomes) if o is None
+        ]
+        if orphans:
+            graded = _grade_batters(pick_date, orphans, "batter")
+            outcomes = [
+                o if o is not None else (graded.get(l["batter_id"]) or {}).get("result")
+                for l, o in zip(legs, outcomes)
+            ]
         if any(o is None for o in outcomes):
             continue                      # a leg hasn't been graded yet
         decided = [o for o in outcomes if o != "VOID"]
@@ -376,6 +402,59 @@ def parlay_track_record(since: Optional[str] = None) -> dict:
     }
 
 
+def _grade_batters(
+    dstr: str, batter_ids: Iterable[int], screen: str
+) -> dict[int, dict]:
+    """Grade batters for one past date against what actually happened.
+
+    Returns ``{batter_id: {result, hr_actual, hits_actual, pa_actual}}``. HR
+    picks win on >=1 home run, batter picks on >=1 hit. Sportsbook void rules
+    apply: a player who was not in the starting lineup is VOID even if he
+    pinch-hit, as is a starter with no plate appearance. Where lineup data is
+    unavailable, "recorded a plate appearance" stands in for "started".
+
+    An id is *absent from the result* when the day hasn't published yet — with
+    no box score and no Statcast plate appearance there is no telling a real
+    VOID from data still in flight, so the caller leaves it ungraded for a
+    later sweep rather than freezing a guess.
+    """
+    starters = _starters_for_date(dstr)
+    batting = _boxscore_batting_for_date(dstr)
+    box_ok = bool(batting)  # box scores loaded => authoritative
+    # Statcast is only the fallback when the box score is missing.
+    ev = None if box_ok else _events_for_date(date.fromisoformat(dstr))
+    out: dict[int, dict] = {}
+    for bid in batter_ids:
+        if box_ok:
+            # Authoritative line. A batter absent from the box score
+            # genuinely took no PA (pa=0 -> VOID below).
+            line = batting.get(bid)
+            pa = line["pa"] if line else 0
+            hr = line["hr"] if line else 0
+            hits = line["hits"] if line else 0
+        else:
+            sub = ev[ev["batter"] == bid]
+            pa = int(len(sub))
+            hr = int((sub["events"] == "home_run").sum()) if pa else 0
+            hits = int(sub["events"].isin(_HIT_EVENTS).sum()) if pa else 0
+            if pa == 0:
+                continue
+        started = bid in starters if starters else pa > 0
+        if not started or pa == 0:
+            outcome = "VOID"
+        elif screen == "hr":
+            outcome = "WIN" if hr >= 1 else "LOSS"
+        else:
+            outcome = "WIN" if hits >= 1 else "LOSS"
+        out[bid] = {
+            "result": outcome,
+            "hr_actual": hr,
+            "hits_actual": hits,
+            "pa_actual": pa,
+        }
+    return out
+
+
 def resolve_pending() -> dict:
     """Settle every unresolved pick from before today against what actually
     happened. HR picks win on ≥1 home run, batter picks on ≥1 hit.
@@ -397,47 +476,10 @@ def resolve_pending() -> dict:
 
             resolved = 0
             for dstr in sorted(by_date):
-                starters = _starters_for_date(dstr)
-                batting = _boxscore_batting_for_date(dstr)
-                box_ok = bool(batting)  # box scores loaded => authoritative
-                # Statcast is only the fallback when the box score is missing.
-                ev = None if box_ok else _events_for_date(date.fromisoformat(dstr))
-                results = []
-                for r in by_date[dstr]:
-                    bid = r["batter_id"]
-                    if box_ok:
-                        # Authoritative line. A batter absent from the box
-                        # score genuinely took no PA (pa=0 -> VOID below).
-                        line = batting.get(bid)
-                        pa = line["pa"] if line else 0
-                        hr = line["hr"] if line else 0
-                        hits = line["hits"] if line else 0
-                    else:
-                        sub = ev[ev["batter"] == bid]
-                        pa = int(len(sub))
-                        hr = int((sub["events"] == "home_run").sum()) if pa else 0
-                        hits = int(sub["events"].isin(_HIT_EVENTS).sum()) if pa else 0
-                        if pa == 0:
-                            # No box score and no Statcast PA — can't tell a
-                            # real VOID from data that simply hasn't published
-                            # yet. Leave the pick pending (skip) so a later
-                            # sweep settles it, rather than freezing a wrong
-                            # VOID: resolve only revisits result IS NULL rows.
-                            continue
-                    started = bid in starters if starters else pa > 0
-                    if not started or pa == 0:
-                        outcome = "VOID"
-                    elif screen == "hr":
-                        outcome = "WIN" if hr >= 1 else "LOSS"
-                    else:
-                        outcome = "WIN" if hits >= 1 else "LOSS"
-                    results.append({
-                        "batter_id": bid,
-                        "result": outcome,
-                        "hr_actual": hr,
-                        "hits_actual": hits,
-                        "pa_actual": pa,
-                    })
+                graded = _grade_batters(
+                    dstr, [r["batter_id"] for r in by_date[dstr]], screen
+                )
+                results = [{"batter_id": bid, **g} for bid, g in graded.items()]
                 resolved += _run_db(_db.update_pick_results(screen, dstr, results))
             summary[screen] = {"dates": len(by_date), "resolved": resolved}
             if by_date:
