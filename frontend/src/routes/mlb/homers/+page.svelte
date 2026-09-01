@@ -80,12 +80,9 @@
 
 <div class="space-y-6">
   <div class="flex items-center justify-between">
-    <div>
-      <h1 class="text-xl font-bold text-white">Home Runs</h1>
-      <p class="text-sm text-slate-400 mt-0.5">
-        Today's MLB HR probability screen — power matchups, barrels, park boosts
-      </p>
-    </div>
+    <p class="text-sm text-slate-400">
+      Today's MLB HR probability screen — power matchups, barrels, park boosts
+    </p>
     <button
       class="px-3 py-1.5 rounded-lg text-sm font-medium bg-surface-700 text-slate-300 hover:bg-surface-600 disabled:opacity-50"
       on:click={() => load(true)}

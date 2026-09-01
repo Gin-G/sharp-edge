@@ -266,3 +266,143 @@ export interface TrackRecord {
   daily: ({ date: string } & TrackRecordBucket)[];
   picks: TrackRecordPick[];
 }
+
+// --- NFL ---
+
+/** One posted player prop, priced.
+ *
+ * Both gaps are here on purpose. `raw_gap` is the projection minus the line,
+ * which is the rule as originally stated; `residual` is the same thing after
+ * the week's projections are rescaled onto the market's scale. They disagree
+ * a lot — the raw one fires UNDER on nearly every star, because the projection
+ * model shrinks toward the mean and the market doesn't — so only `residual`
+ * drives `signal`, and `raw_signal` is kept alongside it to be compared on
+ * live results rather than on an argument.
+ */
+export interface NflProp {
+  market: 'receiving_yards' | 'receptions' | 'rushing_yards' | 'passing_yards';
+  player: string;
+  key: string;
+  player_id: string | null;
+  position: string | null;
+  team: string | null;
+  event: string | null;
+  fd_event_id: string | null;
+  kickoff: string | null;
+
+  line: number;
+  projection: number;
+  adjusted: number;
+  raw_gap: number;
+  residual: number;
+  threshold: number;
+  signal: 'OVER' | 'UNDER' | '';
+  raw_signal: 'OVER' | 'UNDER' | '';
+  bettable: boolean;
+  prediction_type: string | null;
+  exp_games: number | null;
+
+  /** Before anchoring to the market — kept visible because the two can differ
+   *  wildly and the gap is the honest measure of how much is being assumed. */
+  model_p_raw: number;
+  model_p_over: number;
+  over_odds: number | null;
+  under_odds: number | null;
+  fair_p_over: number | null;
+  fair_p_under: number | null;
+  overround: number | null;
+
+  side: 'OVER' | 'UNDER' | null;
+  model_p: number | null;
+  odds: number | null;
+  implied_p?: number | null;
+  fair_p?: number | null;
+  ev: number | null;
+  edge_pts: number | null;
+  kelly: number | null;
+
+  fd_market_id: string | null;
+  over_selection_id: number | null;
+  under_selection_id: number | null;
+  sgm: boolean;
+}
+
+export interface NflTd {
+  player: string;
+  key: string;
+  player_id: string | null;
+  position: string | null;
+  team: string | null;
+  event: string | null;
+  fd_event_id: string | null;
+  kickoff: string | null;
+  projected_tds: number | null;
+  /** Shifted so the game's field totals what the book's does, which is what
+   *  makes it comparable with `implied_p` — both carry the same margin. */
+  model_p: number;
+  model_p_unanchored: number | null;
+  odds: number | null;
+  implied_p: number | null;
+  edge_pts: number | null;
+  /** Always null. This market's margin can't be stripped, so a dollar EV
+   *  would read positive across most of the board and mean nothing. */
+  ev: null;
+  kelly: null;
+  thin: boolean;
+  fd_market_id: string | null;
+  fd_selection_id: number | null;
+  sgm: boolean;
+}
+
+export interface NflGameMarket {
+  market: 'moneyline' | 'total' | 'spread';
+  event: string | null;
+  fd_event_id: string | null;
+  kickoff: string | null;
+  fd_market_id: string | null;
+  runners: {
+    name: string | null;
+    odds: number | null;
+    handicap: number | null;
+    fd_selection_id: number | null;
+  }[];
+}
+
+/** How far the week's projections had to be moved to sit on the market's
+ *  scale. A slope well below 1 is the projection model shrinking toward the
+ *  mean; it is the reason `residual` exists. */
+export interface NflFit {
+  slope: number | null;
+  intercept: number | null;
+  n: number;
+}
+
+/** The log-odds shift applied to centre our probabilities on the market's,
+ *  and how much of the remaining disagreement is kept. `shrink` is a prior,
+ *  not a fitted number — see `nfl/model.py`. */
+export interface NflProbFit {
+  offset: number | null;
+  shrink: number;
+  n: number;
+}
+
+export interface NflScreen {
+  season: number;
+  week: number;
+  /** Projections computed before kickoff of week 1 — priors off last season
+   *  and rookie models, with no in-season usage behind them. */
+  preseason: boolean;
+  props: NflProp[];
+  signals: NflProp[];
+  tds: NflTd[];
+  games: NflGameMarket[];
+  fits: Record<string, NflFit>;
+  prob_fits: Record<string, NflProbFit>;
+  thresholds: Record<string, number>;
+  bettable: string[];
+  passing_yards_caveat: string;
+  odds: { age_seconds: number | null; error: string | null };
+  unmatched: string[];
+  built_at: number;
+  stale?: boolean;
+}

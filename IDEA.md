@@ -32,12 +32,15 @@ HTML comments are stripped on read, so this block never reaches the board.
 -->
 
 Sports betting analytics platform: syncs bet history from the books, runs daily
-MLB screens (batter hits, home runs), tracks every pick to a settled outcome, and
-exposes the whole thing to Claude via chat and MCP. Svelte + FastAPI, SQLite for
-dev and CloudNativePG in prod, deployed to K3s at sharp-edge.nickknows.net.
+MLB screens (batter hits, home runs) and a weekly NFL prop board, tracks every
+pick to a settled outcome, and exposes the whole thing to Claude via chat and
+MCP. Svelte + FastAPI, SQLite for dev and CloudNativePG in prod, deployed to
+K3s at sharp-edge.nickknows.net.
 
-Next big push is breaking the FanDuel-only assumption: a sportsbook provider
-interface with DraftKings first, then line shopping across books.
+The NFL side reuses the nfl_projections model already running in NFL-API and
+prices it against FanDuel's board; see EXPERIMENTS_NFL.md. Next big push is
+breaking the FanDuel-only assumption: a sportsbook provider interface with
+DraftKings first, then line shopping across books.
 
 ## Todos
 
@@ -84,5 +87,13 @@ interface with DraftKings first, then line shopping across books.
 - [x] Kelly sizing on the card — quarter-Kelly stake shown with the parlay price
 - [ ] Scheduled sync as a K8s CronJob instead of startup-only warm-up
 - [ ] NBA model: nba_api PRA projections
-- [ ] NFL model integration reusing the existing nfl_data_py projections
+- [x] Group the MLB screens behind one MLB tab with a screen dropdown, NFL alongside it
+- [x] NFL model integration reusing the existing nfl_data_py projections
+- [x] NFL prop board: yardage, receptions, anytime TD priced off NFL-API projections vs FanDuel lines
+- [x] Rescale projections onto the market's scale — raw gaps read model shrinkage as signal and fade every star
+- [x] Moneyline measured and left alone: closing line is calibrated, every naive strategy loses the vig
+- [ ] Record NFL picks weekly and settle them — nothing on the NFL board has a track record yet
+- [ ] Archive NFL closing lines the way data/odds/ does for MLB, so the shrink factors can be fit instead of guessed
+- [ ] NFL weekly card (one leg per game) once there is a track record to size it from
+- [ ] Refit the passing-yards model — it runs 4-5pts overconfident and is off the card until it doesn't
 - [ ] Deduplicate bets across books so the same wager placed twice does not double-count P/L

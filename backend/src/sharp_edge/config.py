@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # a fixed user_id rather than HTTP sessions.
     mcp_user_id: str = "mcp-local"
 
+    # NFL projections come from the NFL-API service rather than being refit
+    # here — it already runs the nfl_projections model on a weekly cron and
+    # holds the schedule with nflverse's closing lines. Public read-only API,
+    # so no credential; override for a local instance.
+    nfl_api_base: str = "https://nfl-api.nickknows.net"
+
     @property
     def is_postgres(self) -> bool:
         return self.database_url.startswith("postgresql")

@@ -53,6 +53,8 @@ sharp-edge-mcp
 | GET | `/bets/calendar` | Daily P/L for heatmap |
 | POST | `/bets/score` | Score a proposed bet |
 | GET | `/bets/insights` | AI-generated insights |
+| GET | `/nfl/screen` | This week's NFL prop board, priced |
+| GET | `/nfl/screen/status` | NFL board warm-up state |
 | POST | `/chat` | Claude chat with tools |
 
 ## MCP Tools (Claude Desktop/Code)
@@ -94,14 +96,30 @@ helm install sharp-edge ./helm/sharp-edge \
 
 Stack: CloudNativePG (PostgreSQL), ExternalSecrets (OpenBao), Cilium ingress, cert-manager TLS, Rook-Ceph storage.
 
+## NFL props
+
+The football board reuses the projection model that already runs in
+[NFL-API](https://nfl-api.nickknows.net) rather than fitting one here, prices it
+against FanDuel's public odds, and flags where the two disagree by more than the
+owner's threshold (10 yards, 2 receptions).
+
+One thing about it is worth knowing before reading a number off it: the
+projections regress toward the mean and betting lines don't, so a raw
+"projection minus line" gap is largely an artefact — read that way the rule
+fires UNDER on nearly every star. The screen refits the projection→line
+relationship weekly and measures the signal on the residual. Both numbers are
+shown. See `EXPERIMENTS_NFL.md` for the measurement, and for why the moneyline
+is listed but never picked.
+
+```bash
+# Refit the prop models against nflverse history and print the coefficients
+python backend/scripts/calibrate_nfl.py
+```
+
 ## TODO
 
-- [ ] Frontend (Svelte): dashboard, calendar heatmap, chat panel
-- [ ] FanDuel login flow (capture /sessions POST body format)
-- [ ] MLB model (pybaseball: batter-vs-pitcher splits)
 - [ ] NBA model (nba_api: PRA projections)
-- [ ] NFL model integration (existing nfl_data_py models)
+- [ ] Record and settle NFL picks — the board has no track record yet
+- [ ] Archive NFL closing lines so the disagreement shrink can be fit, not guessed
 - [ ] Closing line value tracking
-- [ ] Bankroll management / Kelly criterion
 - [ ] Scheduled sync (CronJob in K8s)
-- [ ] GitHub Actions CI/CD → Harbor registry

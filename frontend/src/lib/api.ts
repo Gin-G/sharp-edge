@@ -1,4 +1,4 @@
-import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord, ParlayRecord } from './types';
+import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord, ParlayRecord, NflScreen } from './types';
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || 'http://localhost:8000';
 
@@ -200,4 +200,15 @@ export function importCsv(csvPath: string): Promise<{ status: string; bets_impor
     method: 'POST',
     body: JSON.stringify({ csv_path: csvPath }),
   });
+}
+
+export function getNflScreen(force = false): Promise<NflScreen> {
+  return req<NflScreen>(`/nfl/screen${force ? '?force=true' : ''}`);
+}
+
+export function getNflScreenStatus(): Promise<BatterScreenStatus & {
+  season: number | null;
+  week: number | null;
+}> {
+  return req('/nfl/screen/status');
 }

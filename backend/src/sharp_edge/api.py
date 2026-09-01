@@ -648,6 +648,64 @@ async def homer_screen_status():
 
 
 # ------------------------------------------------------------------
+# NFL — weekly prop board (not user-scoped — public data)
+# ------------------------------------------------------------------
+
+@app.get("/nfl/screen")
+async def nfl_screen(force: bool = False):
+    """This week's NFL prop board: projections against FanDuel's posted lines.
+
+    Every row carries both the raw projection-minus-line gap and the residual
+    after the week's projections are rescaled onto the market's scale. Only
+    the residual drives ``signal``; the raw one is there because the two
+    disagree a lot and the difference is worth watching rather than trusting
+    — see ``nfl.model`` for the measurement.
+
+    Backed by a per-week cache warmed in the background. A cold process
+    returns 503 with Retry-After so the frontend polls, exactly like the
+    batter screen; once warm every call is instant.
+    """
+    try:
+        from .nfl import screen as nfl
+    except ImportError as e:
+        raise HTTPException(500, f"NFL extras not installed: {e}")
+
+    board = nfl.get_cached()
+    if board is None or force:
+        nfl.warm_async(force=force)
+        status = nfl.warm_status()
+        if board is None:
+            if status["last_error"]:
+                raise HTTPException(500, f"board build failed: {status['last_error']}")
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=503,
+                headers={"Retry-After": "10"},
+                content={
+                    "status": "warming",
+                    "elapsed_seconds": status["elapsed_seconds"],
+                    "message": "Building this week's NFL board — try again shortly.",
+                },
+            )
+
+    # Self-guarded: a cheap no-op unless the board has aged past its TTL, so
+    # mid-week line moves land without a reader ever waiting for them.
+    nfl.warm_async()
+    payload = nfl.as_payload(board)
+    payload["stale"] = bool(nfl.warm_status().get("stale"))
+    return payload
+
+
+@app.get("/nfl/screen/status")
+async def nfl_screen_status():
+    try:
+        from .nfl import screen as nfl
+    except ImportError:
+        return {"available": False}
+    return {"available": True, **nfl.warm_status()}
+
+
+# ------------------------------------------------------------------
 # Picks tracking — persisted screen picks vs actual outcomes (public)
 # ------------------------------------------------------------------
 
