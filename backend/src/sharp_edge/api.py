@@ -683,7 +683,13 @@ async def nfl_screen(force: bool = False):
     if board is None or force:
         nfl.warm_async(force=force)
         status = nfl.warm_status()
-        if board is None:
+        # A forced rebuild must not serve — or freeze — the board it was asked
+        # to replace. Returning the stale one here looks harmless and is not:
+        # the freeze happens further down, so `?force=true` after an upstream
+        # projection fix wrote the *pre-fix* card and made it permanent, since
+        # the card insert is deliberately once-per-week. Answer 503 and let the
+        # caller poll for the new board instead.
+        if board is None or force:
             if status["last_error"]:
                 raise HTTPException(500, f"board build failed: {status['last_error']}")
             from fastapi.responses import JSONResponse

@@ -560,3 +560,23 @@ def test_roi_is_reported_next_to_hit_rate():
     b = nfl_tracking._bucket(rows)
     assert b["hit_rate"] == 60.0
     assert b["roi"] < 0
+
+
+def test_forced_rebuild_must_not_serve_the_stale_board():
+    """The bug that froze week 1 from pre-fix projections.
+
+    `?force=true` with a cached board kicked off a rebuild and then returned —
+    and froze — the board it had just been asked to replace. Because the card
+    insert is once per week, that made the wrong card permanent. The endpoint
+    must answer 503 while a forced rebuild is in flight.
+
+    Asserted on the endpoint's source rather than through a live call because
+    the failure is a branch condition, and it is the condition that regressed.
+    """
+    import inspect
+    from sharp_edge import api
+
+    src = inspect.getsource(api.nfl_screen)
+    guard = src.split("nfl.warm_async(force=force)", 1)[1]
+    # The 503 branch must trigger on a forced rebuild, not only a cold cache.
+    assert "if board is None or force:" in guard
