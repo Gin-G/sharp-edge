@@ -580,3 +580,10 @@ def test_forced_rebuild_must_not_serve_the_stale_board():
     guard = src.split("nfl.warm_async(force=force)", 1)[1]
     # The 503 branch must trigger on a forced rebuild, not only a cold cache.
     assert "if board is None or force:" in guard
+
+
+def test_missing_season_file_is_a_status_not_an_error():
+    """nflverse only publishes a season once it has games, so every settlement
+    run before the first Sunday 404s. Reporting that as an error would have the
+    daily job crying wolf all preseason."""
+    assert issubclass(nfl_tracking.ActualsNotPublished, Exception)

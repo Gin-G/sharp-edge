@@ -139,6 +139,10 @@ async def freeze_week(payload: dict, source: str = "live") -> dict:
 # Settlement
 # ---------------------------------------------------------------------------
 
+class ActualsNotPublished(Exception):
+    """nflverse has no file for this season yet — normal before week 1."""
+
+
 def _load_actuals(season: int, week: int):
     """nflverse weekly stats for one week, keyed by normalised name.
 
@@ -147,10 +151,23 @@ def _load_actuals(season: int, week: int):
     fitting on another is how a track record quietly stops meaning anything.
     It lands a day or two after the games, which is why settlement is a
     separate pass rather than part of the board.
+
+    A 404 is not a failure. nflverse only publishes a season's file once that
+    season has games in it, so every settlement run before the first Sunday
+    gets one — and the daily job would otherwise report an error every day of
+    the preseason, training whoever reads it to ignore the alert that matters.
     """
     import pandas as pd
+    from urllib.error import HTTPError
 
-    df = pd.read_parquet(NFLVERSE_WEEKLY.format(season=season))
+    try:
+        df = pd.read_parquet(NFLVERSE_WEEKLY.format(season=season))
+    except HTTPError as e:
+        if e.code == 404:
+            raise ActualsNotPublished(
+                f"nflverse has not published {season} weekly stats yet"
+            ) from e
+        raise
     df = df[(df.week == week) & (df.season_type == "REG")]
     out = {}
     for _, r in df.iterrows():
@@ -194,12 +211,17 @@ async def settle_week(season: int, week: int) -> dict:
     import asyncio
     try:
         actuals = await asyncio.to_thread(_load_actuals, season, week)
+    except ActualsNotPublished as e:
+        # Expected before the season's first games — a status, not a failure.
+        return {"season": season, "week": week, "settled": 0,
+                "pending": len(picks), "message": str(e)}
     except Exception as e:
         logger.warning("[nfl-track] actuals unavailable for %s wk%s: %s", season, week, e)
         return {"season": season, "week": week, "settled": 0, "error": str(e)}
     if not actuals:
         return {"season": season, "week": week, "settled": 0,
-                "message": "no actuals published yet"}
+                "pending": len(picks),
+                "message": f"week {week} not in the published data yet"}
 
     counts: dict = {"WIN": 0, "LOSS": 0, "PUSH": 0, "VOID": 0}
     for p in picks:
