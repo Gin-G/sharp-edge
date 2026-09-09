@@ -87,24 +87,41 @@ jobs:
             https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
-      - name: Update image tags in values.yaml
-        env:
-          TAG: ${{ needs.build.outputs.tag }}
-        run: |
-          yq -i ".backend.image.tag = \"${TAG}\"" helm/sharp-edge/values.yaml
-          yq -i ".frontend.image.tag = \"${TAG}\"" helm/sharp-edge/values.yaml
-
-      - name: Commit and push
+      # Pull first, then write the tag, then push — in that order, and it
+      # matters. The old step wrote the tag, committed, and *then* rebased onto
+      # whatever had landed meanwhile. Two pushes close together therefore
+      # produced two bump commits editing the same line of values.yaml, and the
+      # rebase conflicted every time. That is not a rare race: it happened the
+      # first day two commits went out minutes apart, and the failure is quiet
+      # in the worst way — the image builds and pushes fine, only the tag never
+      # lands, so the cluster keeps running the previous build while CI shows a
+      # red square nobody connects to a stale deploy.
+      - name: Bump image tags and push
         env:
           TAG: ${{ needs.build.outputs.tag }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add helm/sharp-edge/values.yaml
-          if git diff --staged --quiet; then
-            echo "values.yaml unchanged — nothing to commit"
-            exit 0
-          fi
-          git commit -m "ci: bump images to ${TAG}"
-          git pull --rebase --autostash
-          git push
+
+          for attempt in 1 2 3; do
+            git fetch origin "${GITHUB_REF_NAME}"
+            git reset --hard "origin/${GITHUB_REF_NAME}"
+
+            yq -i ".backend.image.tag = \"${TAG}\"" helm/sharp-edge/values.yaml
+            yq -i ".frontend.image.tag = \"${TAG}\"" helm/sharp-edge/values.yaml
+
+            git add helm/sharp-edge/values.yaml
+            if git diff --staged --quiet; then
+              echo "values.yaml already at ${TAG} — nothing to commit"
+              exit 0
+            fi
+
+            git commit -m "ci: bump images to ${TAG}"
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              exit 0
+            fi
+            echo "push rejected (attempt ${attempt}) — someone else landed first, retrying"
+          done
+
+          echo "::error::could not bump values.yaml to ${TAG} after 3 attempts"
+          exit 1
