@@ -654,12 +654,18 @@ def test_flagged_rows_are_still_suggested():
 from sharp_edge.nfl import matchup as nfl_matchup  # noqa: E402
 
 
-def test_only_tight_end_receiving_is_adjusted():
-    """WR was measured *worse* with this adjustment and RB flat, over four
-    week-1 samples. Only TE moved both MAE and correlation."""
-    assert set(nfl_matchup.ADJUSTED) == {"TE"}
+def test_only_the_markets_that_earned_it_are_adjusted():
+    """The bar is MAE improving in at least 3 of 4 week-1 seasons.
+
+    TE receiving 4/4, RB receiving 4/4, RB receptions 3/4 — in. TE receptions
+    2/4, RB rushing 2/4, WR anything 0-2/4 — out. Correlation alone is not
+    enough: a metric can shuffle ranks without getting closer.
+    """
+    assert nfl_matchup.ADJUSTED["TE"] == ("receiving_yards",)
+    assert set(nfl_matchup.ADJUSTED["RB"]) == {"receiving_yards", "receptions"}
     assert "WR" not in nfl_matchup.ADJUSTED
-    assert "RB" not in nfl_matchup.ADJUSTED
+    assert "receptions" not in nfl_matchup.ADJUSTED["TE"]
+    assert "rushing_yards" not in nfl_matchup.ADJUSTED["RB"]
 
 
 def test_factor_applies_to_a_te_receiving_market():
@@ -673,6 +679,7 @@ def test_factor_applies_to_a_te_receiving_market():
     {"position": "WR", "market": "receiving_yards", "team": "ATL"},
     {"position": "RB", "market": "rushing_yards", "team": "ATL"},
     {"position": "TE", "market": "rushing_yards", "team": "ATL"},
+    {"position": "TE", "market": "receptions", "team": "ATL"},
 ])
 def test_everything_else_is_left_alone(row):
     assert nfl_matchup.factor_for(row, {"ATL": "PIT"}, {"PIT": 1.18}) is None
@@ -719,3 +726,52 @@ def test_matchup_factor_is_carried_per_row_not_leaked():
     assert any("mfac" in l for l in append), "factor must travel with its row"
     loop = [l for l in src.splitlines() if "for key, ln, p, raw, adjusted" in l]
     assert loop and "mfac" in loop[0], "second pass must unpack it, not close over it"
+
+
+def test_rb_receiving_markets_are_adjusted():
+    """Opponent-adjusting the metric is what unlocked RB — raw yards allowed
+    did not justify it (MAE better in only 2 of 4 seasons), the leave-one-out
+    version does (4/4 receiving yards, 3/4 receptions)."""
+    opp, fac = {"JAX": "CLE"}, {"CLE": 0.88}
+    for market in ("receiving_yards", "receptions"):
+        row = {"position": "RB", "market": market, "team": "JAX"}
+        assert nfl_matchup.factor_for(row, opp, fac) == 0.88
+
+
+def test_factor_is_opponent_adjusted_not_raw_volume():
+    """A defence that faced only elite receivers must not be marked tough for
+    it. Two defences with identical yards allowed differ only if the players
+    who produced them differ from their own norms.
+
+    Built as a unit test on the ratio arithmetic rather than the loader, since
+    the loader needs a season of nflverse data.
+    """
+    import numpy as np
+    # Defence A faced a star having an ordinary day; B faced a scrub going off.
+    star = {"actual": 80.0, "baseline": 80.0}     # exactly his norm -> 1.0
+    scrub = {"actual": 40.0, "baseline": 10.0}    # four times his norm -> 4.0
+    assert star["actual"] / star["baseline"] == 1.0
+    assert scrub["actual"] / scrub["baseline"] == 4.0
+    # Raw yards would call A the worse defence (80 > 40); the ratio does not.
+    assert star["actual"] > scrub["actual"]
+    # Volume weighting keeps the star's game the more informative one.
+    w = np.average([1.0, 4.0], weights=[star["baseline"], scrub["baseline"]])
+    assert w < np.mean([1.0, 4.0])
+
+
+def test_ratio_and_factor_are_both_bounded():
+    assert nfl_matchup.MAX_RATIO <= 5.0
+    assert nfl_matchup.MIN_BASELINE_YARDS >= 5.0
+    assert nfl_matchup.MIN_FACTOR > 0.5 and nfl_matchup.MAX_FACTOR < 1.6
+
+
+def test_adjusted_projection_never_goes_negative():
+    """The rescaling is a linear map and used to run off the bottom: a player
+    projected far below his line came out at minus two receiving yards, which
+    is not a quantity that exists, and it fed an overstated under."""
+    fit = (0.6, 12.0)
+    # A player the model reads at nearly nothing against a real line.
+    got = model.adjusted_projection(11.5, 0.0, fit)
+    assert got >= 0.0
+    # An ordinary row is untouched by the floor.
+    assert model.adjusted_projection(45.5, 55.0, fit) > 0

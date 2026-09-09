@@ -406,47 +406,65 @@ NFL-API already stores coach analytics (`coach_season_analytics`,
 `/coaches/{name}/tendencies`) that could feed this. That is the next iteration,
 driven by week-1 actuals rather than by argument.
 
-## Finding 9 — matchup helps tight ends and nobody else
+## Finding 9 — matchup, but only opponent-adjusted, and only three markets
 
 The share model fixed bias but not correlation, so the next question was
-whether the defence a receiver faces carries the information that would. Tested
-over four week 1s (2022-25) rather than one, because a correlation that moves
-on 48 tight ends moves on noise about as often as on signal.
+whether the defence a receiver faces carries the information that would.
 
-| position | n | MAE | corr |
+**Raw allowed-per-game does not, and the reason is the finding.** It measures
+who a defence happened to draw as much as how it played: face three elite tight
+ends and it looks terrible, face three backups and it looks elite. Shipped
+first in that form — tight ends only, because it was the one position where raw
+moved anything.
+
+**Compare every player against himself instead.** For each player-game against
+a defence, the baseline is that player's production over all his *other* games
+that season, and the game scores as a ratio; average those weighted by baseline
+volume and opponent quality cancels. Leave-one-out is load-bearing — a season
+average that includes the scored game leaks the answer into its own baseline.
+
+Four week-1 samples (2022-25), prior season only. The bar is MAE improving in
+at least three of four seasons: correlation alone is not enough, since a metric
+can shuffle ranks without getting closer.
+
+| market | MAE wins | corr wins | shipped |
 |---|---|---|---|
-| TE | 183 | 18.67 -> **17.92** | 0.371 -> **0.424** |
-| WR | 392 | 26.73 -> 26.94 | 0.472 -> 0.457 |
-| RB | 188 | 13.59 -> 13.67 | 0.312 -> 0.321 |
+| TE receiving yards | **4/4** | 3/4 | yes |
+| RB receiving yards | **4/4** | 3/4 | yes |
+| RB receptions | **3/4** | 3/4 | yes |
+| TE receptions | 2/4 | 3/4 | no |
+| RB rushing yards | 2/4 | 2/4 | no |
+| WR (any market) | 0-2/4 | 0-1/4 | no |
 
-Only the tight end moves, and it moves error and correlation together — which
-is what separates a matchup signal from a recalibration. It holds in three of
-the four seasons (+0.025, +0.134, -0.011, +0.056).
+The headline is not the tight-end gain, it is that adjusting **unlocked
+running-back receiving**, which raw did not justify (2/4 seasons) and adjusted
+does (4/4). Unweighted leave-one-out is slightly *worse* than raw, which is the
+argument for the volume weighting rather than a free parameter.
 
-**Wide receiver is actively worse, and that is the useful part.** "Yards
-allowed to WR" is spread across a defence's whole secondary and a team's whole
-receiving corps, so it says almost nothing about the matchup one receiver
-faces. What would is a shadow-coverage assignment — which corner travels with
-him, and whether he is any good — and nflverse publishes no such field. A tight
-end draws a far more specific assignment, usually a linebacker or safety, which
-is why the team-level number is closer to a real matchup for him. Fixing the
-receiver case needs a data source we do not have, not a better formula.
+**TE receptions was shipped in the first pass and has been removed** — it wins
+correlation 3/4 but MAE only 2/4, and the bar is both.
 
-**Coverage scheme is a null result.** Man/zone rates are published (49% of
-snaps classified) and a receiver's own man-vs-zone yards per target is
-computable, but regressed for sample size the adjustment spans 0.977 to 1.015
-at the 10th and 90th percentiles — a two percent nudge — and it changed MAE by
+**Wide receiver fails everywhere.** Yards allowed to WR is spread across a
+defence's whole secondary and a team's whole receiving corps, so it says almost
+nothing about the matchup one receiver faces. What would is a shadow-coverage
+assignment — which corner travels with him and whether he is any good — and
+nflverse publishes no such field. That is a missing data source, not a formula
+to fix. **Rushing fails for a plainer reason:** the factor is built from
+receiving yards allowed, which is a statement about pass defence.
+
+**Coverage scheme is a null result.** Man/zone is published (49% of snaps
+classified) and a receiver's own man-vs-zone yards per target is computable, but
+regressed for sample size the adjustment spans 0.977 to 1.015 and changed MAE by
 0.03 yards across 763 player-weeks. Not wired in.
 
-**Shipped** as `nfl/matchup.py`: TE receiving yards and receptions only, factor
-from the prior season's yards allowed to tight ends, clamped to 0.75-1.30. The
-two positions that failed are named in the module so nobody re-adds them on
-intuition. On the live week-1 board it touches 78 rows and spans x0.750 to
-x1.300.
+Shipped as `nfl/matchup.py`, clamped to 0.75-1.30, touching 112 rows on the live
+week-1 board across 28 distinct factors. Only the prior-season form is
+validated, which is the week-1 case; blending in current-season defence once
+weeks accumulate is untested.
 
-Only the prior-season form was validated, which is the week-1 case. Blending in
-current-season defence once weeks accumulate is untested and should be measured
-before it is trusted.
+**Fixed alongside:** `adjusted_projection` had no floor, so a player projected
+far below his line came out at minus two receiving yards — not a quantity that
+exists, and it fed a correspondingly overstated under.
 
 ---
 

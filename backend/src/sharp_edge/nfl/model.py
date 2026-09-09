@@ -184,8 +184,14 @@ def adjusted_projection(line: float, projection: float,
     This is what goes into the probability model: ``line + residual``. It keeps
     the market's level and takes only our disagreement with it, which is the
     only part of a shrunk projection worth believing.
+
+    Floored at zero. The rescaling is a linear map and nothing stopped it going
+    negative, so a player projected far below his line came out at minus two
+    receiving yards — which is not a quantity that exists, and it fed a
+    correspondingly overstated under. A single game can finish with negative
+    rushing yards; an expectation cannot.
     """
-    return line + market_residual(line, projection, fit)
+    return max(0.0, line + market_residual(line, projection, fit))
 
 
 # ---------------------------------------------------------------------------

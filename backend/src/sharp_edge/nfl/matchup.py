@@ -1,36 +1,50 @@
-"""Defence-vs-position adjustment — for tight ends, and only tight ends.
+"""Defence-vs-position adjustment, opponent-adjusted, for three markets.
 
-**This module is mostly a record of what did not work**, which is the useful
-part. Four week-1 samples (2022-25, prior season only, scored against actuals):
+**The metric is not raw yards allowed, and that distinction is the whole
+module.** A raw allowed-per-game number measures who a defence happened to draw
+as much as how it played: face three elite tight ends and it looks terrible,
+face three backups and it looks elite. Neither is a statement about the
+defence.
 
-    position   n     MAE            corr
-    TE       183   18.67 -> 17.92   0.371 -> 0.424
-    WR       392   26.73 -> 26.94   0.472 -> 0.457
-    RB       188   13.59 -> 13.67   0.312 -> 0.321
+So every player is compared against *himself*. For each player-game against a
+defence, the baseline is that player's production over all his **other** games
+that season, and the game scores as a ratio. Average those and opponent quality
+cancels, because a good tight end's baseline is high and a weak one's is low.
+The average is weighted by each player's baseline volume, so a starter's game
+counts for more than a fringe player's — a fringe ratio is mostly noise.
 
-Only the tight end moves, and it moves in both directions that matter — the
-error falls and the correlation rises, which is what separates a real matchup
-signal from a recalibration. It holds in three of the four seasons (+0.025,
-+0.134, -0.011, +0.056).
+Leave-one-out is load-bearing. A season average that includes the game being
+scored leaks the answer into its own baseline and shrinks every ratio toward 1.
 
-**Wide receiver is actively worse, and the reason is instructive.** "Yards
-allowed to WR" is spread across a defence's whole secondary and a team's whole
-receiving corps, so it says almost nothing about the matchup an individual
-receiver faces. The thing that would — which corner is travelling with him, and
-whether he is any good — is a shadow-coverage assignment, and nflverse does not
-publish one. There is no "who is covering him" field to read. A tight end draws
-a much more specific assignment, usually a linebacker or safety, so the
-team-level number is closer to a real matchup for him.
+**What ships, and what was measured and rejected.** Four week-1 samples
+(2022-25), prior season only, scored against actuals. The bar is that mean
+absolute error improves in at least three of the four seasons — correlation
+alone is not enough, since a metric can shuffle ranks without getting closer.
 
-**Coverage scheme was tested too and does nothing.** Man/zone rates are
-available (49% of snaps are classified) and a receiver's own man-vs-zone yards
-per target can be computed, but regressed for sample size the resulting
-adjustment spans 0.977 to 1.015 at the 10th and 90th percentiles — a two
-percent nudge — and it changed MAE by 0.03 yards across 763 player-weeks. It is
-not wired in. Reviving it would need per-route matchup data rather than a
-team-level rate.
+    market                MAE wins   corr wins   shipped
+    TE receiving yards      4/4        3/4         yes
+    RB receiving yards      4/4        3/4         yes
+    RB receptions           3/4        3/4         yes
+    TE receptions           2/4        3/4         no
+    RB rushing yards        2/4        2/4         no
+    WR (any market)         0-2/4      0-1/4       no
 
-Harness: ``nfl-data-py/experiments/coverage_wk1.py``.
+**Wide receiver fails everywhere and the reason is worth keeping.** Yards
+allowed to WR is spread across a defence's whole secondary and a team's whole
+receiving corps, so it says almost nothing about the matchup one receiver
+faces. What would is a shadow-coverage assignment — which corner travels with
+him and whether he is any good — and nflverse publishes no such field. That is
+a missing data source, not a formula to fix.
+
+**Rushing fails for a plainer reason:** the factor is built from receiving
+yards allowed, which is a statement about pass defence. It was tested against
+rushing anyway and came back a coin flip, as it should have.
+
+Coverage scheme (man/zone) was also tested and does nothing at all — regressed
+for sample size the adjustment spans 0.977 to 1.015 and moved MAE by 0.03 yards
+over 763 player-weeks. Not wired in anywhere.
+
+Harnesses: ``nfl-data-py/experiments/coverage_wk1.py`` and ``fpa_adjusted.py``.
 """
 
 from __future__ import annotations
@@ -46,9 +60,20 @@ NFLVERSE_WEEKLY = (
     "stats_player_week_{season}.parquet"
 )
 
-# Only TE, and only receiving. See the module docstring for the three positions
-# tested and the two that failed.
-ADJUSTED = {"TE": ("receiving_yards", "receptions")}
+# Position -> the markets that earned the adjustment. See the table in the
+# module docstring for everything that was tested and did not.
+ADJUSTED = {
+    "TE": ("receiving_yards",),
+    "RB": ("receiving_yards", "receptions"),
+}
+
+# A player whose own norm is below this is dropped from the factor: a receiver
+# averaging two yards a game produces ratios of 0 and 15 and nothing in
+# between, which is noise wearing a number.
+MIN_BASELINE_YARDS = 10.0
+
+# One freak game must not carry a defence's whole number.
+MAX_RATIO = 4.0
 
 # How far the factor is allowed to move a projection. The measured spread over
 # 2022-25 runs about 0.80 to 1.23 at the 10th and 90th percentiles, so this
@@ -61,28 +86,40 @@ _TTL_SECONDS = 6 * 3600
 
 
 def _compute(season: int) -> dict:
-    """``{team: factor}`` — receiving yards that team allowed to tight ends per
-    game, over the league average, for the given season."""
+    """``{team: factor}`` — how the receivers a defence faced did against it,
+    relative to their own norms.
+
+    Built from receiving yards for every position in ``ADJUSTED`` pooled
+    together, because the question a factor answers is "does this defence
+    suppress the players it covers", and splitting it by position again would
+    reintroduce the small samples the leave-one-out is meant to stabilise.
+    """
+    import numpy as np
     import pandas as pd
 
     df = pd.read_parquet(NFLVERSE_WEEKLY.format(season=season))
-    df = df[(df.season_type == "REG") & (df.position == "TE")].copy()
+    df = df[(df.season_type == "REG") & df.position.isin(ADJUSTED)].copy()
     if df.empty:
         return {}
     df["receiving_yards"] = df.receiving_yards.fillna(0)
 
-    allowed = df.groupby("opponent_team").agg(
-        yds=("receiving_yards", "sum"), games=("game_id", "nunique")
-    )
-    allowed = allowed[allowed.games >= 8]
-    if allowed.empty:
+    total = df.groupby(["player_id"]).receiving_yards.transform("sum")
+    count = df.groupby(["player_id"]).receiving_yards.transform("size")
+    # The player's mean over every game except this one.
+    df["baseline"] = (total - df.receiving_yards) / (count - 1).replace(0, np.nan)
+    df = df[df.baseline >= MIN_BASELINE_YARDS]
+    if df.empty:
         return {}
-    per_game = allowed.yds / allowed.games
-    league = per_game.mean()
-    if not league:
-        return {}
-    return {t: float(min(MAX_FACTOR, max(MIN_FACTOR, v / league)))
-            for t, v in per_game.items()}
+
+    df["ratio"] = (df.receiving_yards / df.baseline).clip(upper=MAX_RATIO)
+
+    out: dict = {}
+    for team, rows in df.groupby("opponent_team"):
+        if len(rows) < 8:
+            continue
+        f = float(np.average(rows.ratio, weights=rows.baseline))
+        out[team] = min(MAX_FACTOR, max(MIN_FACTOR, f))
+    return out
 
 
 def factors(season: int, force: bool = False) -> dict:
@@ -103,7 +140,7 @@ def factors(season: int, force: bool = False) -> dict:
             _cache.update({"season": season, "factors": got,
                            "fetched_at": now, "error": None})
         else:
-            _cache["error"] = f"no TE defence data for {season}"
+            _cache["error"] = f"no defence data for {season}"
     except Exception as e:
         logger.warning("[nfl-matchup] factors for %s failed: %s", season, e)
         _cache["error"] = str(e)
