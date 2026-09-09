@@ -645,3 +645,77 @@ def test_flagged_rows_are_still_suggested():
                 edge_pts=22.0)
     row["role_conflict"] = True
     assert len(card_mod.suggestions([row])) == 1
+
+
+# ---------------------------------------------------------------------------
+# Matchup: tight ends only, and the two positions that failed stay out
+# ---------------------------------------------------------------------------
+
+from sharp_edge.nfl import matchup as nfl_matchup  # noqa: E402
+
+
+def test_only_tight_end_receiving_is_adjusted():
+    """WR was measured *worse* with this adjustment and RB flat, over four
+    week-1 samples. Only TE moved both MAE and correlation."""
+    assert set(nfl_matchup.ADJUSTED) == {"TE"}
+    assert "WR" not in nfl_matchup.ADJUSTED
+    assert "RB" not in nfl_matchup.ADJUSTED
+
+
+def test_factor_applies_to_a_te_receiving_market():
+    opp = {"ATL": "PIT"}
+    fac = {"PIT": 1.18}
+    row = {"position": "TE", "market": "receiving_yards", "team": "ATL"}
+    assert nfl_matchup.factor_for(row, opp, fac) == 1.18
+
+
+@pytest.mark.parametrize("row", [
+    {"position": "WR", "market": "receiving_yards", "team": "ATL"},
+    {"position": "RB", "market": "rushing_yards", "team": "ATL"},
+    {"position": "TE", "market": "rushing_yards", "team": "ATL"},
+])
+def test_everything_else_is_left_alone(row):
+    assert nfl_matchup.factor_for(row, {"ATL": "PIT"}, {"PIT": 1.18}) is None
+
+
+def test_unknown_opponent_or_missing_factor_returns_none():
+    row = {"position": "TE", "market": "receiving_yards", "team": "ATL"}
+    assert nfl_matchup.factor_for(row, {}, {"PIT": 1.18}) is None
+    assert nfl_matchup.factor_for(row, {"ATL": "PIT"}, {}) is None
+
+
+def test_none_is_distinct_from_a_neutral_factor():
+    """"No adjustment applies" and "the adjustment was 1.0" are different
+    statements, and the board shows which one happened."""
+    row = {"position": "TE", "market": "receiving_yards", "team": "ATL"}
+    assert nfl_matchup.factor_for(row, {"ATL": "PIT"}, {"PIT": 1.0}) == 1.0
+    assert nfl_matchup.factor_for(row, {"ATL": "PIT"}, {}) is None
+
+
+def test_opponent_map_is_symmetric():
+    got = nfl_matchup.opponents([{"home_team": "JAX", "away_team": "CLE"}])
+    assert got == {"JAX": "CLE", "CLE": "JAX"}
+    assert nfl_matchup.opponents([{"home_team": None, "away_team": "CLE"}]) == {}
+
+
+def test_factor_bounds_are_clamped_not_unbounded():
+    """A defence that drew two elite tight ends in a short sample must not be
+    allowed to move a projection by half."""
+    assert nfl_matchup.MIN_FACTOR > 0.5
+    assert nfl_matchup.MAX_FACTOR < 1.6
+
+
+def test_matchup_factor_is_carried_per_row_not_leaked():
+    """The board is built in two passes and the factor is computed in the
+    first. Read from the enclosing scope in the second, every row inherits the
+    last player's factor — which showed up as 322 rows adjusted by an identical
+    1.114, wide receivers included.
+    """
+    import inspect
+    from sharp_edge.nfl import screen as scr
+
+    src = inspect.getsource(scr.build_board)
+    append = [l for l in src.splitlines() if "raw_rows.append" in l or "fair_over, mfac" in l]
+    assert any("mfac" in l for l in append), "factor must travel with its row"
+    loop = [l for l in src.splitlines() if "for key, ln, p, raw, adjusted" in l]
+    assert loop and "mfac" in loop[0], "second pass must unpack it, not close over it"

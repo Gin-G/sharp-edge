@@ -406,6 +406,48 @@ NFL-API already stores coach analytics (`coach_season_analytics`,
 `/coaches/{name}/tendencies`) that could feed this. That is the next iteration,
 driven by week-1 actuals rather than by argument.
 
+## Finding 9 — matchup helps tight ends and nobody else
+
+The share model fixed bias but not correlation, so the next question was
+whether the defence a receiver faces carries the information that would. Tested
+over four week 1s (2022-25) rather than one, because a correlation that moves
+on 48 tight ends moves on noise about as often as on signal.
+
+| position | n | MAE | corr |
+|---|---|---|---|
+| TE | 183 | 18.67 -> **17.92** | 0.371 -> **0.424** |
+| WR | 392 | 26.73 -> 26.94 | 0.472 -> 0.457 |
+| RB | 188 | 13.59 -> 13.67 | 0.312 -> 0.321 |
+
+Only the tight end moves, and it moves error and correlation together — which
+is what separates a matchup signal from a recalibration. It holds in three of
+the four seasons (+0.025, +0.134, -0.011, +0.056).
+
+**Wide receiver is actively worse, and that is the useful part.** "Yards
+allowed to WR" is spread across a defence's whole secondary and a team's whole
+receiving corps, so it says almost nothing about the matchup one receiver
+faces. What would is a shadow-coverage assignment — which corner travels with
+him, and whether he is any good — and nflverse publishes no such field. A tight
+end draws a far more specific assignment, usually a linebacker or safety, which
+is why the team-level number is closer to a real matchup for him. Fixing the
+receiver case needs a data source we do not have, not a better formula.
+
+**Coverage scheme is a null result.** Man/zone rates are published (49% of
+snaps classified) and a receiver's own man-vs-zone yards per target is
+computable, but regressed for sample size the adjustment spans 0.977 to 1.015
+at the 10th and 90th percentiles — a two percent nudge — and it changed MAE by
+0.03 yards across 763 player-weeks. Not wired in.
+
+**Shipped** as `nfl/matchup.py`: TE receiving yards and receptions only, factor
+from the prior season's yards allowed to tight ends, clamped to 0.75-1.30. The
+two positions that failed are named in the module so nobody re-adds them on
+intuition. On the live week-1 board it touches 78 rows and spans x0.750 to
+x1.300.
+
+Only the prior-season form was validated, which is the week-1 case. Blending in
+current-season defence once weeks accumulate is untested and should be measured
+before it is trusted.
+
 ---
 
 ## Operations

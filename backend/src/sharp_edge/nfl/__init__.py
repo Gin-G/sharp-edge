@@ -16,4 +16,5 @@ and a pricing model rather than a data pipeline.
   tracking     freeze the week before kickoff, settle it after, score it
 """
 
-from . import card, model, names, odds, projections, screen, tracking  # noqa: F401
+from . import (card, matchup, model, names, odds, projections, screen,  # noqa: F401
+               tracking)

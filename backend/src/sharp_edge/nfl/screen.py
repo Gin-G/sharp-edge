@@ -35,7 +35,8 @@ from typing import Optional
 import httpx
 
 from ..fanduel.odds import american_to_implied
-from . import card as card_mod, model, odds as nfl_odds, projections as nfl_proj
+from . import (card as card_mod, matchup as nfl_matchup, model,
+               odds as nfl_odds, projections as nfl_proj)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,17 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
         proj = await nfl_proj.fetch_projections(wk.season, wk.week, client=client)
 
     season, week = wk.season, wk.week
+
+    # Defence-vs-position, read off the prior season. Tight ends only — see
+    # nfl.matchup for the three positions tested and the two where it made
+    # projections worse. Never allowed to take the board down with it.
+    try:
+        te_factors = await asyncio.to_thread(nfl_matchup.factors, season - 1)
+    except Exception as e:
+        logger.warning("[nfl] matchup factors unavailable: %s", e)
+        te_factors = {}
+    opponent_map = nfl_matchup.opponents(wk.games)
+
     got = await nfl_odds.cached_board(wk.window(), state=state, force=force)
     fd = got["board"]
 
@@ -135,9 +147,20 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
 
         # Rescale on this week's own board: every player who has both a posted
         # line and a projection contributes one point to the fit.
-        pairs = [(ln.line, by_key[k][component])
+        def _projected(key, ln):
+            """The projection for one player in this market, matchup applied."""
+            row = by_key[key]
+            v = row.get(component)
+            if v is None:
+                return None
+            f = nfl_matchup.factor_for(
+                {"position": row.get("position"), "market": market,
+                 "team": row.get("team")}, opponent_map, te_factors)
+            return float(v) * f if f else float(v)
+
+        pairs = [(ln.line, _projected(k, ln))
                  for k, ln in lines.items()
-                 if k in by_key and by_key[k].get(component) is not None]
+                 if k in by_key and _projected(k, ln) is not None]
         fit = model.calibrate_to_market(pairs)
         board.fits[market] = (
             {"slope": round(fit[0], 4), "intercept": round(fit[1], 2), "n": len(pairs)}
@@ -152,7 +175,13 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 continue
             matched.add(key)
             raw = float(p[component])
-            adjusted = model.adjusted_projection(ln.line, raw, fit)
+            # Matchup first, so the market rescaling below sees the number we
+            # actually believe rather than one it has to undo.
+            mfac = nfl_matchup.factor_for(
+                {"position": p.get("position"), "market": market,
+                 "team": p.get("team")}, opponent_map, te_factors)
+            raw_adj = raw * mfac if mfac else raw
+            adjusted = model.adjusted_projection(ln.line, raw_adj, fit)
             volume = model.derive_volume(
                 market, adjusted, p.get(volume_key) if volume_key else None
             )
@@ -160,7 +189,8 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 market, adjusted, ln.line, est_season=adjusted, volume=volume
             )
             fair_over, _ = model.devig_two_way(ln.over, ln.under)
-            raw_rows.append((key, ln, p, raw, adjusted, volume, p_over, fair_over))
+            raw_rows.append((key, ln, p, raw, adjusted, volume, p_over,
+                             fair_over, mfac))
 
         # Pass two: anchor the model's level to the market's, then price the
         # disagreement that survives. Without this the model prices its own
@@ -174,7 +204,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             "n": sum(1 for r in raw_rows if r[7] is not None),
         }
 
-        for key, ln, p, raw, adjusted, volume, p_raw, fair in raw_rows:
+        for key, ln, p, raw, adjusted, volume, p_raw, fair, mfac in raw_rows:
             p_over = model.anchor_probability(p_raw, offset, fair, shrink)
             priced = model.price_side(p_over, ln.over, ln.under)
             residual = model.market_residual(ln.line, raw, fit)
@@ -192,6 +222,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 "kickoff": ln.kickoff,
                 "line": ln.line,
                 "projection": round(raw, 1),
+                "matchup_factor": round(mfac, 3) if mfac else None,
                 "adjusted": round(adjusted, 1),
                 "raw_gap": round(raw - ln.line, 1),
                 "residual": round(residual, 1),
@@ -473,6 +504,10 @@ def as_payload(board: NFLBoard) -> dict:
         "fits": board.fits,
         "prob_fits": board.prob_fits,
         "thresholds": THRESHOLDS,
+        "matchup": {
+            "applied_to": {k: list(v) for k, v in nfl_matchup.ADJUSTED.items()},
+            "rows": sum(1 for r in board.props if r.get("matchup_factor")),
+        },
         "bettable": list(model.BETTABLE),
         "passing_yards_caveat": model.PASSING_YARDS_CAVEAT,
         "odds": {"age_seconds": board.odds_age, "error": board.odds_error},
