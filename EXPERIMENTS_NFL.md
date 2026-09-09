@@ -349,3 +349,33 @@ prospectively. Scoring 2025 week 18 by hand against nflverse actuals (n=332)
 gave projection MAE 12.03 vs trailing-4's 15.94 on receiving yards — about 25%
 skill, with a small negative bias — which is genuinely good, but it is one week.
 Running NFL-API's `score_projections` job would replace that with a real record.
+
+---
+
+## Operations
+
+**Daily settlement** runs in-cluster at 13:00 UTC
+(`helm/sharp-edge/templates/nfl-settle-cronjob.yaml`). It refreshes the board
+first — which is what *records* the upcoming week, since the freeze happens on
+the read path — then settles whatever is pending. Daily rather than weekly
+because nflverse's publish time is not guaranteed, a Monday-night game lands a
+day after the Sunday slate, and both calls are idempotent.
+
+**Daily report** at 14:00 UTC, an hour after settlement: a scheduled cloud agent
+reads `/nfl/track-record` and `/nfl/screen` and writes a short check-in. Its
+most useful section is the third one — `held_prior_only` non-empty with an
+established name in it means the projections table upstream has gone stale or
+started mis-joining names again, which is exactly how the Cook/Etienne bug would
+resurface.
+
+**Recomputing projections after an upstream fix.** The projections cronjob
+pip-installs `nfl_projections` from the tarball of `Gin-G/nfl-data-py@main`, so
+a fix merged there needs no image rebuild — only a re-run:
+
+```bash
+kubectl create job -n nfl-api --from=cronjob/nfl-api-projections proj-manual
+```
+
+It takes ~35 minutes (a 5-seed ensemble). Afterwards the board must be rebuilt
+with `?force=true`, because the screen caches the projections it fetched for ten
+minutes and would otherwise serve the pre-fix numbers.
