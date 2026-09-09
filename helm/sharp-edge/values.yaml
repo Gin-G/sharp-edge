@@ -5,7 +5,7 @@ frontend:
   enabled: true
   image:
     repository: ncging/sharp-edge-frontend
-    tag: "9c26278"
+    tag: "56de3cd"
     pullPolicy: Always
   replicas: 1
   port: 80
@@ -21,7 +21,7 @@ backend:
   enabled: true
   image:
     repository: ncging/sharp-edge-backend
-    tag: "9c26278"
+    tag: "56de3cd"
     pullPolicy: Always
   replicas: 1
   port: 8000
@@ -106,7 +106,6 @@ cnpg:
     enabled: true
     retentionPolicy: "7d"
     snapshotClass: rook-ceph-block
-
 # Daily NFL settlement — resolves recorded suggestions against nflverse
 # actuals, and refreshes the board so the upcoming week stays recorded even if
 # nobody opens the page. See templates/nfl-settle-cronjob.yaml.
