@@ -30,8 +30,9 @@ def _nfl_row(row) -> dict:
     for k in ("created_at", "resolved_at"):
         if d.get(k) is not None and not isinstance(d[k], str):
             d[k] = d[k].isoformat()
-    if isinstance(d.get("legs"), str):
-        d["legs"] = json.loads(d["legs"])
+    for k in ("legs", "metrics"):
+        if isinstance(d.get(k), str):
+            d[k] = json.loads(d[k])
     return d
 
 

@@ -60,6 +60,9 @@
         { title: 'By market', rows: data.by_market.map((r) => ({ label: r.market, ...r })) },
         { title: 'By side', rows: data.by_side.map((r) => ({ label: r.side, ...r })) },
         { title: 'By week', rows: data.by_week.map((r) => ({ label: `Week ${r.week}`, ...r })) },
+        // The season's open question — see screen.flag_role_conflicts.
+        { title: 'By role conflict', rows: (data.by_role_conflict ?? []).map((r) => ({
+            label: r.role_conflict ? 'We disagree on role' : 'Agrees with the market', ...r })) },
       ]
     : [];
 </script>

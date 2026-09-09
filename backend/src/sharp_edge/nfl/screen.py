@@ -282,10 +282,63 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             **priced,
         })
 
+    flag_role_conflicts(board.props)
     board.props.sort(key=_prop_rank)
     board.tds.sort(key=lambda r: -(r.get("edge_pts") if r.get("edge_pts") is not None else -99))
     board.unmatched = sorted({ln.key for ln in fd.lines if ln.key not in matched})
     return board
+
+
+def flag_role_conflicts(props: list[dict]) -> int:
+    """Mark rows where we rank a team's players differently from the market.
+
+    Within one team and market, the book's lines are a statement about roles:
+    a 50.5-yard line and a 33.5 beside it say who the lead back is. When our
+    projection puts the 33.5 man above the 50.5 man, the disagreement is not
+    about production, it is about who is going to play.
+
+    That is the one thing the projection cannot see. It has no snap share, and
+    the depth-rank adjustment in the engine only ever scales a player *down* —
+    so a player inheriting a vacated role keeps last season's backup rate,
+    while the man he replaced keeps a starter's. Jacksonville is the clean
+    example: Etienne left for New Orleans, Tuten is RB1 on the depth chart and
+    priced at 50.5, and we project him 16.9 because that is what he did as a
+    rookie behind Etienne. His backup projects 51.4 off a season in
+    Washington.
+
+    **Flagged, not filtered, and that is deliberate.** These rows are half the
+    board, they are wrong for a reason we can articulate, and we have never
+    measured whether they actually lose. Dropping them would remove exactly the
+    evidence needed to find out. They stay on the board, get recorded, settle
+    like anything else, and the track record splits on the flag — so after a
+    few weeks the question is answered with results instead of reasoning.
+
+    Returns the number of rows flagged.
+    """
+    from collections import defaultdict
+    from itertools import combinations
+
+    groups: dict = defaultdict(list)
+    for r in props:
+        r.setdefault("role_conflict", False)
+        r.setdefault("role_conflict_with", None)
+        if r.get("team") and r.get("adjusted") is not None:
+            groups[(r["team"], r["market"])].append(r)
+
+    flagged = 0
+    for rows in groups.values():
+        for a, b in combinations(rows, 2):
+            hi, lo = (a, b) if a["line"] > b["line"] else (b, a)
+            if hi["line"] == lo["line"]:
+                continue
+            # The market's more-favoured player projects below his own teammate.
+            if hi["adjusted"] < lo["adjusted"]:
+                for row, other in ((hi, lo), (lo, hi)):
+                    if not row["role_conflict"]:
+                        flagged += 1
+                    row["role_conflict"] = True
+                    row["role_conflict_with"] = other["player"]
+    return flagged
 
 
 def _signal(residual: float, threshold: float) -> str:
@@ -407,6 +460,7 @@ def as_payload(board: NFLBoard) -> dict:
         # What we would actually bet, and the wider set we record. The card is
         # two legs; the suggestions are what the track record is built from.
         "suggestions": suggested,
+        "role_conflicts": sum(1 for r in suggested if r.get("role_conflict")),
         "card": {
             "legs": the_card,
             "summary": card_mod.summarise(the_card),

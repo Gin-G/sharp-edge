@@ -587,3 +587,61 @@ def test_missing_season_file_is_a_status_not_an_error():
     run before the first Sunday 404s. Reporting that as an error would have the
     daily job crying wolf all preseason."""
     assert issubclass(nfl_tracking.ActualsNotPublished, Exception)
+
+
+# ---------------------------------------------------------------------------
+# Role conflicts: we rank a team's players differently from the market
+# ---------------------------------------------------------------------------
+
+def _teammate(player, key, line, adjusted, team="JAX", market="rushing_yards"):
+    return {"player": player, "key": key, "team": team, "market": market,
+            "line": line, "adjusted": adjusted}
+
+
+def test_inverted_teammates_are_flagged_both_ways():
+    """Jacksonville, week 1 2026, the case that surfaced this.
+
+    Etienne left for New Orleans. Tuten is RB1 and priced at 50.5; we project
+    him 16.9 because that is what he did as a rookie behind Etienne. His backup
+    projects 51.4 off a season in Washington. Both sides of the pair are the
+    same mistake and both get marked.
+    """
+    rows = [_teammate("Bhayshul Tuten", "bhayshul tuten", 50.5, 16.9),
+            _teammate("Chris Rodriguez Jr.", "chris rodriguez", 33.5, 51.4)]
+    assert screen.flag_role_conflicts(rows) == 2
+    assert all(r["role_conflict"] for r in rows)
+    assert rows[0]["role_conflict_with"] == "Chris Rodriguez Jr."
+    assert rows[1]["role_conflict_with"] == "Bhayshul Tuten"
+
+
+def test_agreeing_with_the_market_is_not_a_conflict():
+    rows = [_teammate("Lead Back", "lead", 50.5, 60.0),
+            _teammate("Backup", "backup", 20.5, 18.0)]
+    assert screen.flag_role_conflicts(rows) == 0
+    assert not any(r["role_conflict"] for r in rows)
+
+
+def test_conflicts_are_scoped_to_one_team_and_market():
+    """Two players on different teams say nothing about each other's role."""
+    rows = [_teammate("A", "a", 50.5, 10.0, team="JAX"),
+            _teammate("B", "b", 20.5, 60.0, team="DEN")]
+    assert screen.flag_role_conflicts(rows) == 0
+
+    rows = [_teammate("A", "a", 50.5, 10.0, market="rushing_yards"),
+            _teammate("B", "b", 20.5, 60.0, market="receiving_yards")]
+    assert screen.flag_role_conflicts(rows) == 0
+
+
+def test_equal_lines_are_not_an_inversion():
+    """With the same line the book is expressing no ordering to contradict."""
+    rows = [_teammate("A", "a", 40.5, 10.0), _teammate("B", "b", 40.5, 60.0)]
+    assert screen.flag_role_conflicts(rows) == 0
+
+
+def test_flagged_rows_are_still_suggested():
+    """Flagged, not filtered — dropping them would remove the evidence needed
+    to find out whether they actually lose."""
+    row = _prop(line=50.5, adjusted=20.0, side="UNDER", signal="UNDER",
+                edge_pts=22.0)
+    row["role_conflict"] = True
+    assert len(card_mod.suggestions([row])) == 1

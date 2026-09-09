@@ -303,6 +303,11 @@ export interface NflProp {
    *  not a read on this player — so it is priced and shown but never fires.
    *  See PRIOR_ONLY_TYPES in nfl/screen.py. */
   prior_only: boolean;
+  /** We rank this player differently from the market within his own team and
+   *  market — i.e. we disagree about who plays, not how well. Flagged rather
+   *  than filtered so the record can test whether it actually loses. */
+  role_conflict?: boolean;
+  role_conflict_with?: string | null;
   prediction_type: string | null;
   exp_games: number | null;
 
@@ -419,6 +424,7 @@ export interface NflTrackRecord {
   by_market: ({ market: string } & NflTrackBucket)[];
   by_side: ({ side: string } & NflTrackBucket)[];
   by_week: ({ week: number } & NflTrackBucket)[];
+  by_role_conflict: ({ role_conflict: boolean } & NflTrackBucket)[];
   cards: {
     played: number;
     won: number;
@@ -450,6 +456,7 @@ export interface NflScreen {
   /** Every row worth recording as a prediction — wider than the card, and the
    *  set the track record is built from. */
   suggestions: NflProp[];
+  role_conflicts: number;
   card: {
     legs: NflProp[];
     summary: NflCardSummary;

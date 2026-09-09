@@ -350,6 +350,62 @@ gave projection MAE 12.03 vs trailing-4's 15.94 on receiving yards — about 25%
 skill, with a small negative bias — which is genuinely good, but it is one week.
 Running NFL-API's `score_projections` job would replace that with a real record.
 
+## Finding 8 — the projections describe last season's roles, and it is half the board
+
+Raised from the board rather than the code: the Jaguars.
+
+Travis Etienne carried 260 times for 1,107 yards for Jacksonville in 2025 and is
+now in New Orleans. Bhayshul Tuten is RB1 on the 2026 depth chart
+(`depth_team: 1`) and FanDuel prices him at 50.5 rushing yards. We project him
+**16.9**, and suggest the under — because 16.9 is what he did as a rookie behind
+Etienne. His backup Chris Rodriguez Jr. projects **51.4**, off a season in
+*Washington*, and we suggest the over.
+
+| | 2025 | 2025 rate | 2026 projection | line |
+|---|---|---|---|---|
+| Tuten | JAX, 83 car / 307 yds, behind Etienne | 20.5/g | 16.9 | 50.5 |
+| Rodriguez | **WAS**, 112 car / 500 yds | 41.7/g | 51.4 | 33.5 |
+
+**Two mechanical causes, both in the engine.**
+
+The depth-rank multiplier is applied to `fanduel_fantasy_points` and to nothing
+else (`predict.py:626`) — never to the component stats that a prop settles on.
+And it only ever scales *down* (`if role_mult < 1.0`), so RB1 is x1.00: a player
+inheriting a vacated role keeps his backup-rate projection, while the man he
+replaced keeps a starter's. Promotion is unmodelled by construction.
+
+**It is not one row.** Comparing our projected ordering against the market's
+line ordering within each team and market, the live week-1 board had 66 inverted
+teammate pairs and **20 of 41 suggestions on one side of one**:
+
+| team | we fade | we back |
+|---|---|---|
+| DEN | Waddle 53.5 | Pat Bryant 23.5 |
+| HOU | Montgomery 54.5 | Woody Marks 29.5 |
+| TB | Egbuka 52.5 | Cade Otton 28.5 |
+| MIN | Addison 42.5 | Jauan Jennings 22.5 |
+| JAX | Tuten 50.5 | Rodriguez 33.5 |
+
+Always the same shape: fade the market's lead man, back his backup, in pairs.
+
+**Flagged, not filtered, and that is the whole point.** These rows are wrong for
+a reason we can articulate, but nobody has measured whether they *lose*. Two
+things could be true — the market's role read is right and we are donating, or
+the market overprices name recognition on a lead back and the backup really is
+live. Dropping them would remove the only evidence that could settle it. So
+`screen.flag_role_conflicts` marks both sides, the flag rides along in each
+pick's `metrics`, and the track record splits on it. After a few weeks the
+question is answered with results.
+
+**The real fix is upstream and is not a filter.** The projection needs a view of
+what a player is *going to* do, not only what he has done — offseason role
+change, depth chart, and coaching scheme. Jacksonville is the example again:
+Liam Coen is the new head coach, and his Tampa Bay backfield usage is a better
+prior for how Tuten gets used than Tuten's own 2025 snaps behind Etienne.
+NFL-API already stores coach analytics (`coach_season_analytics`,
+`/coaches/{name}/tendencies`) that could feed this. That is the next iteration,
+driven by week-1 actuals rather than by argument.
+
 ---
 
 ## Operations

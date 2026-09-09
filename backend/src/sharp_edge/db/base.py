@@ -14,10 +14,13 @@ PARLAY_COLUMNS = (
 )
 
 # Every nfl_picks column except `metrics`, mirroring PICK_COLUMNS.
+# `metrics` is included, unlike PICK_COLUMNS on the baseball side. It carries
+# the context a post-mortem needs — and role_conflict, which the track record
+# splits on, so it has to come back with the row.
 NFL_PICK_COLUMNS = (
     "season, week, player_key, market, player, player_id, position, team, "
     "event, kickoff, line, side, fd_odds, model_p, edge_pts, residual, "
-    "projection, adjusted, source, result, actual, created_at, resolved_at"
+    "projection, adjusted, metrics, source, result, actual, created_at, resolved_at"
 )
 
 NFL_CARD_COLUMNS = (

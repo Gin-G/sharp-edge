@@ -91,7 +91,7 @@ def _metrics(row: dict) -> str:
     """
     keep = ("model_p_raw", "fair_p", "implied_p", "over_odds", "under_odds",
             "raw_gap", "threshold", "prediction_type", "exp_games", "position",
-            "kickoff", "sgm")
+            "kickoff", "sgm", "role_conflict", "role_conflict_with")
     return json.dumps({k: row.get(k) for k in keep if row.get(k) is not None})
 
 
@@ -323,6 +323,21 @@ def _roi(rows: list[dict]) -> Optional[float]:
     return round(100 * profit / staked, 1) if staked else None
 
 
+def _metric(row: dict, key: str, default=None):
+    """Read one field back out of a pick's stored ``metrics`` blob.
+
+    SQLite hands it back as a string, Postgres as a dict, so both are handled
+    rather than pushed onto every caller.
+    """
+    m = row.get("metrics")
+    if isinstance(m, str):
+        try:
+            m = json.loads(m)
+        except (TypeError, ValueError):
+            return default
+    return (m or {}).get(key, default) if isinstance(m, dict) else default
+
+
 def _group(rows: list[dict], key: str) -> list[dict]:
     out: dict = {}
     for r in rows:
@@ -347,6 +362,18 @@ async def track_record(season: Optional[int] = None) -> dict:
         "overall": _bucket(rows),
         "by_market": _group(rows, "market"),
         "by_side": _group(rows, "side"),
+        # The open question this season: we rank roughly half the board's
+        # players differently from the market within their own team, because
+        # the projection reads last year's usage and cannot see a role change.
+        # Those rows are flagged rather than dropped so this split can answer
+        # whether they actually lose. See screen.flag_role_conflicts.
+        "by_role_conflict": [
+            {"role_conflict": k, **_bucket(v)}
+            for k, v in sorted(
+                _split(rows, lambda r: bool(_metric(r, "role_conflict"))).items(),
+                key=lambda kv: kv[0],
+            )
+        ],
         "by_week": sorted(
             ({"week": k, **_bucket(v)} for k, v in
              _by_week(rows).items()), key=lambda d: d["week"], reverse=True,
@@ -358,6 +385,13 @@ async def track_record(season: Optional[int] = None) -> dict:
         },
         "picks": rows[:400],
     }
+
+
+def _split(rows: list[dict], key) -> dict:
+    out: dict = {}
+    for r in rows:
+        out.setdefault(key(r), []).append(r)
+    return out
 
 
 def _by_week(rows: list[dict]) -> dict:

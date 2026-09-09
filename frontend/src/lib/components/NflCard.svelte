@@ -18,6 +18,7 @@
   $: suggestions = data.suggestions ?? [];
   $: rest = suggestions.filter((s) => !card.some((c) => c.key === s.key && c.market === s.market));
   $: shown = showAll ? rest : rest.slice(0, 8);
+  $: conflicted = suggestions.filter((s) => s.role_conflict).length;
 
   let copied = false;
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -79,6 +80,12 @@
             </span>
             <span class="text-slate-200 font-medium">{r.player}</span>
             <span class="text-slate-500 text-xs"> {r.position ?? ''} {r.team ?? ''}</span>
+            {#if r.role_conflict}
+              <span
+                class="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-amber-600/20 text-amber-300 border border-amber-600/30"
+                title="We rank {r.player} differently from the market against his own teammate {r.role_conflict_with}. That is a disagreement about who plays, which the projection cannot see — it reads last season's usage. Tracked, not filtered."
+              >role?</span>
+            {/if}
             <span class="text-slate-400 text-xs">
               · {r.line} {MARKET_LABEL[r.market]?.toLowerCase() ?? r.market}
             </span>
@@ -93,6 +100,18 @@
         </div>
       {/each}
     </div>
+
+    {#if card.some((r) => r.role_conflict)}
+      <!-- The known systematic error, named on the card itself rather than
+           buried in a doc. It is on roughly half the board this week. -->
+      <div class="px-5 py-3 border-t border-border bg-amber-950/20 text-xs text-amber-200/90">
+        A leg here is marked <span class="font-semibold">role?</span> — we rank that player
+        the opposite way to the market against his own teammate. The projection reads last
+        season's usage and has no view of snap share, so when a role changed in the offseason
+        it describes the wrong player. Kept on the card and tracked so the record can settle
+        whether it costs anything.
+      </div>
+    {/if}
 
     <div class="px-5 py-4 border-t border-border flex items-center gap-3 flex-wrap">
       {#if data.card?.betslip_url}
@@ -125,6 +144,9 @@
       </h2>
       <span class="text-xs text-slate-500 tabular-nums">
         {suggestions.length} this week
+        {#if conflicted}
+          · <span class="text-amber-400/90" title="Rows where we rank a player the opposite way to the market against his own teammate.">{conflicted} role?</span>
+        {/if}
         {#if data.frozen}
           · <span class={data.frozen.error ? 'text-red-400' : 'text-emerald-500/80'}>
             {data.frozen.error ? 'not recorded' : `${data.frozen.written} recorded`}
@@ -147,6 +169,12 @@
               </span>
               <span class="text-slate-300">{leg(r)}</span>
               <span class="text-slate-600 text-xs"> · {r.team ?? ''}</span>
+              {#if r.role_conflict}
+                <span
+                  class="ml-1.5 px-1 py-0.5 rounded text-[10px] bg-amber-600/20 text-amber-300 border border-amber-600/30"
+                  title="Ranked against teammate {r.role_conflict_with} the opposite way to the market — a disagreement about role, not production."
+                >role?</span>
+              {/if}
             </div>
             <div class="flex items-center gap-4 tabular-nums text-xs shrink-0">
               <span class="text-slate-500">proj {r.adjusted}</span>
