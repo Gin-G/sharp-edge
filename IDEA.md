@@ -93,8 +93,9 @@ DraftKings first, then line shopping across books.
 - [x] Rescale projections onto the market's scale — raw gaps read model shrinkage as signal and fade every star
 - [x] Moneyline measured and left alone: closing line is calibrated, every naive strategy loses the vig
 - [x] Fix the projection name join — suffixed veterans (Cook III, Etienne Jr., Pitts Sr.) were typed rookies and projected off a prior
-- [ ] Record NFL picks weekly and settle them — nothing on the NFL board has a track record yet
+- [x] Record NFL picks weekly and settle them against nflverse actuals, with hit rate and ROI per market and side
+- [x] NFL weekly card — two legs, one per game, frozen before kickoff
+- [x] Refuse short lines on both sides — a short line prices a role the projection cannot see, and the edge there ranks backups
 - [ ] Archive NFL closing lines the way data/odds/ does for MLB, so the shrink factors can be fit instead of guessed
-- [ ] NFL weekly card (one leg per game) once there is a track record to size it from
 - [ ] Refit the passing-yards model — it runs 4-5pts overconfident and is off the card until it doesn't
 - [ ] Deduplicate bets across books so the same wager placed twice does not double-count P/L

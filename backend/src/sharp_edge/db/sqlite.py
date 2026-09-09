@@ -7,7 +7,8 @@ from typing import Optional
 
 import aiosqlite
 
-from .base import PARLAY_COLUMNS, PICK_COLUMNS, BetDatabase
+from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_PICK_COLUMNS,
+                   PARLAY_COLUMNS, PICK_COLUMNS)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bets (
@@ -84,6 +85,48 @@ CREATE TABLE IF NOT EXISTS model_parlays (
     legs_settled INTEGER,
     resolved_at TEXT
 );
+CREATE TABLE IF NOT EXISTS nfl_picks (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    player_key TEXT NOT NULL,
+    market TEXT NOT NULL,
+    player TEXT,
+    player_id TEXT,
+    position TEXT,
+    team TEXT,
+    event TEXT,
+    kickoff TEXT,
+    line REAL NOT NULL,
+    side TEXT NOT NULL,
+    fd_odds INTEGER,
+    model_p REAL,
+    edge_pts REAL,
+    residual REAL,
+    projection REAL,
+    adjusted REAL,
+    metrics TEXT,
+    source TEXT DEFAULT 'live',
+    result TEXT,
+    actual REAL,
+    created_at TEXT DEFAULT (datetime('now')),
+    resolved_at TEXT,
+    PRIMARY KEY (season, week, player_key, market)
+);
+CREATE TABLE IF NOT EXISTS nfl_cards (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    legs TEXT NOT NULL,
+    leg_count INTEGER NOT NULL,
+    american INTEGER,
+    decimal_odds REAL,
+    model_p REAL,
+    created_at TEXT DEFAULT (datetime('now')),
+    result TEXT,
+    legs_won INTEGER,
+    legs_settled INTEGER,
+    resolved_at TEXT,
+    PRIMARY KEY (season, week)
+);
 CREATE TABLE IF NOT EXISTS screen_runs (
     screen TEXT NOT NULL,
     pick_date TEXT NOT NULL,
@@ -93,6 +136,8 @@ CREATE TABLE IF NOT EXISTS screen_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_model_picks_screen_date ON model_picks(screen, pick_date);
 CREATE INDEX IF NOT EXISTS idx_model_picks_result ON model_picks(result);
+CREATE INDEX IF NOT EXISTS idx_nfl_picks_week ON nfl_picks(season, week);
+CREATE INDEX IF NOT EXISTS idx_nfl_picks_result ON nfl_picks(result);
 CREATE INDEX IF NOT EXISTS idx_bets_user_id ON bets(user_id);
 CREATE INDEX IF NOT EXISTS idx_bets_status ON bets(status);
 CREATE INDEX IF NOT EXISTS idx_bets_league ON bets(league);
@@ -322,6 +367,103 @@ class SQLiteDatabase(BetDatabase):
             inserted += cursor.rowcount if cursor.rowcount > 0 else 0
         await self._db.commit()
         return inserted
+
+    # ---------------- NFL ----------------
+
+    async def upsert_nfl_picks(self, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        n = 0
+        for row in rows:
+            cursor = await self._db.execute(
+                """INSERT INTO nfl_picks (
+                    season, week, player_key, market, player, player_id, position,
+                    team, event, kickoff, line, side, fd_odds, model_p, edge_pts,
+                    residual, projection, adjusted, metrics, source
+                ) VALUES (
+                    :season, :week, :player_key, :market, :player, :player_id, :position,
+                    :team, :event, :kickoff, :line, :side, :fd_odds, :model_p, :edge_pts,
+                    :residual, :projection, :adjusted, :metrics, :source
+                ) ON CONFLICT(season, week, player_key, market) DO UPDATE SET
+                    player=excluded.player, position=excluded.position,
+                    team=excluded.team, event=excluded.event, kickoff=excluded.kickoff,
+                    line=excluded.line, side=excluded.side, fd_odds=excluded.fd_odds,
+                    model_p=excluded.model_p, edge_pts=excluded.edge_pts,
+                    residual=excluded.residual, projection=excluded.projection,
+                    adjusted=excluded.adjusted, metrics=excluded.metrics
+                WHERE nfl_picks.result IS NULL""",
+                row,
+            )
+            n += cursor.rowcount or 0
+        await self._db.commit()
+        return n
+
+    async def list_nfl_picks(self, season=None, week=None, result=None,
+                             limit: int = 2000) -> list[dict]:
+        sql = f"SELECT {NFL_PICK_COLUMNS} FROM nfl_picks"
+        where, args = [], []
+        if season is not None:
+            where.append("season = ?"); args.append(season)
+        if week is not None:
+            where.append("week = ?"); args.append(week)
+        if result is not None:
+            where.append("result = ?"); args.append(result)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY season DESC, week DESC, ABS(edge_pts) DESC LIMIT ?"
+        args.append(limit)
+        cursor = await self._db.execute(sql, args)
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def settle_nfl_pick(self, season, week, player_key, market,
+                              result, actual) -> None:
+        await self._db.execute(
+            """UPDATE nfl_picks SET result = ?, actual = ?,
+                   resolved_at = datetime('now')
+               WHERE season = ? AND week = ? AND player_key = ? AND market = ?""",
+            (result, actual, season, week, player_key, market),
+        )
+        await self._db.commit()
+
+    async def insert_nfl_card(self, row: dict) -> bool:
+        cursor = await self._db.execute(
+            """INSERT INTO nfl_cards (
+                season, week, legs, leg_count, american, decimal_odds, model_p
+            ) VALUES (
+                :season, :week, :legs, :leg_count, :american, :decimal_odds, :model_p
+            ) ON CONFLICT(season, week) DO NOTHING""",
+            row,
+        )
+        await self._db.commit()
+        return bool(cursor.rowcount)
+
+    async def get_nfl_card(self, season: int, week: int):
+        cursor = await self._db.execute(
+            f"SELECT {NFL_CARD_COLUMNS} FROM nfl_cards WHERE season = ? AND week = ?",
+            (season, week),
+        )
+        r = await cursor.fetchone()
+        return dict(r) if r else None
+
+    async def list_nfl_cards(self, season=None, limit: int = 100) -> list[dict]:
+        sql = f"SELECT {NFL_CARD_COLUMNS} FROM nfl_cards"
+        args: list = []
+        if season is not None:
+            sql += " WHERE season = ?"
+            args.append(season)
+        sql += " ORDER BY season DESC, week DESC LIMIT ?"
+        args.append(limit)
+        cursor = await self._db.execute(sql, args)
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def settle_nfl_card(self, season, week, result, legs_won, legs_settled) -> None:
+        await self._db.execute(
+            """UPDATE nfl_cards SET result = ?, legs_won = ?, legs_settled = ?,
+                   resolved_at = datetime('now')
+               WHERE season = ? AND week = ?""",
+            (result, legs_won, legs_settled, season, week),
+        )
+        await self._db.commit()
 
     async def insert_parlay(self, row: dict) -> bool:
         cursor = await self._db.execute(

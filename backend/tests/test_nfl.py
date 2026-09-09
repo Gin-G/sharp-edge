@@ -414,3 +414,149 @@ def test_held_rows_are_reported_not_dropped():
     payload = screen.as_payload(board)
     assert [r["player"] for r in payload["signals"]] == ["Derrick Henry"]
     assert [r["player"] for r in payload["held_prior_only"]] == ["James Cook"]
+
+
+# ---------------------------------------------------------------------------
+# The card: what gets suggested, and what gets bet
+# ---------------------------------------------------------------------------
+
+from sharp_edge.nfl import card as card_mod  # noqa: E402
+
+
+def _prop(**kw):
+    base = {
+        "market": "receiving_yards", "player": "A Receiver", "key": "a receiver",
+        "line": 45.5, "adjusted": 55.0, "side": "OVER", "signal": "OVER", "bettable": True,
+        "prior_only": False, "edge_pts": 8.0, "odds": -114, "model_p": 0.58,
+        "fair_p": 0.50, "fd_event_id": "e1", "fd_market_id": "m1",
+        "over_selection_id": 11, "under_selection_id": 12,
+    }
+    base.update(kw)
+    return base
+
+
+def test_suggestion_needs_a_signal_and_an_edge():
+    assert len(card_mod.suggestions([_prop()])) == 1
+    assert card_mod.suggestions([_prop(signal="")]) == []
+    assert card_mod.suggestions([_prop(edge_pts=1.0)]) == []
+    assert card_mod.suggestions([_prop(bettable=False)]) == []
+
+
+def test_prior_only_rows_never_become_suggestions():
+    """Belt and braces with the screen's own guard: a prior has no player in
+    it, so it must not reach the tracked set by any route."""
+    assert card_mod.suggestions([_prop(prior_only=True)]) == []
+
+
+def test_unders_are_held_to_a_higher_bar():
+    """An UNDER at a modest edge is usually the market pricing a snap-count
+    risk the projection cannot see, so it needs more to qualify."""
+    over = _prop(side="OVER", edge_pts=4.0)
+    under = _prop(side="UNDER", signal="UNDER", edge_pts=4.0)
+    assert len(card_mod.suggestions([over])) == 1
+    assert card_mod.suggestions([under]) == []
+    assert len(card_mod.suggestions([_prop(side="UNDER", signal="UNDER",
+                                           edge_pts=7.0)])) == 1
+
+
+def test_a_short_line_is_refused_on_both_sides():
+    """A short line is the book pricing an uncertain role, and role is the one
+    thing the projection does not model — so the gap measures our ignorance
+    rather than the market's. Refused in both directions.
+
+    The first version of this guard covered only the under, and the resulting
+    card was Mack Hollins over 8.5 receiving yards on a projection of 33.
+    """
+    for side in ("OVER", "UNDER"):
+        row = _prop(side=side, signal=side, line=8.5, adjusted=9.0, edge_pts=25.0)
+        assert card_mod.suggestions([row]) == [], side
+    # The same edge on a real line is fine.
+    assert len(card_mod.suggestions([_prop(side="UNDER", signal="UNDER",
+                                           line=45.5, adjusted=40.0,
+                                           edge_pts=20.0)])) == 1
+
+
+def test_a_projection_at_twice_the_line_is_a_different_player_week():
+    """Not a strong opinion — a description of a role the book is not pricing."""
+    assert card_mod.suggestions([_prop(line=30.0, adjusted=75.0, edge_pts=20.0)]) == []
+    assert len(card_mod.suggestions([_prop(line=30.0, adjusted=50.0,
+                                           edge_pts=20.0)])) == 1
+
+
+def test_card_takes_one_leg_per_game():
+    """Two props from the same game are one bet on that offence."""
+    rows = [
+        _prop(key="a", edge_pts=12.0, fd_event_id="e1"),
+        _prop(key="b", edge_pts=11.0, fd_event_id="e1"),
+        _prop(key="c", edge_pts=9.0, fd_event_id="e2"),
+    ]
+    got = card_mod.build(rows)
+    assert [r["key"] for r in got] == ["a", "c"]
+
+
+def test_card_is_empty_below_the_leg_floor():
+    assert card_mod.build([_prop()]) == []
+
+
+def test_betslip_uses_the_selection_for_the_side_bet():
+    """Sending the over's id for an under loads the opposite bet — the worst
+    possible failure for a convenience link."""
+    url = card_mod.betslip_url([_prop(side="UNDER")])
+    assert "selectionId[0]=12" in url
+    url = card_mod.betslip_url([_prop(side="OVER")])
+    assert "selectionId[0]=11" in url
+
+
+# ---------------------------------------------------------------------------
+# Settlement
+# ---------------------------------------------------------------------------
+
+from sharp_edge.nfl import tracking as nfl_tracking  # noqa: E402
+
+
+@pytest.mark.parametrize("side,actual,expected", [
+    ("OVER", 60.0, "WIN"),
+    ("OVER", 30.0, "LOSS"),
+    ("UNDER", 30.0, "WIN"),
+    ("UNDER", 60.0, "LOSS"),
+])
+def test_settlement_reads_the_side(side, actual, expected):
+    pick = {"market": "receiving_yards", "line": 45.5, "side": side}
+    assert nfl_tracking._result_for(pick, {"receiving_yards": actual})[0] == expected
+
+
+def test_exact_line_is_a_push():
+    pick = {"market": "receptions", "line": 4.0, "side": "OVER"}
+    assert nfl_tracking._result_for(pick, {"receptions": 4.0})[0] == "PUSH"
+
+
+def test_a_missing_stat_settles_as_zero_not_as_void():
+    """A player who took the field and was never targeted recorded zero, which
+    loses an over. Only a player with no row at all is a void, and that is the
+    caller's decision — it cannot be seen from here."""
+    pick = {"market": "receiving_yards", "line": 45.5, "side": "OVER"}
+    result, actual = nfl_tracking._result_for(pick, {"receiving_yards": None})
+    assert (result, actual) == ("LOSS", 0.0)
+
+
+def test_voids_and_pushes_leave_the_denominator():
+    rows = [
+        {"result": "WIN", "fd_odds": -110}, {"result": "WIN", "fd_odds": -110},
+        {"result": "LOSS", "fd_odds": -110},
+        {"result": "VOID", "fd_odds": -110}, {"result": "PUSH", "fd_odds": -110},
+        {"result": None, "fd_odds": -110},
+    ]
+    b = nfl_tracking._bucket(rows)
+    assert (b["wins"], b["losses"]) == (2, 1)
+    assert b["hit_rate"] == 66.7          # 2 of 3 graded, not 2 of 6
+    assert (b["voids"], b["pushes"], b["pending"]) == (1, 1, 1)
+
+
+def test_roi_is_reported_next_to_hit_rate():
+    """Hit rate alone is what misled the baseball screen for months — 64.8%
+    looked fine until the median price turned out to be -260."""
+    # Three wins at -260 and two losses: 66.7% and still losing money.
+    rows = [{"result": "WIN", "fd_odds": -260}] * 3 + [{"result": "LOSS", "fd_odds": -260}] * 2
+    b = nfl_tracking._bucket(rows)
+    assert b["hit_rate"] == 60.0
+    assert b["roi"] < 0

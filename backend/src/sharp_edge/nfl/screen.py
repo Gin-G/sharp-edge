@@ -35,7 +35,7 @@ from typing import Optional
 import httpx
 
 from ..fanduel.odds import american_to_implied
-from . import model, odds as nfl_odds, projections as nfl_proj
+from . import card as card_mod, model, odds as nfl_odds, projections as nfl_proj
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +390,8 @@ def warm_async(force: bool = False) -> dict:
 def as_payload(board: NFLBoard) -> dict:
     """The board as the API serves it."""
     signals = [r for r in board.props if r["signal"] and r["bettable"]]
+    suggested = card_mod.suggestions(board.props)
+    the_card = card_mod.build(board.props)
     # Rows that would have fired but for the prior-only guard. Worth reporting
     # rather than silently dropping: a large number here means the projections
     # table upstream is stale or mis-joining names.
@@ -402,6 +404,16 @@ def as_payload(board: NFLBoard) -> dict:
         "props": board.props,
         "signals": signals,
         "held_prior_only": held,
+        # What we would actually bet, and the wider set we record. The card is
+        # two legs; the suggestions are what the track record is built from.
+        "suggestions": suggested,
+        "card": {
+            "legs": the_card,
+            "summary": card_mod.summarise(the_card),
+            "betslip_url": card_mod.betslip_url(the_card),
+            "min_edge_pts": card_mod.MIN_EDGE_PTS,
+            "under_min_edge_pts": card_mod.UNDER_MIN_EDGE_PTS,
+        },
         "tds": board.tds,
         "games": board.games,
         "fits": board.fits,

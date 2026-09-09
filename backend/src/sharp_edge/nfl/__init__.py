@@ -12,6 +12,8 @@ and a pricing model rather than a data pipeline.
   model        projection -> probability -> edge, and the market rescaling that
                has to happen before any of that means anything
   screen       the week's board, cached and warmed in the background
+  card         which rows become suggestions, and the two-leg card
+  tracking     freeze the week before kickoff, settle it after, score it
 """
 
-from . import model, names, odds, projections, screen  # noqa: F401
+from . import card, model, names, odds, projections, screen, tracking  # noqa: F401

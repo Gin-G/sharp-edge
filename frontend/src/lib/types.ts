@@ -390,6 +390,51 @@ export interface NflProbFit {
   n: number;
 }
 
+export interface NflCardSummary {
+  legs: number;
+  decimal: number | null;
+  american: number | null;
+  model_p: number | null;
+  implied_p: number | null;
+  ev: number | null;
+  kelly_quarter: number | null;
+}
+
+export interface NflTrackBucket {
+  picks: number;
+  wins: number;
+  losses: number;
+  voids: number;
+  pushes: number;
+  pending: number;
+  hit_rate: number | null;
+  /** Flat-stake ROI at the recorded price. Hit rate alone is what misled the
+   *  baseball screen for months — 64.8% at a median -260 still loses. */
+  roi: number | null;
+}
+
+export interface NflTrackRecord {
+  season: number | null;
+  overall: NflTrackBucket;
+  by_market: ({ market: string } & NflTrackBucket)[];
+  by_side: ({ side: string } & NflTrackBucket)[];
+  by_week: ({ week: number } & NflTrackBucket)[];
+  cards: {
+    played: number;
+    won: number;
+    rows: {
+      season: number; week: number; leg_count: number; american: number | null;
+      result: string | null; legs_won: number | null; legs_settled: number | null;
+    }[];
+  };
+  picks: {
+    season: number; week: number; player: string; market: string; line: number;
+    side: string; fd_odds: number | null; model_p: number | null;
+    edge_pts: number | null; result: string | null; actual: number | null;
+    team: string | null; event: string | null;
+  }[];
+}
+
 export interface NflScreen {
   season: number;
   week: number;
@@ -402,6 +447,18 @@ export interface NflScreen {
    *  list here means the upstream projections table is stale or mis-joining
    *  names, and is worth surfacing rather than silently dropping. */
   held_prior_only: NflProp[];
+  /** Every row worth recording as a prediction — wider than the card, and the
+   *  set the track record is built from. */
+  suggestions: NflProp[];
+  card: {
+    legs: NflProp[];
+    summary: NflCardSummary;
+    betslip_url: string | null;
+    min_edge_pts: number;
+    under_min_edge_pts: number;
+  };
+  frozen?: { suggestions: number; written: number; card_legs: number;
+             card_frozen: boolean; error?: string };
   tds: NflTd[];
   games: NflGameMarket[];
   fits: Record<string, NflFit>;

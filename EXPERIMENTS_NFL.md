@@ -250,6 +250,82 @@ recorded before this date should be treated as contaminated.
 
 ---
 
+## Finding 7 — a short line is where the model is least trustworthy, both ways
+
+The first card the screen produced was **Mack Hollins over 8.5 receiving yards**
+and **Malik Davis over 13.5 rushing yards**. Sorted by edge, the entire top of
+the board was backups on short lines. The correlation was almost perfect:
+
+| player | line | projection | ratio | "edge" |
+|---|---|---|---|---|
+| Mack Hollins | 8.5 | 33.3 | 3.92x | +28.2 |
+| Malik Davis | 13.5 | 44.2 | 3.27x | +26.7 |
+| Corey Kiner | 8.5 | 26.7 | 3.14x | +25.6 |
+| Tyler Higbee | 14.5 | 36.3 | 2.50x | +20.0 |
+| RJ Harvey | 18.5 | 45.2 | 2.44x | +21.5 |
+
+The edge was ranking on the projection/line ratio, which is not a measure of
+value. **A short line is the book saying the role is uncertain** — WR5, a
+committee back, someone easing back from injury — and role is precisely what
+the projection does not model. It carries no snap share and no depth chart; it
+is a season-long rate for a nominal starter. So on a short line the two numbers
+are answering different questions and the gap measures our ignorance.
+
+The first version of this guard covered only the under, on the reasoning that
+an under at a short line is a bet on a player being inactive. That was right as
+far as it went and missed that **the failure is symmetric**: the over at a short
+line is a bet against a role risk we cannot see, which is the same ignorance
+pointed the other way.
+
+Two supporting measurements. On held-out 2023-25 the model is *overconfident*
+exactly here, and only here:
+
+| line | receiving: predicted / actual | rushing: predicted / actual |
+|---|---|---|
+| ≤ 10 | 68.1% / **65.0%** | 64.8% / **61.7%** |
+| 10-20 | 51.6% / 52.6% | 49.8% / 51.0% |
+| 20-30 | 37.1% / 39.7% | 34.4% / 37.3% |
+| 30-50 | 25.5% / 26.9% | 24.1% / 25.7% |
+| 50-100 | 15.1% / 13.1% | 14.6% / 12.7% |
+
+Every other bucket errs low. And on the live board the median suggestion sat at
+1.39x projection/line with the 90th percentile at 2.44x, so the failures were
+all in the tail.
+
+**Shipped:** `card.MIN_LINE` (20 yards, 2.5 receptions, 175 passing yards)
+refuses both sides below the bar, and `card.MAX_PROJECTION_RATIO` (2.0) catches
+the same failure at higher lines. Both are priors, and both are exactly what
+the track record is for.
+
+---
+
+## Tracking, from week 1
+
+Nothing above can be settled by argument, so everything is now recorded.
+
+**What gets recorded.** Every row clearing the thresholds is a *suggestion* and
+is written to `nfl_picks` with its price, model probability, edge and
+projection. The *card* is the best two, one per game, frozen in `nfl_cards`. The
+split is deliberate: a two-leg card produces two settled outcomes a week, which
+would take a season to say anything, while the suggestions produce a dozen.
+
+**When.** The freeze happens on the board's read path, and both writes are
+idempotent, so the week is captured by the first page view or the daily cron —
+whichever comes first. That matters more than in baseball: an NFL line moves all
+week and FanDuel pulls each market at kickoff, so a card re-derived on Monday is
+made of whichever games had not started.
+
+**Settlement** is a separate daily pass against nflverse actuals — the same
+source the model is calibrated on, because settling on one source and fitting on
+another is how a track record quietly stops meaning anything. A player with no
+row is VOID, not LOSS; voids and pushes leave the denominator.
+
+**Reported as hit rate *and* ROI, always together.** That pairing is the single
+most useful thing the baseball side learned: the retired batter screen hit 64.8%
+and lost money, because its median price was -260 against a 72% break-even.
+
+---
+
 ## Open — what should replace the guesses
 
 **`SHRINK_PRESEASON = 0.25` / `SHRINK_INSEASON = 0.50` are priors, not
@@ -260,13 +336,12 @@ edge over the book on that question. Fitting them properly needs settled weeks
 paired with the line that was posted at the time. **Nothing like the MLB odds
 archive exists for football yet, and building it is the first thing to do.**
 
-**No pick persistence or track record.** The MLB side records every pick and
-settles it (`tracking.py`); the NFL side does not yet. Until it does there is no
-way to tell whether any of this works. Week 1 is the moment to start recording.
-
-**No card.** MLB freezes a daily parlay and scores it on sweep rate. The NFL
-equivalent — a weekly card, one leg per game — is not built, deliberately: it
-should not be built before there is a track record to size it from.
+**Every selection threshold is a prior.** `MIN_EDGE_PTS` (3.0), the higher
+`UNDER_MIN_EDGE_PTS` (6.0), `MIN_LINE`, `MAX_PROJECTION_RATIO` and both shrink
+factors were all chosen from reasoning plus one live board, not from settled
+results. They are now recorded per pick, so each becomes testable after a month:
+split the track record by side to test the under bar, by line size to test
+`MIN_LINE`, by edge bucket to test the floor.
 
 **Projections are only scored by us.** `/projections/accuracy` on NFL-API
 returns `no_data` for every season, so the model has never been scored

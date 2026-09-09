@@ -13,6 +13,18 @@ PARLAY_COLUMNS = (
     "created_at, result, legs_won, legs_settled, resolved_at"
 )
 
+# Every nfl_picks column except `metrics`, mirroring PICK_COLUMNS.
+NFL_PICK_COLUMNS = (
+    "season, week, player_key, market, player, player_id, position, team, "
+    "event, kickoff, line, side, fd_odds, model_p, edge_pts, residual, "
+    "projection, adjusted, source, result, actual, created_at, resolved_at"
+)
+
+NFL_CARD_COLUMNS = (
+    "season, week, legs, leg_count, american, decimal_odds, model_p, "
+    "created_at, result, legs_won, legs_settled, resolved_at"
+)
+
 # Every model_picks column except `metrics` — see BetDatabase.list_picks.
 PICK_COLUMNS = (
     "screen, pick_date, batter_id, batter, team, pitcher_id, opposing_pitcher, "
@@ -161,6 +173,50 @@ class BetDatabase(ABC):
     @abstractmethod
     async def settle_parlay(
         self, pick_date: str, result: str, legs_won: int, legs_settled: int
+    ) -> None: ...
+
+    # ------------------------------------------------------------------
+    # NFL props.
+    #
+    # A separate table from model_picks rather than a widened one: a baseball
+    # pick is (batter, pitcher, date) and settles on hits, an NFL prop is
+    # (player, market, line, side) and settles on a stat crossing a number.
+    # Forcing both through one schema would leave half the columns null on
+    # every row and make neither query readable.
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def upsert_nfl_picks(self, rows: list[dict]) -> int:
+        """Write this week's picks. Existing unresolved rows are replaced so a
+        re-run before kickoff can revise them; settled rows are never touched."""
+
+    @abstractmethod
+    async def list_nfl_picks(
+        self, season: Optional[int] = None, week: Optional[int] = None,
+        result: Optional[str] = None, limit: int = 2000,
+    ) -> list[dict]: ...
+
+    @abstractmethod
+    async def settle_nfl_pick(
+        self, season: int, week: int, player_key: str, market: str,
+        result: str, actual: Optional[float],
+    ) -> None: ...
+
+    @abstractmethod
+    async def insert_nfl_card(self, row: dict) -> bool:
+        """Freeze one week's card. Returns False if the week already has one."""
+
+    @abstractmethod
+    async def get_nfl_card(self, season: int, week: int) -> Optional[dict]: ...
+
+    @abstractmethod
+    async def list_nfl_cards(
+        self, season: Optional[int] = None, limit: int = 100
+    ) -> list[dict]: ...
+
+    @abstractmethod
+    async def settle_nfl_card(
+        self, season: int, week: int, result: str, legs_won: int, legs_settled: int
     ) -> None: ...
 
     @abstractmethod

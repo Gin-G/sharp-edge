@@ -7,7 +7,8 @@ from typing import Optional
 
 import asyncpg
 
-from .base import PARLAY_COLUMNS, PICK_COLUMNS, BetDatabase
+from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_PICK_COLUMNS,
+                   PARLAY_COLUMNS, PICK_COLUMNS)
 
 
 def _to_dt(v):
@@ -18,6 +19,20 @@ def _to_dt(v):
     if isinstance(v, str):
         return datetime.fromisoformat(v.replace("Z", "+00:00"))
     raise TypeError(f"unsupported timestamp type: {type(v).__name__}")
+
+
+def _nfl_row(row) -> dict:
+    """Normalise an nfl_picks / nfl_cards row for JSON.
+
+    Same job as ``_parlay_row``: timestamps to ISO, JSONB back to Python.
+    """
+    d = dict(row)
+    for k in ("created_at", "resolved_at"):
+        if d.get(k) is not None and not isinstance(d[k], str):
+            d[k] = d[k].isoformat()
+    if isinstance(d.get("legs"), str):
+        d["legs"] = json.loads(d["legs"])
+    return d
 
 
 def _parlay_row(row) -> dict:
@@ -98,6 +113,48 @@ CREATE TABLE IF NOT EXISTS model_picks (
     resolved_at TIMESTAMPTZ,
     PRIMARY KEY (screen, pick_date, batter_id)
 );
+CREATE TABLE IF NOT EXISTS nfl_picks (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    player_key TEXT NOT NULL,
+    market TEXT NOT NULL,
+    player TEXT,
+    player_id TEXT,
+    position TEXT,
+    team TEXT,
+    event TEXT,
+    kickoff TEXT,
+    line DOUBLE PRECISION NOT NULL,
+    side TEXT NOT NULL,
+    fd_odds INTEGER,
+    model_p DOUBLE PRECISION,
+    edge_pts DOUBLE PRECISION,
+    residual DOUBLE PRECISION,
+    projection DOUBLE PRECISION,
+    adjusted DOUBLE PRECISION,
+    metrics JSONB,
+    source TEXT DEFAULT 'live',
+    result TEXT,
+    actual DOUBLE PRECISION,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ,
+    PRIMARY KEY (season, week, player_key, market)
+);
+CREATE TABLE IF NOT EXISTS nfl_cards (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    legs JSONB NOT NULL,
+    leg_count INTEGER NOT NULL,
+    american INTEGER,
+    decimal_odds DOUBLE PRECISION,
+    model_p DOUBLE PRECISION,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    result TEXT,
+    legs_won INTEGER,
+    legs_settled INTEGER,
+    resolved_at TIMESTAMPTZ,
+    PRIMARY KEY (season, week)
+);
 CREATE TABLE IF NOT EXISTS screen_runs (
     screen TEXT NOT NULL,
     pick_date DATE NOT NULL,
@@ -121,6 +178,8 @@ CREATE TABLE IF NOT EXISTS model_parlays (
 """
 
 INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_nfl_picks_week ON nfl_picks(season, week)",
+    "CREATE INDEX IF NOT EXISTS idx_nfl_picks_result ON nfl_picks(result)",
     "CREATE INDEX IF NOT EXISTS idx_bets_user_id ON bets(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_bets_status ON bets(status)",
     "CREATE INDEX IF NOT EXISTS idx_bets_league ON bets(league)",
@@ -370,6 +429,109 @@ class PostgresDatabase(BetDatabase):
                 # asyncpg returns e.g. "INSERT 0 1"; 0 rows means conflict-skipped
                 inserted += int(status.rsplit(" ", 1)[-1])
         return inserted
+
+    # ---------------- NFL ----------------
+
+    async def upsert_nfl_picks(self, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        n = 0
+        async with self._pool.acquire() as conn:
+            for row in rows:
+                status = await conn.execute(
+                    """INSERT INTO nfl_picks (
+                        season, week, player_key, market, player, player_id, position,
+                        team, event, kickoff, line, side, fd_odds, model_p, edge_pts,
+                        residual, projection, adjusted, metrics, source
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                              $16,$17,$18,$19,$20)
+                    ON CONFLICT (season, week, player_key, market) DO UPDATE SET
+                        player=EXCLUDED.player, position=EXCLUDED.position,
+                        team=EXCLUDED.team, event=EXCLUDED.event,
+                        kickoff=EXCLUDED.kickoff, line=EXCLUDED.line,
+                        side=EXCLUDED.side, fd_odds=EXCLUDED.fd_odds,
+                        model_p=EXCLUDED.model_p, edge_pts=EXCLUDED.edge_pts,
+                        residual=EXCLUDED.residual, projection=EXCLUDED.projection,
+                        adjusted=EXCLUDED.adjusted, metrics=EXCLUDED.metrics
+                    WHERE nfl_picks.result IS NULL""",
+                    row["season"], row["week"], row["player_key"], row["market"],
+                    row.get("player"), row.get("player_id"), row.get("position"),
+                    row.get("team"), row.get("event"), row.get("kickoff"),
+                    row["line"], row["side"], row.get("fd_odds"), row.get("model_p"),
+                    row.get("edge_pts"), row.get("residual"), row.get("projection"),
+                    row.get("adjusted"), row.get("metrics"), row.get("source", "live"),
+                )
+                n += int(status.rsplit(" ", 1)[-1])
+        return n
+
+    async def list_nfl_picks(self, season=None, week=None, result=None,
+                             limit: int = 2000) -> list[dict]:
+        sql = f"SELECT {NFL_PICK_COLUMNS} FROM nfl_picks"
+        where, args = [], []
+        if season is not None:
+            args.append(season); where.append(f"season = ${len(args)}")
+        if week is not None:
+            args.append(week); where.append(f"week = ${len(args)}")
+        if result is not None:
+            args.append(result); where.append(f"result = ${len(args)}")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        args.append(limit)
+        sql += (" ORDER BY season DESC, week DESC, ABS(edge_pts) DESC "
+                f"LIMIT ${len(args)}")
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+        return [_nfl_row(r) for r in rows]
+
+    async def settle_nfl_pick(self, season, week, player_key, market,
+                              result, actual) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE nfl_picks SET result = $1, actual = $2, resolved_at = NOW()
+                   WHERE season = $3 AND week = $4 AND player_key = $5
+                     AND market = $6""",
+                result, actual, season, week, player_key, market,
+            )
+
+    async def insert_nfl_card(self, row: dict) -> bool:
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """INSERT INTO nfl_cards (
+                    season, week, legs, leg_count, american, decimal_odds, model_p
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+                ON CONFLICT (season, week) DO NOTHING""",
+                row["season"], row["week"], row["legs"], row["leg_count"],
+                row.get("american"), row.get("decimal_odds"), row.get("model_p"),
+            )
+        return int(status.rsplit(" ", 1)[-1]) > 0
+
+    async def get_nfl_card(self, season: int, week: int):
+        async with self._pool.acquire() as conn:
+            r = await conn.fetchrow(
+                f"SELECT {NFL_CARD_COLUMNS} FROM nfl_cards "
+                "WHERE season = $1 AND week = $2", season, week,
+            )
+        return _nfl_row(r) if r else None
+
+    async def list_nfl_cards(self, season=None, limit: int = 100) -> list[dict]:
+        sql = f"SELECT {NFL_CARD_COLUMNS} FROM nfl_cards"
+        args: list = []
+        if season is not None:
+            args.append(season); sql += f" WHERE season = ${len(args)}"
+        args.append(limit)
+        sql += f" ORDER BY season DESC, week DESC LIMIT ${len(args)}"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+        return [_nfl_row(r) for r in rows]
+
+    async def settle_nfl_card(self, season, week, result, legs_won, legs_settled) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE nfl_cards SET result = $1, legs_won = $2, legs_settled = $3,
+                       resolved_at = NOW()
+                   WHERE season = $4 AND week = $5""",
+                result, legs_won, legs_settled, season, week,
+            )
 
     async def insert_parlay(self, row: dict) -> bool:
         from datetime import date as _date

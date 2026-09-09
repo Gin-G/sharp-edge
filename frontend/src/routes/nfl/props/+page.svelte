@@ -6,6 +6,8 @@
     fmtOdds, fmtPct, fmtSigned, fmtEv, evClass, MARKET_LABEL, fmtKickoff,
   } from '$lib/nflScreen';
   import type { NflScreen, NflProp } from '$lib/types';
+  import NflCard from '$lib/components/NflCard.svelte';
+  import NflTrackRecord from '$lib/components/NflTrackRecord.svelte';
 
   let s = initialState(peek<NflScreen>(NFL_CACHE_KEY));
   $: ({ data, loading, error, warming, warmingElapsed } = s);
@@ -110,6 +112,13 @@
       {/if}
     </div>
   {:else if data}
+    <!-- The card first: it is the only thing on this page that is a bet. The
+         track record says how these have been doing, and the board below is
+         where they came from — both are context for it. -->
+    <NflCard {data} />
+
+    <NflTrackRecord />
+
     <!-- Controls -->
     <div class="card p-4 flex items-center gap-4 flex-wrap text-sm">
       <label class="flex items-center gap-2 text-slate-300">

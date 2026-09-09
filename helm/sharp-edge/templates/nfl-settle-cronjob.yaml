@@ -1,0 +1,63 @@
+{{- if .Values.nflSettle.enabled }}
+# Daily NFL settlement.
+#
+# Resolves the most recent week's recorded suggestions against nflverse
+# actuals. It has to be a scheduled job rather than something the app does on
+# read, because nflverse publishes a day or two after the games — there is no
+# request at the right moment to hang it off.
+#
+# Runs every day rather than weekly on purpose. nflverse's publish time is not
+# guaranteed, a Monday-night game lands a day after the Sunday slate, and the
+# endpoint is idempotent (already-settled picks are skipped), so a daily run
+# costs one query and removes any need to guess the right day.
+#
+# Curl rather than a Python entrypoint: settlement lives behind the API so the
+# job needs no database credentials of its own, and the endpoint is reachable
+# in-cluster without going through the ingress.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Values.app.name }}-nfl-settle
+  namespace: {{ .Values.app.namespace | default .Release.Namespace }}
+  labels:
+    app: {{ .Values.app.name }}-nfl-settle
+spec:
+  schedule: {{ .Values.nflSettle.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app: {{ .Values.app.name }}-nfl-settle
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: settle
+              image: {{ .Values.nflSettle.image }}
+              command:
+                - /bin/sh
+                - -c
+                # Two calls, in this order and for different reasons. The board
+                # fetch is what *records* the current week — the freeze happens
+                # on the read path — so it keeps the upcoming week captured even
+                # if nobody opens the page. The settle call then resolves
+                # whatever is already pending.
+                - >-
+                  set -e;
+                  BASE="http://{{ .Values.app.name }}-backend:{{ .Values.backend.port }}";
+                  echo "refreshing the board (records the week)";
+                  curl -sS -m 120 "$BASE/nfl/screen" -o /dev/null -w 'board: %{http_code}\n' || true;
+                  echo "settling";
+                  curl -sS -m 120 -X POST "$BASE/nfl/settle" -w '\n'
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 64Mi
+{{- end }}

@@ -91,6 +91,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("tracking: configure failed: %s", e)
 
+    # NFL tracking needs only the database — its writes happen on the request
+    # path rather than in a warm-up thread, so there is no loop to hand over.
+    try:
+        from .nfl import tracking as nfl_tracking
+        nfl_tracking.configure(_db)
+        logger.info("nfl tracking: configured")
+    except Exception as e:
+        logger.warning("nfl tracking: configure failed: %s", e)
+
     # Kick off the batter-screen scrape in the background so the first browser
     # request after a pod restart doesn't have to wait several minutes. If the
     # models extras aren't installed (lighter prod image, dev sandbox, etc.)
@@ -693,7 +702,57 @@ async def nfl_screen(force: bool = False):
     nfl.warm_async()
     payload = nfl.as_payload(board)
     payload["stale"] = bool(nfl.warm_status().get("stale"))
+
+    # Record the week on the way past. Both writes are idempotent — picks
+    # upsert while unresolved, the card insert is a no-op once the week has one
+    # — so wiring this into the read path is what guarantees the week is
+    # captured before kickoff without needing a scheduler to be right.
+    try:
+        from .nfl import tracking as nfl_tracking
+        payload["frozen"] = await nfl_tracking.freeze_week(payload)
+    except Exception as e:
+        logger.warning("nfl freeze failed: %r", e)
+        payload["frozen"] = {"error": str(e)}
     return payload
+
+
+@app.get("/nfl/track-record")
+async def nfl_track_record(season: Optional[int] = None):
+    """Hit rate and ROI for every NFL suggestion we have recorded.
+
+    Split by market and by side, because those are where the model is most
+    likely to be wrong in a way an overall number would hide — in particular
+    the UNDER bar in nfl/card.py is a guess, and this is what confirms or
+    kills it.
+    """
+    try:
+        from .nfl import tracking as nfl_tracking
+    except ImportError as e:
+        raise HTTPException(500, f"NFL extras not installed: {e}")
+    return await nfl_tracking.track_record(season)
+
+
+@app.post("/nfl/settle")
+async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None):
+    """Settle one week against nflverse actuals.
+
+    Defaults to the most recent week that still has pending picks, so the
+    daily job can call it with no arguments and do the right thing. nflverse
+    publishes a day or two after the games, and a week with no actuals yet is
+    reported as such rather than settled wrongly.
+    """
+    try:
+        from .nfl import tracking as nfl_tracking
+    except ImportError as e:
+        raise HTTPException(500, f"NFL extras not installed: {e}")
+
+    if season is None or week is None:
+        pending = [p for p in await get_db().list_nfl_picks() if not p.get("result")]
+        if not pending:
+            return {"settled": 0, "message": "nothing pending"}
+        target = max((p["season"], p["week"]) for p in pending)
+        season, week = target
+    return await nfl_tracking.settle_week(season, week)
 
 
 @app.get("/nfl/screen/status")
