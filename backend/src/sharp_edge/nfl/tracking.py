@@ -17,12 +17,29 @@ event loop through ``run_coroutine_threadsafe``. The NFL board is cheap enough
 to build inside a request, so none of that machinery is needed, and its absence
 is worth keeping.
 
-**Why freezing matters more here than in baseball.** A batter prop that is not
-frozen can be re-derived from the next morning's board and will be roughly
-right. An NFL line moves all week and FanDuel pulls each market at kickoff, so
-a card re-derived on Monday is made of whichever games had not started —
-usually one Monday-night game. The record has to be written before the first
-kickoff or it is not a record of anything.
+**What is fixed and what still moves — deliberately the same as baseball.**
+Picks are replaceable while unresolved, so a re-run before kickoff revises them
+and a line move or an injury is picked up. The *card* is written once, the
+first time it is built, and then left alone. That is exactly the split
+``tracking.freeze_parlay`` uses for the daily parlay, and the incident behind
+it is recorded there: on 2026-08-20 a card rebuilt late in the day came back as
+a single leg ranked 8th, because the seven names above it had already played
+and FanDuel had pulled their markets.
+
+**The asymmetry worth knowing.** Baseball's unit is a day and every game starts
+within a few hours, so "frozen at first build" and "frozen shortly before first
+pitch" are nearly the same moment. An NFL week runs Thursday to Monday, so a
+card frozen on Wednesday is set four or five days before most of its legs kick
+off, while every market is still open and the lines still have a long way to
+move. The baseball rationale — that the board stops being able to reproduce the
+card — does not bite here until each individual game starts.
+
+Kept as-is anyway, because the alternative is worse in a way that matters more
+than staleness: a card re-derivable until each leg's kickoff is a card whose
+record can improve with hindsight, one leg at a time, and being unable to do
+that is the entire point of writing it down. Worth revisiting if the frozen
+card starts diverging badly from the Sunday-morning board — the divergence is
+measurable, since every pick keeps the price and projection it was recorded at.
 """
 
 from __future__ import annotations
