@@ -64,6 +64,25 @@ _MARKET_INPUTS = {
 # below this the read is a base rate rather than an opinion.
 TD_MIN_PROB = 0.08
 
+# Projection types that are a positional prior rather than a read on the player.
+#
+# A "rookie_prior" row is draft capital run through a positional curve — it has
+# no player-specific information in it at all. Differencing it against a line
+# and calling the gap a signal is measuring the prior's distance from the
+# market, which says nothing about the player. So these rows are priced and
+# shown but never fire.
+#
+# This is right for genuine rookies on its own terms, and it also contains an
+# upstream bug worth naming: the projection engine looked its history up by
+# unanchored substring match, so every veteran whose roster name carries a
+# generational suffix — nflverse stores "Travis Etienne", the roster says
+# "Travis Etienne Jr." — came back with no history and fell through to this
+# prior. That put James Cook (1,621 rushing yards in 2025) on the board at 21
+# yards, as the strongest UNDER of the week. Fixed in nfl-data-py
+# (PlayerPredictor._player_history); this guard is what stops a stale
+# projections table from betting it in the meantime.
+PRIOR_ONLY_TYPES = frozenset({"rookie_prior"})
+
 # League catch rate, for turning projected receptions back into the targets the
 # TD model was trained on. Stable around this for a decade.
 CATCH_RATE = 0.65
@@ -160,6 +179,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             priced = model.price_side(p_over, ln.over, ln.under)
             residual = model.market_residual(ln.line, raw, fit)
             threshold = THRESHOLDS[market]
+            prior_only = (p.get("prediction_type") or "") in PRIOR_ONLY_TYPES
             board.props.append({
                 "market": market,
                 "player": ln.player,
@@ -182,7 +202,8 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 "signal": _signal(residual, threshold),
                 "raw_signal": _signal(raw - ln.line, threshold),
                 "threshold": threshold,
-                "bettable": market in model.BETTABLE,
+                "bettable": market in model.BETTABLE and not prior_only,
+                "prior_only": prior_only,
                 "prediction_type": p.get("prediction_type"),
                 "exp_games": p.get("exp_games"),
                 "fd_market_id": ln.market_id,
@@ -369,12 +390,18 @@ def warm_async(force: bool = False) -> dict:
 def as_payload(board: NFLBoard) -> dict:
     """The board as the API serves it."""
     signals = [r for r in board.props if r["signal"] and r["bettable"]]
+    # Rows that would have fired but for the prior-only guard. Worth reporting
+    # rather than silently dropping: a large number here means the projections
+    # table upstream is stale or mis-joining names.
+    held = [r for r in board.props if r["signal"] and r.get("prior_only")
+            and r["market"] in model.BETTABLE]
     return {
         "season": board.season,
         "week": board.week,
         "preseason": board.preseason,
         "props": board.props,
         "signals": signals,
+        "held_prior_only": held,
         "tds": board.tds,
         "games": board.games,
         "fits": board.fits,

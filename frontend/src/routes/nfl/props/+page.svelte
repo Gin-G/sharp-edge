@@ -134,6 +134,27 @@
       </span>
     </div>
 
+    {#if data.held_prior_only?.length}
+      <!-- Rows that cleared the threshold on a projection with no player
+           information behind it. Shown rather than dropped: a long list here
+           is a signal about the upstream table, not about the players. -->
+      <div class="card border-amber-800/50 bg-amber-950/20 text-sm text-amber-200/90">
+        <span class="font-semibold">
+          {data.held_prior_only.length} row{data.held_prior_only.length === 1 ? '' : 's'} held back.
+        </span>
+        These cleared the threshold, but their projection is a positional prior
+        — draft capital through a curve — with no read on the player in it, so
+        the gap measures the prior's distance from the market rather than
+        anything about the player:
+        <span class="text-amber-200">
+          {data.held_prior_only.slice(0, 6).map((r) => r.player).join(', ')}{data
+            .held_prior_only.length > 6 ? '…' : ''}
+        </span>.
+        Established players appearing here mean the projections table upstream
+        is stale or failed to match their history.
+      </div>
+    {/if}
+
     {#if includeUnbettable}
       <div class="card border-amber-800/40 bg-amber-950/10 text-xs text-amber-200/80">
         {data.passing_yards_caveat}

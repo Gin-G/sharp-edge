@@ -379,3 +379,38 @@ def test_td_price_reports_no_ev():
     assert priced["ev"] is None and priced["kelly"] is None
     assert priced["edge_pts"] == pytest.approx(100 * (0.28 - 0.3125), abs=0.2)
     assert priced["model_p_unanchored"] == 0.31
+
+
+# ---------------------------------------------------------------------------
+# Prior-only projections must not become bets
+# ---------------------------------------------------------------------------
+
+def test_rookie_prior_is_a_prior_not_a_read():
+    """A positional prior differenced against a line is not a signal.
+
+    It measures the prior's distance from the market, which says nothing about
+    the player. This is correct for genuine rookies on its own terms, and it
+    also contains the upstream name-join bug that put James Cook — 1,621
+    rushing yards in 2025 — on the board at 21 yards as the week's strongest
+    UNDER.
+    """
+    assert "rookie_prior" in screen.PRIOR_ONLY_TYPES
+    assert "veteran_ml" not in screen.PRIOR_ONLY_TYPES
+    assert "rookie_ml" not in screen.PRIOR_ONLY_TYPES
+
+
+def test_held_rows_are_reported_not_dropped():
+    """A stale or mis-joining projections table should be visible, not silent."""
+    board = screen.NFLBoard(season=2026, week=1)
+    board.props = [
+        {"signal": "UNDER", "bettable": False, "prior_only": True,
+         "market": "rushing_yards", "player": "James Cook"},
+        {"signal": "OVER", "bettable": True, "prior_only": False,
+         "market": "rushing_yards", "player": "Derrick Henry"},
+        # Prior-only, but in a market that is off the card anyway — not "held".
+        {"signal": "UNDER", "bettable": False, "prior_only": True,
+         "market": "passing_yards", "player": "Some QB"},
+    ]
+    payload = screen.as_payload(board)
+    assert [r["player"] for r in payload["signals"]] == ["Derrick Henry"]
+    assert [r["player"] for r in payload["held_prior_only"]] == ["James Cook"]

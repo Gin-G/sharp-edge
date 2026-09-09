@@ -92,6 +92,7 @@ DraftKings first, then line shopping across books.
 - [x] NFL prop board: yardage, receptions, anytime TD priced off NFL-API projections vs FanDuel lines
 - [x] Rescale projections onto the market's scale — raw gaps read model shrinkage as signal and fade every star
 - [x] Moneyline measured and left alone: closing line is calibrated, every naive strategy loses the vig
+- [x] Fix the projection name join — suffixed veterans (Cook III, Etienne Jr., Pitts Sr.) were typed rookies and projected off a prior
 - [ ] Record NFL picks weekly and settle them — nothing on the NFL board has a track record yet
 - [ ] Archive NFL closing lines the way data/odds/ does for MLB, so the shrink factors can be fit instead of guessed
 - [ ] NFL weekly card (one leg per game) once there is a track record to size it from

@@ -186,6 +186,70 @@ board flattens to 0.500. An offset has no such failure mode.
 
 ---
 
+## Finding 6 — the projections mislabelled every suffixed veteran as a rookie
+
+Noticed on the week-1 board: James Cook projected for 21.3 rushing yards and
+Travis Etienne 20.9, both starting backs. Not low — wrong.
+
+The tell was `prediction_type`. Both came back `rookie_prior`, meaning the
+engine had no history for them and fell back to draft capital run through a
+positional curve. Cross-referencing the whole board against nflverse 2025, ten
+players with real history were typed `rookie_prior`, and **all ten are name
+normalisation failures**:
+
+| player | 2025 | projected |
+|---|---|---|
+| James Cook III | 1,621 rush yds, 17 g | 18.8 |
+| Travis Etienne Jr. | 1,107 rush yds, 17 g | 18.5 |
+| Kyle Pitts Sr. | 928 rec yds, 17 g | 0.0 rec |
+| Michael Pittman Jr. | 784 rec yds, 17 g | 0.7 rec |
+| Aaron Jones Sr. | 548 rush yds, 12 g | 17.3 |
+| Brian Robinson Jr. | 400 rush yds, 17 g | 15.5 |
+| Tre' Harris | 324 rec yds, 16 g | 0.6 rec |
+| Audric Estimé | 198 rush yds, 5 g | 12.8 |
+| David Sills V | 191 rec yds, 12 g | 0.6 rec |
+| Gardner Minshew II | 4 g | 0.2 |
+
+Eight generational suffixes, one apostrophe, one accent.
+
+**Cause.** `PlayerPredictor._predict_one` looked history up with
+
+```python
+self.history["player_display_name"].str.contains(player_name, case=False)
+```
+
+nflverse stores names *without* suffixes ("Travis Etienne"); rosters keep them
+("Travis Etienne Jr."). Asking whether the stored name **contains** the roster
+name is false in that direction, so the player's entire history came back
+empty. There was no `player_id` branch on that lookup at all. `features.is_rookie`
+had the same containment bug, with an id branch that didn't save it.
+
+Two lesser faults rode along: the pattern was interpreted as a **regex**, so the
+dots in "A.J. Brown" matched any character; and substring matching lets a short
+name collide with a longer one.
+
+**Fixed upstream** in `nfl-data-py` — match on `player_id` first, then on an
+exact normalised name, using the `utils.normalize_player_name` helper that
+already existed in that repo and strips exactly these suffixes. Verified against
+2024-25 nflverse: all eight suffixed players recover their history (33-38 games
+each), unsuffixed players are unchanged.
+
+**Guarded here too**, because sharp-edge cannot control when NFL-API recomputes.
+A `rookie_prior` row is a positional prior with no player-specific information
+in it, so differencing it against a line measures the prior's distance from the
+market rather than anything about the player. Those rows are now priced and
+displayed but never fire (`screen.PRIOR_ONLY_TYPES`), and the ones held back are
+reported in `held_prior_only` so a stale upstream table is visible instead of
+silent. That guard is correct for genuine rookies on its own terms.
+
+**How much it mattered.** 9 of 67 signals came from these players — including
+three of the top seven and the single strongest pick on the board (James Cook
+UNDER at −43.2). Every held-back row was an UNDER, which is the direction the
+bug necessarily pushes: a prior sits far below a starter's line. Any NFL result
+recorded before this date should be treated as contaminated.
+
+---
+
 ## Open — what should replace the guesses
 
 **`SHRINK_PRESEASON = 0.25` / `SHRINK_INSEASON = 0.50` are priors, not

@@ -299,6 +299,10 @@ export interface NflProp {
   signal: 'OVER' | 'UNDER' | '';
   raw_signal: 'OVER' | 'UNDER' | '';
   bettable: boolean;
+  /** The projection is a positional prior (draft capital through a curve),
+   *  not a read on this player — so it is priced and shown but never fires.
+   *  See PRIOR_ONLY_TYPES in nfl/screen.py. */
+  prior_only: boolean;
   prediction_type: string | null;
   exp_games: number | null;
 
@@ -394,6 +398,10 @@ export interface NflScreen {
   preseason: boolean;
   props: NflProp[];
   signals: NflProp[];
+  /** Rows that cleared the threshold but are backed only by a prior. A long
+   *  list here means the upstream projections table is stale or mis-joining
+   *  names, and is worth surfacing rather than silently dropping. */
+  held_prior_only: NflProp[];
   tds: NflTd[];
   games: NflGameMarket[];
   fits: Record<string, NflFit>;
