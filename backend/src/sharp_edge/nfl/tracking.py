@@ -189,7 +189,12 @@ def _load_actuals(season: int, week: int):
     out = {}
     for _, r in df.iterrows():
         out[norm_name(r.get("player_display_name"))] = r
-    return out
+    # The teams that have actually played this week, which is a different
+    # question from which players have a row. nflverse publishes a week
+    # incrementally — a Thursday game lands days before Sunday's — so a
+    # player with no row is only "did not play" if his *team* is in the file.
+    played = {t for t in df.team.dropna().unique() if isinstance(t, str)}
+    return out, played
 
 
 def _result_for(pick: dict, row) -> tuple[Optional[str], Optional[float]]:
@@ -227,7 +232,7 @@ async def settle_week(season: int, week: int) -> dict:
 
     import asyncio
     try:
-        actuals = await asyncio.to_thread(_load_actuals, season, week)
+        actuals, played = await asyncio.to_thread(_load_actuals, season, week)
     except ActualsNotPublished as e:
         # Expected before the season's first games — a status, not a failure.
         return {"season": season, "week": week, "settled": 0,
@@ -241,7 +246,16 @@ async def settle_week(season: int, week: int) -> dict:
                 "message": f"week {week} not in the published data yet"}
 
     counts: dict = {"WIN": 0, "LOSS": 0, "PUSH": 0, "VOID": 0}
+    waiting = 0
     for p in picks:
+        # Leave a pick alone until its own game is in the file. Settling the
+        # whole week the moment *any* of it publishes is how 40 of 45 week-1
+        # picks were voided on a Friday, with Sunday's games still to come:
+        # "no row for this player" was read as "did not play" when it meant
+        # "has not kicked off".
+        if p.get("team") not in played:
+            waiting += 1
+            continue
         row = actuals.get(p["player_key"])
         if row is None:
             result, actual = "VOID", None
@@ -253,9 +267,12 @@ async def settle_week(season: int, week: int) -> dict:
                                  result, actual)
         counts[result] += 1
 
-    await _settle_card(season, week)
+    # Only score the card once every leg's game has been played.
+    if waiting == 0:
+        await _settle_card(season, week)
     return {"season": season, "week": week,
-            "settled": sum(counts.values()), **counts}
+            "settled": sum(counts.values()), "waiting_on_kickoff": waiting,
+            **counts}
 
 
 async def _settle_card(season: int, week: int) -> None:

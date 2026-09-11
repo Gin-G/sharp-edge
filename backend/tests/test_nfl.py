@@ -783,3 +783,36 @@ def test_norm_name_survives_junk(bad):
     truthy — a bare falsiness check sails past it and unicodedata.normalize
     raises on the float, aborting a whole week's settlement over one row."""
     assert norm_name(bad) == ""
+
+
+# ---------------------------------------------------------------------------
+# Settling a partially-published week
+# ---------------------------------------------------------------------------
+
+def test_load_actuals_reports_which_teams_played():
+    """The distinction the settlement bug turned on. nflverse publishes a week
+    incrementally — a Thursday game lands days before Sunday's — so which
+    *teams* are in the file is a different question from which players are."""
+    import inspect
+    src = inspect.getsource(nfl_tracking._load_actuals)
+    assert "played" in src and "return out, played" in src
+
+
+def test_a_pick_waits_for_its_own_kickoff():
+    """The bug: settling the whole week the moment any of it published voided
+    40 of 45 week-1 picks on a Friday, Sunday's games still to come. "No row
+    for this player" was read as "did not play" when it meant "has not kicked
+    off"."""
+    import inspect
+    src = inspect.getsource(nfl_tracking.settle_week)
+    assert 'p.get("team") not in played' in src, "must skip unplayed teams"
+    assert "waiting" in src
+    # And the void branch must still exist for a player whose team did play.
+    assert '"VOID"' in src
+
+
+def test_card_is_not_scored_while_a_leg_is_unplayed():
+    """A parlay cannot be graded off the legs that happen to have finished."""
+    import inspect
+    src = inspect.getsource(nfl_tracking.settle_week)
+    assert "if waiting == 0:" in src

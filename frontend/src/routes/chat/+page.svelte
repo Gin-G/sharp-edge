@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { sendChat } from '$lib/api';
-  import { claudeKey } from '$lib/claudeKey';
+  import { sendChat, verifyChatKey } from '$lib/api';
+  import { claudeKey, maskKey } from '$lib/claudeKey';
   import type { ChatMessage } from '$lib/types';
 
   const MODELS = [
@@ -18,6 +18,35 @@
   let error = '';
   let msgList: HTMLElement;
 
+  // Claude connection — the key lives in sessionStorage via the store, never
+  // on the server. The field is only bound while entering a new key.
+  let claudeInput = '';
+  let claudeVerifying = false;
+  let claudeErr = '';
+
+  async function connectClaude() {
+    const key = claudeInput.trim();
+    if (!key) return;
+    claudeVerifying = true;
+    claudeErr = '';
+    try {
+      await verifyChatKey(key);   // fail fast on a bad or unfunded key
+      claudeKey.set(key);
+      claudeInput = '';
+      error = '';
+    } catch (e) {
+      claudeErr = e instanceof Error ? e.message : String(e);
+    } finally {
+      claudeVerifying = false;
+    }
+  }
+
+  function disconnectClaude() {
+    claudeKey.set('');
+    claudeInput = '';
+    claudeErr = '';
+  }
+
   const WELCOME: ChatMessage = {
     role: 'assistant',
     content: "Hey — I'm Sharp Edge, your betting analyst. Ask me about your history, a potential bet, or what's working and what's not.",
@@ -31,7 +60,7 @@
     const text = input.trim();
     if (!text || thinking) return;
     if (!$claudeKey) {
-      error = 'Connect your Anthropic API key in Settings to use chat.';
+      error = 'Connect your Anthropic API key above to use chat.';
       return;
     }
     input = '';
@@ -95,6 +124,13 @@
       <p class="text-sm text-slate-400 mt-0.5">Claude-powered betting analyst</p>
     </div>
     <div class="flex items-center gap-3">
+      {#if connected}
+        <span class="inline-flex items-center gap-1.5 text-xs text-emerald-300 font-medium">
+          <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+          {maskKey($claudeKey)}
+        </span>
+        <button class="btn-ghost text-xs" on:click={disconnectClaude}>Disconnect</button>
+      {/if}
       <select
         bind:value={model}
         class="input w-auto text-xs py-1.5"
@@ -108,10 +144,35 @@
   </div>
 
   {#if !connected}
-    <div class="card border-amber-800 bg-amber-950/30 text-amber-200 text-sm mb-4 flex-shrink-0">
-      Chat runs on your own Anthropic account.
-      <a href="/settings" class="underline font-medium">Connect your API key in Settings</a>
-      to start — it stays in this browser and is never stored on the server.
+    <!-- Connect Claude -->
+    <div class="card space-y-3 mb-4 flex-shrink-0">
+      <h2 class="text-sm font-semibold text-slate-200">Connect Claude</h2>
+      <p class="text-sm text-slate-400">
+        The chat analyst uses your own Anthropic API key, so it spends your credits, not ours.
+        Create one at
+        <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener"
+           class="underline text-slate-300">console.anthropic.com</a>,
+        then paste it below. It's held in this browser only (cleared when you close the tab)
+        and is never stored on the server.
+      </p>
+      <div class="flex gap-2">
+        <input
+          type="password"
+          bind:value={claudeInput}
+          placeholder="sk-ant-..."
+          autocomplete="off"
+          class="input flex-1 font-mono text-sm"
+          on:keydown={(e) => e.key === 'Enter' && connectClaude()}
+        />
+        <button
+          class="btn-primary text-sm px-4"
+          on:click={connectClaude}
+          disabled={claudeVerifying || !claudeInput.trim()}
+        >{claudeVerifying ? 'Verifying…' : 'Connect'}</button>
+      </div>
+      {#if claudeErr}
+        <p class="text-sm text-red-400">{claudeErr}</p>
+      {/if}
     </div>
   {/if}
 
@@ -175,7 +236,7 @@
       <textarea
         bind:value={input}
         on:keydown={onKeydown}
-        placeholder={connected ? 'Ask about your bets, a potential wager, league breakdown…' : 'Connect your Anthropic key in Settings to chat'}
+        placeholder={connected ? 'Ask about your bets, a potential wager, league breakdown…' : 'Connect your Anthropic key above to chat'}
         rows="2"
         class="input resize-none pr-12 py-3 leading-relaxed"
         disabled={thinking || !connected}

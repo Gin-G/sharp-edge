@@ -178,13 +178,6 @@ export function submitMfaCode(code: string): Promise<SessionInfo> {
   });
 }
 
-export function setManualToken(token: string): Promise<SessionInfo> {
-  return req('/auth/token', {
-    method: 'POST',
-    body: JSON.stringify({ token }),
-  });
-}
-
 export function logout(): Promise<{ status: string }> {
   return req('/auth/logout', { method: 'POST' });
 }
