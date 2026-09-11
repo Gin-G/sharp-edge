@@ -775,3 +775,11 @@ def test_adjusted_projection_never_goes_negative():
     assert got >= 0.0
     # An ordinary row is untouched by the floor.
     assert model.adjusted_projection(45.5, 55.0, fit) > 0
+
+
+@pytest.mark.parametrize("bad", [None, float("nan"), 0, "", "   ", 12.5])
+def test_norm_name_survives_junk(bad):
+    """nflverse ships NaN for a missing player_display_name, and a float NaN is
+    truthy — a bare falsiness check sails past it and unicodedata.normalize
+    raises on the float, aborting a whole week's settlement over one row."""
+    assert norm_name(bad) == ""

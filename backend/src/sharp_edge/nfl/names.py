@@ -29,7 +29,12 @@ def norm_name(name: Optional[str]) -> str:
     "JaMarr"), on periods ("A.J. Brown"), on hyphens ("Smith-Njigba") and on
     suffixes ("Pittman Jr."). Fold all five and what is left joins cleanly.
     """
-    if not name:
+    # Anything that is not a string is not a name. The explicit isinstance is
+    # the point: nflverse ships NaN for a missing player_display_name, and a
+    # float NaN is *truthy*, so a bare `if not name` sails straight past it and
+    # unicodedata.normalize raises on the float. That aborted a whole week's
+    # settlement over one malformed row.
+    if not isinstance(name, str) or not name.strip():
         return ""
     s = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
     # Apostrophes close up, everything else opens out. "Ja'Marr" is one word
