@@ -98,6 +98,7 @@ DraftKings first, then line shopping across books.
 - [x] Refuse short lines on both sides — a short line prices a role the projection cannot see, and the edge there ranks backups
 - [x] Defence-vs-position matchup on TE receiving props — measured over four week 1s; WR got worse and coverage scheme did nothing, both documented
 - [ ] Feed coaching scheme and offseason role change into the projections — they read last season's usage, so a player inheriting a vacated role keeps his backup rate (half the week-1 board)
+- [ ] Fix the tight-end projection bias (+22.5 yds in week 1) — the matchup factor multiplies an already-inflated number rather than correcting it
 - [ ] Archive NFL closing lines the way data/odds/ does for MLB, so the shrink factors can be fit instead of guessed
 - [ ] Refit the passing-yards model — it runs 4-5pts overconfident and is off the card until it doesn't
 - [ ] Deduplicate bets across books so the same wager placed twice does not double-count P/L

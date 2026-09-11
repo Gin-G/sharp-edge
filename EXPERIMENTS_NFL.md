@@ -466,6 +466,74 @@ weeks accumulate is untested.
 far below his line came out at minus two receiving yards — not a quantity that
 exists, and it fed a correspondingly overstated under.
 
+## Week 1, first two games — projections against actuals
+
+Wednesday and Thursday, four teams, 44 players matched. Small, but the shape is
+already legible and it is not uniform.
+
+| market | pos | n | MAE | bias | corr |
+|---|---|---|---|---|---|
+| receiving yards | WR | 18 | 18.0 | +5.6 | 0.750 |
+| receiving yards | **TE** | 10 | **24.6** | **+22.5** | **0.300** |
+| receiving yards | RB | 10 | 6.5 | +0.5 | 0.809 |
+| rushing yards | RB | 10 | 19.1 | +2.1 | 0.552 |
+| rushing yards | QB | 6 | 11.0 | -6.1 | 0.863 |
+| receptions | WR | 18 | 1.5 | +0.2 | 0.709 |
+| receptions | RB | 8 | 0.9 | -0.6 | 0.848 |
+| passing yards | QB | 6 | 90.2 | +52.5 | 0.380 |
+
+Running backs and wide receivers are in decent shape. **Tight end receiving is
+the worst position on the board** and it is not close: +22.5 yards of bias
+against a 0.300 correlation.
+
+**That is uncomfortable, because TE receiving is the one market the matchup
+factor was added to.** Finding 9 measured that factor against a *trailing
+average* baseline, not against this production model, and a multiplicative
+factor above 1.0 applied to a projection already running +22.5 high compounds
+the error rather than correcting it. George Kittle carried x1.114 and came in
+at 12 yards against a 60.6 projection. Treat the TE factor as unproven in
+production until several weeks have settled; if the bias holds it wants fixing
+at the projection level, not covering with a multiplier.
+
+Passing yards at +52.5 bias is a second vindication of keeping that market off
+the card.
+
+**Our own five picks went 2-3**, which says nothing at n=5. What does say
+something is that **all five projections were high** — MAE and bias both
+exactly 25.0, so not one under-shot.
+
+---
+
+## The settlement bug that nearly erased week 1
+
+The daily job ran on the Friday, saw that nflverse had published week 1, and
+voided **40 of 45 picks** — Tuten, Lamar Jackson, Derrick Henry, CeeDee Lamb,
+every one of whom played on the Sunday.
+
+nflverse publishes a week **incrementally**: the Wednesday and Thursday games
+land days before the Sunday slate. Settlement assumed that if a week's file
+exists then every player in that week is in it, so "no row for this player" was
+read as "did not play" when it meant "has not kicked off". The void branch
+itself is correct and stays — an inactive player really is a void — it was the
+precondition that was missing.
+
+`_load_actuals` now also returns the set of teams present in the file, which is
+a different question from which players are, and a pick whose team is absent is
+left pending. The card is only scored once no leg is still waiting, since a
+parlay cannot be graded off whichever legs happen to have finished. Verified
+live: `waiting_on_kickoff: 42`, zero voids.
+
+The 40 rows were repaired back to pending. Nothing was lost — they keep their
+line, price and projection — but it is worth recording how close the week came
+to being unrecoverable, because a voided pick is indistinguishable from a
+legitimate one after the fact.
+
+**A second, smaller one found the same afternoon.** Settlement was aborting
+outright with `normalize() argument 2 must be str, not float`: nflverse ships
+NaN for a missing `player_display_name`, and a float NaN is *truthy*, so
+`if not name` sailed past it. One malformed row took a whole week's settlement
+with it. The guard is an explicit `isinstance` now.
+
 ---
 
 ## Operations
