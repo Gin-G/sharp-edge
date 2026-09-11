@@ -534,6 +534,48 @@ NaN for a missing `player_display_name`, and a float NaN is *truthy*, so
 `if not name` sailed past it. One malformed row took a whole week's settlement
 with it. The guard is an explicit `isinstance` now.
 
+## Finding 10 — the receptions market was dead and nobody could see it
+
+Added a per-week snapshot of the whole board (`nfl_board_snapshots`, one row
+per market) because the over/under tilt cannot be diagnosed from the picks
+alone: you cannot tell from a pick list whether the residuals were already
+skewed before the threshold or whether the threshold made them so.
+
+It paid for itself on the first run. **Receptions had fired zero times on 138
+rows.**
+
+A threshold only means something relative to how far the residuals actually
+spread. Measured on the live week-1 board:
+
+| market | residual spread (p90-p10) | threshold | ratio | fires |
+|---|---|---|---|---|
+| receiving yards | 22.6 | 10.0 | 0.44 | 34/141 |
+| rushing yards | 34.7 | 10.0 | 0.29 | 23/69 |
+| receptions | **1.8** | **2.0** | **1.11** | **0/138** |
+
+Receptions was being asked to clear more than its entire spread. Even on the
+*raw* projection-minus-line gap, before any rescaling, 2.0 fires 6 times in 138
+— so the stated number was always near-prohibitive and the market rescaling
+finished it off.
+
+This is the failure mode a pick list cannot show you: a board that produces no
+receptions picks looks exactly like a board with no receptions edges.
+
+**Set to 0.75**, between the two yardage ratios, firing at a rate comparable to
+rushing yards. A deliberate departure from the stated rule rather than an
+oversight, and it changes what gets bet, so it is first on the list to revisit
+against settled results.
+
+Effect: suggestions went from 34 to 61, with receptions supplying 27 of them —
+and the board's over/under split moved from 24/14 to 28/33. Some of the tilt
+was one market being missing, not a bias in the residuals.
+
+**Also captured, for the same reason.** `matchup_factor` now rides in each
+pick's `metrics`. Without it there would be no way to ask later whether the
+matchup adjustment helped, or to back out what a projection would have been
+without one — and a field added after the fact only covers weeks that have not
+happened yet.
+
 ---
 
 ## Operations

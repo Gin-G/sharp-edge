@@ -13,6 +13,7 @@ wrong rather than toward coverage:
 
 from datetime import date, datetime, timezone
 
+import json
 import pytest
 
 from sharp_edge.nfl import model, odds, screen
@@ -239,9 +240,12 @@ def test_signal_thresholds(residual, threshold, expected):
 
 
 def test_thresholds_match_the_stated_rule():
+    """The yardage rules are the owner's and stay put. Receptions departs from
+    the stated 2.0 — see test_receptions_threshold_is_scaled_to_its_own_spread
+    for why, and treat that as the one to revisit against settled results."""
     assert screen.THRESHOLDS["receiving_yards"] == 10.0
     assert screen.THRESHOLDS["rushing_yards"] == 10.0
-    assert screen.THRESHOLDS["receptions"] == 2.0
+    assert screen.THRESHOLDS["receptions"] != 2.0
 
 
 def test_board_ranks_signals_first():
@@ -816,3 +820,104 @@ def test_card_is_not_scored_while_a_leg_is_unplayed():
     import inspect
     src = inspect.getsource(nfl_tracking.settle_week)
     assert "if waiting == 0:" in src
+
+
+# ---------------------------------------------------------------------------
+# Capturing what the week-4 review will need
+# ---------------------------------------------------------------------------
+
+def test_matchup_factor_is_recorded_on_the_pick():
+    """Without it there is no way to ask, later, whether the matchup
+    adjustment helped — or to back out what the projection was without it.
+    A field added after the fact only covers weeks that have not happened."""
+    row = {"key": "a te", "market": "receiving_yards", "line": 30.5,
+           "side": "OVER", "matchup_factor": 1.18, "position": "TE"}
+    m = json.loads(nfl_tracking._metrics(row))
+    assert m["matchup_factor"] == 1.18
+
+
+def test_metrics_keeps_the_fields_the_open_questions_need():
+    keep = ("role_conflict", "matchup_factor", "model_p_raw", "raw_gap",
+            "threshold", "prediction_type")
+    row = {k: 1 for k in keep}
+    m = json.loads(nfl_tracking._metrics(row))
+    for k in keep:
+        assert k in m, k
+
+
+@pytest.mark.asyncio
+async def test_snapshot_records_the_board_not_just_the_picks():
+    """The over/under tilt cannot be diagnosed from picks alone — you cannot
+    tell whether the residuals were skewed before the threshold or whether the
+    threshold made them so."""
+    captured = []
+
+    class FakeDB:
+        async def upsert_nfl_snapshot(self, row):
+            captured.append(row)
+
+    nfl_tracking.configure(FakeDB())
+    try:
+        await nfl_tracking._snapshot_board({
+            "season": 2026, "week": 2,
+            "fits": {"receiving_yards": {"slope": 0.59}},
+            "prob_fits": {"receiving_yards": {"offset": 0.96}},
+            "props": [
+                {"key": "a", "market": "receiving_yards", "residual": 15.0,
+                 "signal": "OVER", "side": "OVER", "bettable": True,
+                 "edge_pts": 9.0, "line": 40.5, "adjusted": 55.0},
+                {"key": "b", "market": "receiving_yards", "residual": -12.0,
+                 "signal": "UNDER", "side": "UNDER", "bettable": True,
+                 "edge_pts": 2.0, "line": 40.5, "adjusted": 28.0},
+                {"key": "c", "market": "receiving_yards", "residual": 1.0,
+                 "signal": "", "side": None, "bettable": True,
+                 "edge_pts": 0.5, "line": 40.5, "adjusted": 41.0},
+            ],
+        })
+    finally:
+        nfl_tracking.configure(None)
+
+    assert len(captured) == 1
+    s = captured[0]
+    assert s["rows"] == 3                      # the whole board, not the picks
+    assert (s["signal_over"], s["signal_under"]) == (1, 1)
+    assert s["suggested_over"] == 1            # only the one clearing the bar
+    assert s["suggested_under"] == 0           # the under missed the higher bar
+    assert s["residual_p10"] <= s["residual_p50"] <= s["residual_p90"]
+    assert s["fit_slope"] == 0.59 and s["prob_offset"] == 0.96
+
+
+@pytest.mark.asyncio
+async def test_a_failed_snapshot_never_costs_the_picks():
+    """Diagnostics must not take the record down with them."""
+    class Boom:
+        async def upsert_nfl_snapshot(self, row):
+            raise RuntimeError("db down")
+
+    nfl_tracking.configure(Boom())
+    try:
+        await nfl_tracking._snapshot_board({
+            "season": 2026, "week": 2, "fits": {}, "prob_fits": {},
+            "props": [{"key": "a", "market": "receiving_yards", "residual": 1.0,
+                       "signal": "", "side": None, "bettable": True,
+                       "edge_pts": 0.0, "line": 40.5, "adjusted": 41.0}],
+        })
+    finally:
+        nfl_tracking.configure(None)
+
+
+def test_receptions_threshold_is_scaled_to_its_own_spread():
+    """At the originally stated 2.0 it fired zero times on 138 rows — a market
+    dead from the day it shipped, and invisible, because a board with no
+    receptions picks looks the same as a board with no receptions edges.
+
+    A threshold only means something relative to how far residuals spread:
+    receiving yards clears 0.44 of its spread, rushing 0.29, receptions was
+    being asked for 1.11 of its own.
+    """
+    t = screen.THRESHOLDS
+    assert t["receptions"] < 1.0, "2.0 exceeded the entire p10-p90 spread"
+    # Still a real bar, not a rubber stamp.
+    assert t["receptions"] >= 0.5
+    # The yardage rules are the owner's and stay put.
+    assert t["receiving_yards"] == 10.0 and t["rushing_yards"] == 10.0

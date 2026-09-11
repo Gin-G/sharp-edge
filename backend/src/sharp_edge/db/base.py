@@ -23,6 +23,12 @@ NFL_PICK_COLUMNS = (
     "projection, adjusted, metrics, source, result, actual, created_at, resolved_at"
 )
 
+NFL_SNAPSHOT_COLUMNS = (
+    "season, week, market, taken_at, rows, signal_over, signal_under, "
+    "suggested_over, suggested_under, residual_p10, residual_p50, "
+    "residual_p90, fit_slope, prob_offset"
+)
+
 NFL_CARD_COLUMNS = (
     "season, week, legs, leg_count, american, decimal_odds, model_p, "
     "created_at, result, legs_won, legs_settled, resolved_at"
@@ -204,6 +210,21 @@ class BetDatabase(ABC):
         self, season: int, week: int, player_key: str, market: str,
         result: str, actual: Optional[float],
     ) -> None: ...
+
+    @abstractmethod
+    async def upsert_nfl_snapshot(self, row: dict) -> None:
+        """One row per (season, week, market): the shape of the whole board.
+
+        Picks record what we bet; this records what we were choosing from. The
+        over/under tilt cannot be diagnosed from the picks alone — you need to
+        know whether the residuals were skewed before the threshold, or the
+        threshold made them so. Overwrites within a week, so the last board
+        before kickoff is the one kept."""
+
+    @abstractmethod
+    async def list_nfl_snapshots(
+        self, season: Optional[int] = None, week: Optional[int] = None
+    ) -> list[dict]: ...
 
     @abstractmethod
     async def insert_nfl_card(self, row: dict) -> bool:

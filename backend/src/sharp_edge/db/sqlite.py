@@ -8,7 +8,7 @@ from typing import Optional
 import aiosqlite
 
 from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_PICK_COLUMNS,
-                   PARLAY_COLUMNS, PICK_COLUMNS)
+                   NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bets (
@@ -111,6 +111,23 @@ CREATE TABLE IF NOT EXISTS nfl_picks (
     created_at TEXT DEFAULT (datetime('now')),
     resolved_at TEXT,
     PRIMARY KEY (season, week, player_key, market)
+);
+CREATE TABLE IF NOT EXISTS nfl_board_snapshots (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    market TEXT NOT NULL,
+    taken_at TEXT DEFAULT (datetime('now')),
+    rows INTEGER,
+    signal_over INTEGER,
+    signal_under INTEGER,
+    suggested_over INTEGER,
+    suggested_under INTEGER,
+    residual_p10 REAL,
+    residual_p50 REAL,
+    residual_p90 REAL,
+    fit_slope REAL,
+    prob_offset REAL,
+    PRIMARY KEY (season, week, market)
 );
 CREATE TABLE IF NOT EXISTS nfl_cards (
     season INTEGER NOT NULL,
@@ -424,6 +441,41 @@ class SQLiteDatabase(BetDatabase):
             (result, actual, season, week, player_key, market),
         )
         await self._db.commit()
+
+    async def upsert_nfl_snapshot(self, row: dict) -> None:
+        await self._db.execute(
+            """INSERT INTO nfl_board_snapshots (
+                season, week, market, rows, signal_over, signal_under,
+                suggested_over, suggested_under, residual_p10, residual_p50,
+                residual_p90, fit_slope, prob_offset
+            ) VALUES (
+                :season, :week, :market, :rows, :signal_over, :signal_under,
+                :suggested_over, :suggested_under, :residual_p10, :residual_p50,
+                :residual_p90, :fit_slope, :prob_offset
+            ) ON CONFLICT(season, week, market) DO UPDATE SET
+                taken_at=datetime('now'), rows=excluded.rows,
+                signal_over=excluded.signal_over, signal_under=excluded.signal_under,
+                suggested_over=excluded.suggested_over,
+                suggested_under=excluded.suggested_under,
+                residual_p10=excluded.residual_p10, residual_p50=excluded.residual_p50,
+                residual_p90=excluded.residual_p90, fit_slope=excluded.fit_slope,
+                prob_offset=excluded.prob_offset""",
+            row,
+        )
+        await self._db.commit()
+
+    async def list_nfl_snapshots(self, season=None, week=None) -> list[dict]:
+        sql = f"SELECT {NFL_SNAPSHOT_COLUMNS} FROM nfl_board_snapshots"
+        where, args = [], []
+        if season is not None:
+            where.append("season = ?"); args.append(season)
+        if week is not None:
+            where.append("week = ?"); args.append(week)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY season DESC, week DESC, market"
+        cursor = await self._db.execute(sql, args)
+        return [dict(r) for r in await cursor.fetchall()]
 
     async def insert_nfl_card(self, row: dict) -> bool:
         cursor = await self._db.execute(

@@ -89,9 +89,15 @@ def _metrics(row: dict) -> str:
     *why the model thought what it did*, so a bad week can be diagnosed rather
     than just counted.
     """
+    # Every field here exists to answer a question the record will be asked
+    # later and cannot reconstruct: which rows carried a matchup adjustment and
+    # what it would have been without one, which disagreed with the market
+    # about role, what the model said before it was anchored. Adding a field
+    # after the fact only works for weeks that have not happened yet.
     keep = ("model_p_raw", "fair_p", "implied_p", "over_odds", "under_odds",
             "raw_gap", "threshold", "prediction_type", "exp_games", "position",
-            "kickoff", "sgm", "role_conflict", "role_conflict_with")
+            "kickoff", "sgm", "role_conflict", "role_conflict_with",
+            "matchup_factor")
     return json.dumps({k: row.get(k) for k in keep if row.get(k) is not None})
 
 
@@ -136,6 +142,8 @@ async def freeze_week(payload: dict, source: str = "live") -> dict:
         [_pick_row(r, season, week, source) for r in picks]
     )
 
+    await _snapshot_board(payload)
+
     the_card = card_mod.build(payload.get("props") or [])
     frozen = False
     if the_card:
@@ -150,6 +158,58 @@ async def freeze_week(payload: dict, source: str = "live") -> dict:
         })
     return {"suggestions": len(picks), "written": written,
             "card_legs": len(the_card), "card_frozen": frozen}
+
+
+async def _snapshot_board(payload: dict) -> None:
+    """Record the shape of the whole board, one row per market.
+
+    Picks say what we would bet; this says what we were choosing from, and the
+    two answer different questions. The board's over/under tilt cannot be
+    diagnosed from the picks alone — you cannot tell whether the residuals were
+    already skewed before the threshold, or whether the threshold made them so.
+    That distinction is unrecoverable after the week passes, so it is written
+    now even though nothing reads it yet.
+    """
+    db = _require_db()
+    season, week = payload["season"], payload["week"]
+    props = payload.get("props") or []
+    suggested = {(r.get("key"), r.get("market")) for r in card_mod.suggestions(props)}
+
+    by_market: dict = {}
+    for r in props:
+        by_market.setdefault(r["market"], []).append(r)
+
+    for market, rows in by_market.items():
+        residuals = sorted(r["residual"] for r in rows if r.get("residual") is not None)
+
+        def q(p: float):
+            if not residuals:
+                return None
+            i = min(len(residuals) - 1, max(0, int(round(p * (len(residuals) - 1)))))
+            return round(residuals[i], 2)
+
+        fit = (payload.get("fits") or {}).get(market) or {}
+        pfit = (payload.get("prob_fits") or {}).get(market) or {}
+        try:
+            await db.upsert_nfl_snapshot({
+                "season": season, "week": week, "market": market,
+                "rows": len(rows),
+                "signal_over": sum(1 for r in rows if r.get("signal") == "OVER"),
+                "signal_under": sum(1 for r in rows if r.get("signal") == "UNDER"),
+                "suggested_over": sum(
+                    1 for r in rows
+                    if (r.get("key"), market) in suggested and r.get("side") == "OVER"),
+                "suggested_under": sum(
+                    1 for r in rows
+                    if (r.get("key"), market) in suggested and r.get("side") == "UNDER"),
+                "residual_p10": q(0.10), "residual_p50": q(0.50),
+                "residual_p90": q(0.90),
+                "fit_slope": fit.get("slope"), "prob_offset": pfit.get("offset"),
+            })
+        except Exception as e:
+            # A snapshot is diagnostics. It must never cost us the picks.
+            logger.warning("[nfl-track] snapshot %s wk%s %s failed: %s",
+                           season, week, market, e)
 
 
 # ---------------------------------------------------------------------------

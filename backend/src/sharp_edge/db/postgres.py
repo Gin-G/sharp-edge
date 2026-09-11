@@ -8,7 +8,7 @@ from typing import Optional
 import asyncpg
 
 from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_PICK_COLUMNS,
-                   PARLAY_COLUMNS, PICK_COLUMNS)
+                   NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
 
 
 def _to_dt(v):
@@ -140,6 +140,23 @@ CREATE TABLE IF NOT EXISTS nfl_picks (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     resolved_at TIMESTAMPTZ,
     PRIMARY KEY (season, week, player_key, market)
+);
+CREATE TABLE IF NOT EXISTS nfl_board_snapshots (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    market TEXT NOT NULL,
+    taken_at TIMESTAMPTZ DEFAULT NOW(),
+    rows INTEGER,
+    signal_over INTEGER,
+    signal_under INTEGER,
+    suggested_over INTEGER,
+    suggested_under INTEGER,
+    residual_p10 DOUBLE PRECISION,
+    residual_p50 DOUBLE PRECISION,
+    residual_p90 DOUBLE PRECISION,
+    fit_slope DOUBLE PRECISION,
+    prob_offset DOUBLE PRECISION,
+    PRIMARY KEY (season, week, market)
 );
 CREATE TABLE IF NOT EXISTS nfl_cards (
     season INTEGER NOT NULL,
@@ -493,6 +510,47 @@ class PostgresDatabase(BetDatabase):
                      AND market = $6""",
                 result, actual, season, week, player_key, market,
             )
+
+    async def upsert_nfl_snapshot(self, row: dict) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO nfl_board_snapshots (
+                    season, week, market, rows, signal_over, signal_under,
+                    suggested_over, suggested_under, residual_p10, residual_p50,
+                    residual_p90, fit_slope, prob_offset
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                ON CONFLICT (season, week, market) DO UPDATE SET
+                    taken_at=NOW(), rows=EXCLUDED.rows,
+                    signal_over=EXCLUDED.signal_over,
+                    signal_under=EXCLUDED.signal_under,
+                    suggested_over=EXCLUDED.suggested_over,
+                    suggested_under=EXCLUDED.suggested_under,
+                    residual_p10=EXCLUDED.residual_p10,
+                    residual_p50=EXCLUDED.residual_p50,
+                    residual_p90=EXCLUDED.residual_p90,
+                    fit_slope=EXCLUDED.fit_slope,
+                    prob_offset=EXCLUDED.prob_offset""",
+                row["season"], row["week"], row["market"], row.get("rows"),
+                row.get("signal_over"), row.get("signal_under"),
+                row.get("suggested_over"), row.get("suggested_under"),
+                row.get("residual_p10"), row.get("residual_p50"),
+                row.get("residual_p90"), row.get("fit_slope"),
+                row.get("prob_offset"),
+            )
+
+    async def list_nfl_snapshots(self, season=None, week=None) -> list[dict]:
+        sql = f"SELECT {NFL_SNAPSHOT_COLUMNS} FROM nfl_board_snapshots"
+        where, args = [], []
+        if season is not None:
+            args.append(season); where.append(f"season = ${len(args)}")
+        if week is not None:
+            args.append(week); where.append(f"week = ${len(args)}")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY season DESC, week DESC, market"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+        return [_nfl_row(r) for r in rows]
 
     async def insert_nfl_card(self, row: dict) -> bool:
         async with self._pool.acquire() as conn:

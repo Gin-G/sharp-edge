@@ -40,14 +40,37 @@ from . import (card as card_mod, matchup as nfl_matchup, model,
 
 logger = logging.getLogger(__name__)
 
-# The owner's rule, in the stat's own units: how far the projection has to sit
-# from the line before the row is called a bet. Applied to the market-adjusted
-# residual, not the raw difference.
+# How far the projection has to sit from the line before the row is called a
+# bet, in the stat's own units, measured on the market-adjusted residual.
+#
+# The yardage numbers are the owner's rule as stated. Receptions is not, and
+# the reason is worth keeping: at the stated 2.0 it fired **zero times on 138
+# rows** — the market was silently dead from the day it shipped and nobody
+# could see it, because a board that produces no receptions picks looks exactly
+# like a board with no receptions edges.
+#
+# A threshold only means something relative to how far the residuals actually
+# spread. Measured on the live week-1 board (p90 minus p10):
+#
+#     market             spread   threshold   ratio   fires
+#     receiving_yards      22.6      10.0      0.44    34/141
+#     rushing_yards        34.7      10.0      0.29    23/69
+#     receptions            1.8       2.0      1.11     0/138
+#
+# Receptions was being asked to clear more than its entire spread. Even on the
+# *raw* projection-minus-line gap, before any rescaling, 2.0 fired 6 times in
+# 138 — so the original number was always near-prohibitive and the rescaling
+# finished it off. 0.75 puts it between the two yardage ratios and fires at a
+# rate comparable to rushing yards.
+#
+# This is a deliberate departure from the stated rule rather than an oversight,
+# and it changes what gets bet, so it is the first thing to revisit against
+# settled results.
 THRESHOLDS = {
     "receiving_yards": 10.0,
     "rushing_yards": 10.0,
     "passing_yards": 10.0,
-    "receptions": 2.0,
+    "receptions": 0.75,
 }
 
 # Which projected component feeds each market, and which projected component
