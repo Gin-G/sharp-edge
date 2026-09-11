@@ -36,7 +36,7 @@ import httpx
 
 from ..fanduel.odds import american_to_implied
 from . import (card as card_mod, matchup as nfl_matchup, model,
-               odds as nfl_odds, projections as nfl_proj)
+               odds as nfl_odds, projections as nfl_proj, usage as nfl_usage)
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +156,15 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
         sr_factors = {}
     opponent_map = nfl_matchup.opponents(wk.games)
 
+    # Tight-end receiving is blended with an opportunity projection. One market,
+    # because it is the only one that beat the production model on a five-seed
+    # backtest with a bootstrap interval clear of zero — see nfl.usage.
+    try:
+        te_usage = await asyncio.to_thread(nfl_usage.projections, season, week, "TE")
+    except Exception as e:
+        logger.warning("[nfl] usage projections unavailable: %s", e)
+        te_usage = {}
+
     got = await nfl_odds.cached_board(wk.window(), state=state, force=force)
     fd = got["board"]
 
@@ -180,11 +189,12 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
         # Rescale on this week's own board: every player who has both a posted
         # line and a projection contributes one point to the fit.
         def _projected(key, ln):
-            """The projection for one player in this market, matchup applied.
+            """The projection for one player, blended and matchup-adjusted.
 
             Has to mirror the per-row adjustment exactly — the rescaling is fit
-            on these pairs, so a factor applied in one place and not the other
-            would put the fit and the rows on different scales.
+            on these pairs, so anything applied in one place and not the other
+            puts the fit and the rows on different scales. A test asserts the
+            two stay in step rather than trusting that they do.
             """
             row = by_key[key]
             v = row.get(component)
@@ -192,9 +202,11 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 return None
             ctx = {"position": row.get("position"), "market": market,
                    "team": row.get("team")}
+            blended, _ = nfl_usage.blend(
+                float(v), key, row.get("position"), market, te_usage)
             f = nfl_matchup.factor_for(ctx, opponent_map, te_factors) or 1.0
             sr = nfl_matchup.success_rate_for(ctx, opponent_map, sr_factors) or 1.0
-            return float(v) * f * sr
+            return blended * f * sr
 
         pairs = [(ln.line, _projected(k, ln))
                  for k, ln in lines.items()
@@ -213,7 +225,12 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 continue
             matched.add(key)
             raw = float(p[component])
-            # Matchup first, so the market rescaling below sees the number we
+            # Blend before the matchup factors: the blend was measured against
+            # the model's own component projection, so it belongs on that
+            # quantity, and the factors then scale the best estimate available.
+            raw, usage_val = nfl_usage.blend(
+                raw, key, p.get("position"), market, te_usage)
+            # Matchup next, so the market rescaling below sees the number we
             # actually believe rather than one it has to undo.
             ctx = {"position": p.get("position"), "market": market,
                    "team": p.get("team")}
@@ -229,7 +246,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             )
             fair_over, _ = model.devig_two_way(ln.over, ln.under)
             raw_rows.append((key, ln, p, raw, adjusted, volume, p_over,
-                             fair_over, mfac, srfac))
+                             fair_over, mfac, srfac, usage_val))
 
         # Pass two: anchor the model's level to the market's, then price the
         # disagreement that survives. Without this the model prices its own
@@ -243,7 +260,8 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             "n": sum(1 for r in raw_rows if r[7] is not None),
         }
 
-        for key, ln, p, raw, adjusted, volume, p_raw, fair, mfac, srfac in raw_rows:
+        for (key, ln, p, raw, adjusted, volume, p_raw, fair, mfac, srfac,
+             usage_val) in raw_rows:
             p_over = model.anchor_probability(p_raw, offset, fair, shrink)
             priced = model.price_side(p_over, ln.over, ln.under)
             residual = model.market_residual(ln.line, raw, fit)
@@ -263,6 +281,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 "projection": round(raw, 1),
                 "matchup_factor": round(mfac, 3) if mfac else None,
                 "success_rate_factor": round(srfac, 3) if srfac else None,
+                "usage_projection": round(usage_val, 1) if usage_val else None,
                 "adjusted": round(adjusted, 1),
                 "raw_gap": round(raw - ln.line, 1),
                 "residual": round(residual, 1),
@@ -551,6 +570,12 @@ def as_payload(board: NFLBoard) -> dict:
                 k: list(v) for k, v in nfl_matchup.SUCCESS_RATE_MARKETS.items()},
             "success_rate_rows": sum(
                 1 for r in board.props if r.get("success_rate_factor")),
+        },
+        "usage_blend": {
+            "applied_to": {k: list(v) for k, v in nfl_usage.BLENDED.items()},
+            "weight": nfl_usage.BLEND_WEIGHT,
+            "source": nfl_usage.source(),
+            "rows": sum(1 for r in board.props if r.get("usage_projection")),
         },
         "bettable": list(model.BETTABLE),
         "passing_yards_caveat": model.PASSING_YARDS_CAVEAT,

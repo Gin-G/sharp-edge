@@ -728,8 +728,10 @@ def test_matchup_factor_is_carried_per_row_not_leaked():
     src = inspect.getsource(scr.build_board)
     append = [l for l in src.splitlines() if "raw_rows.append" in l or "fair_over, mfac" in l]
     assert any("mfac" in l for l in append), "factor must travel with its row"
-    loop = [l for l in src.splitlines() if "for key, ln, p, raw, adjusted" in l]
-    assert loop and "mfac" in loop[0], "second pass must unpack it, not close over it"
+    # The unpack now spans two lines, so join the block before checking.
+    joined = " ".join(src.split())
+    assert "for (key, ln, p, raw, adjusted, volume, p_raw, fair, mfac, srfac, usage_val) in raw_rows" in joined, \
+        "second pass must unpack the factor, not close over it"
 
 
 def test_rb_receiving_markets_are_adjusted():
@@ -971,3 +973,143 @@ def test_the_fit_and_the_rows_see_the_same_adjustment():
     src = inspect.getsource(scr.build_board)
     proj = src.split("def _projected", 1)[1].split("pairs =", 1)[0]
     assert "success_rate_for" in proj and "factor_for" in proj
+
+
+# ---------------------------------------------------------------------------
+# The usage blend: one market, because one market cleared the interval
+# ---------------------------------------------------------------------------
+
+from sharp_edge.nfl import usage as nfl_usage  # noqa: E402
+
+
+def test_blend_applies_to_tight_end_receiving_only():
+    """Five seeds against the production model, bootstrap interval on the
+    difference: TE receiving blend-prod [-1.00, -0.24], RB receiving
+    [-0.39, +0.21]. Only one clears zero."""
+    assert nfl_usage.BLENDED == {"TE": ("receiving_yards",)}
+
+    u = {"a te": 60.0}
+    got, used = nfl_usage.blend(40.0, "a te", "TE", "receiving_yards", u)
+    assert got == 50.0 and used == 60.0
+
+    for pos, market in (("RB", "receiving_yards"), ("WR", "receiving_yards"),
+                        ("TE", "receptions"), ("TE", "rushing_yards")):
+        got, used = nfl_usage.blend(40.0, "a te", pos, market, u)
+        assert got == 40.0 and used is None, (pos, market)
+
+
+def test_missing_usage_leaves_the_model_projection_alone():
+    got, used = nfl_usage.blend(40.0, "unknown", "TE", "receiving_yards", {})
+    assert got == 40.0 and used is None
+
+
+def test_blend_weight_is_even_and_untuned():
+    """A weight fitted on the same eight weeks that measured the effect would
+    be fitting noise; the interval was computed for fifty-fifty."""
+    assert nfl_usage.BLEND_WEIGHT == 0.5
+
+
+def test_usage_is_recorded_on_the_pick():
+    row = {"key": "a te", "market": "receiving_yards", "line": 38.5,
+           "side": "OVER", "usage_projection": 47.2}
+    m = json.loads(nfl_tracking._metrics(row))
+    assert m["usage_projection"] == 47.2
+
+
+def test_fit_and_rows_see_the_same_blended_projection():
+    """The market rescaling is fit on (line, projection) pairs. Blending in one
+    place and not the other would put the fit and the rows on different
+    scales — the same trap the matchup factor set."""
+    import inspect
+    from sharp_edge.nfl import screen as scr
+    src = inspect.getsource(scr.build_board)
+    proj = src.split("def _projected", 1)[1].split("pairs =", 1)[0]
+    assert "nfl_usage.blend" in proj
+
+
+def test_build_board_resolves_every_name_it_uses():
+    """A source-inspection test proves the wiring text is present, not that the
+    module behind it is imported. Shipping the usage blend, the reference was
+    there and the import was not, tests passed, and the board died at runtime
+    with NameError. Compile the function against its own module globals.
+    """
+    from sharp_edge.nfl import screen as scr
+
+    code = scr.build_board.__code__
+    names = set(code.co_names)
+    # Walk nested functions too — the fit helper lives inside build_board.
+    for const in code.co_consts:
+        if hasattr(const, "co_names"):
+            names |= set(const.co_names)
+
+    missing = [n for n in names
+               if n not in scr.__dict__
+               and n not in dir(__builtins__)
+               and not hasattr(__import__("builtins"), n)]
+    # Anything left should be an attribute lookup on something, not a global.
+    unresolved = [n for n in ("nfl_usage", "nfl_matchup", "nfl_odds",
+                              "nfl_proj", "card_mod", "model")
+                  if n not in scr.__dict__]
+    assert not unresolved, f"referenced but not imported: {unresolved}"
+
+
+@pytest.mark.asyncio
+async def test_build_board_executes_end_to_end(monkeypatch):
+    """A smoke test that actually runs build_board against stubs.
+
+    The source-inspection tests above check that wiring *text* is present, and
+    that is not the same as the code running: shipping the usage blend produced
+    two separate NameErrors — a missing import and a missing local — with all
+    250 other tests green, because nothing executed the function. This does.
+    """
+    from sharp_edge.nfl import screen as scr, odds as nfl_odds
+    from sharp_edge.nfl.projections import Week, WeekProjections
+
+    wk = Week(season=2026, week=1,
+              games=[{"gameday": "2026-09-13", "week": 1,
+                      "home_team": "JAX", "away_team": "CLE"}])
+    proj = WeekProjections(season=2026, week=1, preseason=False, rows=[{
+        "player": "A Tight End", "key": "a tight end", "player_id": "00-1",
+        "position": "TE", "team": "JAX", "exp_games": 1.0,
+        "prediction_type": "veteran_ml", "projected_points": 8.0,
+        "receiving_yards": 44.0, "receptions": 4.0, "rushing_yards": 0.0,
+        "passing_yards": 0.0, "receiving_tds": 0.3, "rushing_tds": 0.0,
+        "passing_tds": 0.0,
+    }])
+
+    board_obj = nfl_odds.Board()
+    board_obj.lines.append(nfl_odds.Line(
+        market="receiving_yards", player="A Tight End", key="a tight end",
+        line=38.5, over=-114, under=-106, market_id="m1",
+        over_selection=1, under_selection=2, event_id="e1",
+        event="CLE @ JAX", kickoff="2026-09-13T17:00:00.000Z"))
+
+    async def fake_week(today=None, client=None):
+        return wk
+
+    async def fake_proj(season, week, client=None, timeout=30.0):
+        return proj
+
+    async def fake_board(window, state="CO", force=False):
+        return {"board": board_obj, "age_seconds": 1, "error": None}
+
+    monkeypatch.setattr(scr.nfl_proj, "current_week", fake_week)
+    monkeypatch.setattr(scr.nfl_proj, "fetch_projections", fake_proj)
+    monkeypatch.setattr(scr.nfl_odds, "cached_board", fake_board)
+    monkeypatch.setattr(scr.nfl_matchup, "factors", lambda s, force=False: {"CLE": 1.1})
+    monkeypatch.setattr(scr.nfl_matchup, "success_rate_factors",
+                        lambda s, force=False: {"CLE": 1.02})
+    monkeypatch.setattr(scr.nfl_usage, "projections",
+                        lambda s, w, pos="TE", force=False: {"a tight end": 60.0})
+
+    board = await scr.build_board()
+    assert board.season == 2026 and board.week == 1
+    row = next(r for r in board.props if r["market"] == "receiving_yards")
+    # 44 model + 60 usage blended evenly, then the two factors.
+    assert row["usage_projection"] == 60.0
+    assert row["matchup_factor"] == 1.1
+    assert row["success_rate_factor"] == 1.02
+
+    payload = scr.as_payload(board)
+    assert payload["usage_blend"]["rows"] == 1
+    assert payload["matchup"]["rows"] == 1

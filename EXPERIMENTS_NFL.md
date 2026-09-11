@@ -643,6 +643,59 @@ per pick so neither can hide behind the other.
 
 Live board: 34 rows, factors 0.900 to 1.087.
 
+## Finding 12 — the gate, and the one thing that got through it
+
+Every usage result had been scored against a trailing average. The shipped
+model is not one — it has an ML layer, a form blend, a depth-role multiplier and
+a team budget — so "beats trailing" was a proxy, and a weak baseline flatters
+any method. `evaluate.backtest` was run for real: trained on seasons before
+2025, weeks 1-8, component projections, identical player-weeks.
+
+**Single seed first, all four markets:**
+
+| market | n | prod | trail | usage | usage-prod | wks won |
+|---|---|---|---|---|---|---|
+| RB rushing | 524 | **22.21** | 25.17 | 24.01 | **+1.80** | 4/8 |
+| WR receiving | 888 | **22.59** | 25.20 | 24.09 | **+1.50** | 2/8 |
+| TE receiving | 457 | 15.93 | 16.15 | **15.34** | -0.59 | 5/8 |
+| RB receiving | 545 | 11.33 | 12.12 | 11.50 | +0.16 | 5/8 |
+
+The earlier 4/4 and 4/5 wins were beating a weak baseline. Production beats
+trailing everywhere by 2.5-3 MAE and beats usage by 1.5-1.8 on the two big
+markets.
+
+**Five seeds plus a bootstrap on the difference**, for the two the single-seed
+run left open. A 0.15 margin against a +/-0.05 seed lottery cannot be settled by
+a point estimate:
+
+| market | n | prod | usage | blend | usage-prod 95% CI | blend-prod 95% CI |
+|---|---|---|---|---|---|---|
+| TE receiving | 456 | 16.11 | 15.38 | 15.49 | [-1.48, **-0.00**] | [-1.00, **-0.24**] |
+| RB receiving | 531 | 11.52 | 11.80 | 11.44 | [-0.33, +0.86] | [-0.39, +0.21] |
+
+**The interval earned its place.** Raw usage scores better than the blend on TE
+(15.38 against 15.49) and its interval runs to -0.00 — touching zero — while the
+blend's stops at -0.24. A better point estimate with an interval containing zero
+is not a better result, so the blend ships and the raw projection does not.
+Running-back receiving is a null on both and stays out.
+
+**Shipped** as `nfl/usage.py`: tight-end receiving only, an even 50/50 blend,
+weight untuned because a weight fitted on the same eight weeks that measured the
+effect would be fitting noise. Applied before the matchup factors, since the
+blend was measured against the model's own component projection. Live board: 33
+rows, usage drawn from 2025 until the current season has two weeks. About four
+per cent error reduction on one market — small, measured, and the only member of
+this family that survived contact with the real model.
+
+**Three bugs on the way in, and the third is the lesson.** The blend did not
+reach the projection-vs-line fit, which would have put the fit and the rows on
+different scales; a test caught that. Then the board died twice at runtime with
+`NameError` — once a missing import, once a missing local — while all 250 tests
+stayed green, because every wiring test inspected source *text* rather than
+running the function. There is now a smoke test that actually executes
+`build_board` against stubs. Source inspection proves a string is present; only
+execution proves the code runs.
+
 ---
 
 ## Operations

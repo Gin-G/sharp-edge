@@ -17,4 +17,5 @@ and a pricing model rather than a data pipeline.
 """
 
 from . import (card, matchup, model, names, odds, projections, screen,  # noqa: F401
+               usage,
                tracking)
