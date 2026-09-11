@@ -97,7 +97,7 @@ def _metrics(row: dict) -> str:
     keep = ("model_p_raw", "fair_p", "implied_p", "over_odds", "under_odds",
             "raw_gap", "threshold", "prediction_type", "exp_games", "position",
             "kickoff", "sgm", "role_conflict", "role_conflict_with",
-            "matchup_factor")
+            "matchup_factor", "success_rate_factor")
     return json.dumps({k: row.get(k) for k in keep if row.get(k) is not None})
 
 

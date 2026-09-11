@@ -845,11 +845,12 @@ def test_metrics_keeps_the_fields_the_open_questions_need():
         assert k in m, k
 
 
-@pytest.mark.asyncio
-async def test_snapshot_records_the_board_not_just_the_picks():
+def test_snapshot_records_the_board_not_just_the_picks():
     """The over/under tilt cannot be diagnosed from picks alone — you cannot
     tell whether the residuals were skewed before the threshold or whether the
     threshold made them so."""
+    import asyncio
+
     captured = []
 
     class FakeDB:
@@ -858,7 +859,7 @@ async def test_snapshot_records_the_board_not_just_the_picks():
 
     nfl_tracking.configure(FakeDB())
     try:
-        await nfl_tracking._snapshot_board({
+        asyncio.run(nfl_tracking._snapshot_board({
             "season": 2026, "week": 2,
             "fits": {"receiving_yards": {"slope": 0.59}},
             "prob_fits": {"receiving_yards": {"offset": 0.96}},
@@ -873,7 +874,7 @@ async def test_snapshot_records_the_board_not_just_the_picks():
                  "signal": "", "side": None, "bettable": True,
                  "edge_pts": 0.5, "line": 40.5, "adjusted": 41.0},
             ],
-        })
+        }))
     finally:
         nfl_tracking.configure(None)
 
@@ -887,21 +888,22 @@ async def test_snapshot_records_the_board_not_just_the_picks():
     assert s["fit_slope"] == 0.59 and s["prob_offset"] == 0.96
 
 
-@pytest.mark.asyncio
-async def test_a_failed_snapshot_never_costs_the_picks():
+def test_a_failed_snapshot_never_costs_the_picks():
     """Diagnostics must not take the record down with them."""
+    import asyncio
+
     class Boom:
         async def upsert_nfl_snapshot(self, row):
             raise RuntimeError("db down")
 
     nfl_tracking.configure(Boom())
     try:
-        await nfl_tracking._snapshot_board({
+        asyncio.run(nfl_tracking._snapshot_board({
             "season": 2026, "week": 2, "fits": {}, "prob_fits": {},
             "props": [{"key": "a", "market": "receiving_yards", "residual": 1.0,
                        "signal": "", "side": None, "bettable": True,
                        "edge_pts": 0.0, "line": 40.5, "adjusted": 41.0}],
-        })
+        }))
     finally:
         nfl_tracking.configure(None)
 
@@ -921,3 +923,51 @@ def test_receptions_threshold_is_scaled_to_its_own_spread():
     assert t["receptions"] >= 0.5
     # The yardage rules are the owner's and stay put.
     assert t["receiving_yards"] == 10.0 and t["rushing_yards"] == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Success rate allowed: stable, but only earns one market
+# ---------------------------------------------------------------------------
+
+def test_success_rate_applies_to_tight_end_receiving_only():
+    """Split-half r 0.618 makes it the most stable defensive trait measured
+    here — and stability is not predictive power. As a player-level multiplier
+    it moved MAE by -0.03 for WR, +0.03 for RB rushing, +0.02 for RB receiving.
+    Only TE receiving improved in 3+ of 4 seasons."""
+    assert nfl_matchup.SUCCESS_RATE_MARKETS == {"TE": ("receiving_yards",)}
+
+    opp, fac = {"ATL": "PIT"}, {"PIT": 1.06}
+    assert nfl_matchup.success_rate_for(
+        {"position": "TE", "market": "receiving_yards", "team": "ATL"}, opp, fac) == 1.06
+    for row in ({"position": "WR", "market": "receiving_yards", "team": "ATL"},
+                {"position": "RB", "market": "rushing_yards", "team": "ATL"},
+                {"position": "TE", "market": "receptions", "team": "ATL"}):
+        assert nfl_matchup.success_rate_for(row, opp, fac) is None
+
+
+def test_success_rate_clamp_is_tighter_than_the_main_factor():
+    """The measured spread is 0.94-1.06, far tighter than allowed-yards, so a
+    wider clamp would only ever admit noise."""
+    assert nfl_matchup.SR_MIN_FACTOR > nfl_matchup.MIN_FACTOR
+    assert nfl_matchup.SR_MAX_FACTOR < nfl_matchup.MAX_FACTOR
+
+
+def test_both_factors_are_recorded_separately_on_a_pick():
+    """They are independent (r=0.110) and stacked, so the record has to keep
+    them apart or neither can be evaluated later."""
+    row = {"key": "a te", "market": "receiving_yards", "line": 30.5, "side": "OVER",
+           "matchup_factor": 1.18, "success_rate_factor": 1.04}
+    m = json.loads(nfl_tracking._metrics(row))
+    assert m["matchup_factor"] == 1.18
+    assert m["success_rate_factor"] == 1.04
+
+
+def test_the_fit_and_the_rows_see_the_same_adjustment():
+    """The market rescaling is fit on (line, projection) pairs and then applied
+    per row. A factor applied in one place and not the other would put the fit
+    and the rows on different scales."""
+    import inspect
+    from sharp_edge.nfl import screen as scr
+    src = inspect.getsource(scr.build_board)
+    proj = src.split("def _projected", 1)[1].split("pairs =", 1)[0]
+    assert "success_rate_for" in proj and "factor_for" in proj

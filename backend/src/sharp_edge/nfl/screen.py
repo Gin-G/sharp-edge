@@ -145,6 +145,15 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
     except Exception as e:
         logger.warning("[nfl] matchup factors unavailable: %s", e)
         te_factors = {}
+    # Success rate allowed — a second, independent read on the defence, applied
+    # to tight-end receiving only. It correlates 0.110 with the factor above,
+    # which is what makes stacking them worth anything.
+    try:
+        sr_factors = await asyncio.to_thread(
+            nfl_matchup.success_rate_factors, season - 1)
+    except Exception as e:
+        logger.warning("[nfl] success-rate factors unavailable: %s", e)
+        sr_factors = {}
     opponent_map = nfl_matchup.opponents(wk.games)
 
     got = await nfl_odds.cached_board(wk.window(), state=state, force=force)
@@ -171,15 +180,21 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
         # Rescale on this week's own board: every player who has both a posted
         # line and a projection contributes one point to the fit.
         def _projected(key, ln):
-            """The projection for one player in this market, matchup applied."""
+            """The projection for one player in this market, matchup applied.
+
+            Has to mirror the per-row adjustment exactly — the rescaling is fit
+            on these pairs, so a factor applied in one place and not the other
+            would put the fit and the rows on different scales.
+            """
             row = by_key[key]
             v = row.get(component)
             if v is None:
                 return None
-            f = nfl_matchup.factor_for(
-                {"position": row.get("position"), "market": market,
-                 "team": row.get("team")}, opponent_map, te_factors)
-            return float(v) * f if f else float(v)
+            ctx = {"position": row.get("position"), "market": market,
+                   "team": row.get("team")}
+            f = nfl_matchup.factor_for(ctx, opponent_map, te_factors) or 1.0
+            sr = nfl_matchup.success_rate_for(ctx, opponent_map, sr_factors) or 1.0
+            return float(v) * f * sr
 
         pairs = [(ln.line, _projected(k, ln))
                  for k, ln in lines.items()
@@ -200,10 +215,11 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             raw = float(p[component])
             # Matchup first, so the market rescaling below sees the number we
             # actually believe rather than one it has to undo.
-            mfac = nfl_matchup.factor_for(
-                {"position": p.get("position"), "market": market,
-                 "team": p.get("team")}, opponent_map, te_factors)
-            raw_adj = raw * mfac if mfac else raw
+            ctx = {"position": p.get("position"), "market": market,
+                   "team": p.get("team")}
+            mfac = nfl_matchup.factor_for(ctx, opponent_map, te_factors)
+            srfac = nfl_matchup.success_rate_for(ctx, opponent_map, sr_factors)
+            raw_adj = raw * (mfac or 1.0) * (srfac or 1.0)
             adjusted = model.adjusted_projection(ln.line, raw_adj, fit)
             volume = model.derive_volume(
                 market, adjusted, p.get(volume_key) if volume_key else None
@@ -213,7 +229,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             )
             fair_over, _ = model.devig_two_way(ln.over, ln.under)
             raw_rows.append((key, ln, p, raw, adjusted, volume, p_over,
-                             fair_over, mfac))
+                             fair_over, mfac, srfac))
 
         # Pass two: anchor the model's level to the market's, then price the
         # disagreement that survives. Without this the model prices its own
@@ -227,7 +243,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             "n": sum(1 for r in raw_rows if r[7] is not None),
         }
 
-        for key, ln, p, raw, adjusted, volume, p_raw, fair, mfac in raw_rows:
+        for key, ln, p, raw, adjusted, volume, p_raw, fair, mfac, srfac in raw_rows:
             p_over = model.anchor_probability(p_raw, offset, fair, shrink)
             priced = model.price_side(p_over, ln.over, ln.under)
             residual = model.market_residual(ln.line, raw, fit)
@@ -246,6 +262,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 "line": ln.line,
                 "projection": round(raw, 1),
                 "matchup_factor": round(mfac, 3) if mfac else None,
+                "success_rate_factor": round(srfac, 3) if srfac else None,
                 "adjusted": round(adjusted, 1),
                 "raw_gap": round(raw - ln.line, 1),
                 "residual": round(residual, 1),
@@ -530,6 +547,10 @@ def as_payload(board: NFLBoard) -> dict:
         "matchup": {
             "applied_to": {k: list(v) for k, v in nfl_matchup.ADJUSTED.items()},
             "rows": sum(1 for r in board.props if r.get("matchup_factor")),
+            "success_rate_applied_to": {
+                k: list(v) for k, v in nfl_matchup.SUCCESS_RATE_MARKETS.items()},
+            "success_rate_rows": sum(
+                1 for r in board.props if r.get("success_rate_factor")),
         },
         "bettable": list(model.BETTABLE),
         "passing_yards_caveat": model.PASSING_YARDS_CAVEAT,

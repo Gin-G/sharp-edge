@@ -97,6 +97,7 @@ DraftKings first, then line shopping across books.
 - [x] NFL weekly card — two legs, one per game, frozen before kickoff
 - [x] Refuse short lines on both sides — a short line prices a role the projection cannot see, and the edge there ranks backups
 - [x] Defence-vs-position matchup on TE receiving props — measured over four week 1s; WR got worse and coverage scheme did nothing, both documented
+- [x] Test formation/personnel-level defensive matchup — destroys the signal rather than refining it (~21 plays per cell); team success rate allowed is the stable trait (r 0.618) but moves projections ~1%
 - [ ] Feed coaching scheme and offseason role change into the projections — they read last season's usage, so a player inheriting a vacated role keeps his backup rate (half the week-1 board)
 - [ ] Fix the tight-end projection bias (+22.5 yds in week 1) — the matchup factor multiplies an already-inflated number rather than correcting it
 - [ ] Archive NFL closing lines the way data/odds/ does for MLB, so the shrink factors can be fit instead of guessed

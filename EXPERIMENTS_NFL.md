@@ -576,6 +576,73 @@ matchup adjustment helped, or to back out what a projection would have been
 without one — and a field added after the fact only covers weeks that have not
 happened yet.
 
+## Finding 11 — the most stable defensive trait is also nearly inert
+
+Prompted by a fair objection: anchoring team scoring to the Vegas total, which
+the upstream notes recommend, concedes the level to the market and leaves edge
+only in how a team's production is divided. If the point is to beat the line, the
+model wants to be independent of it.
+
+Worth stating plainly that **the shipped pipeline already anchors to the market
+twice** — `calibrate_to_market` rescales our projection onto the line's scale and
+keeps only the residual, and `probability_offset` centres our probabilities on
+the market's. The defence is that both correct a known bias in *our* model (it
+shrinks toward the mean, a line does not) rather than importing the market's
+opinion of a game. That is a real distinction but a thinner one than it sounds.
+
+**The granular idea does not work.** Split-half stability of a defence's trait,
+186,137 plays with participation data, 2022-25 — same method as the prior null
+result so the numbers are comparable:
+
+| trait | split-half r | plays per cell |
+|---|---|---|
+| team: **success rate allowed** | **0.618** | 721 |
+| team: EPA allowed per play | 0.397 | — |
+| team: EPA per rush / per pass | 0.234 / 0.233 | — |
+| team x **personnel**: EPA | **-0.062** | 21 |
+| team x personnel: success rate | 0.026 | 21 |
+| team x formation: success rate | 0.033 | 95 |
+| team x man/zone: EPA | 0.139 | — |
+
+Slicing by personnel or formation does not refine the signal, it destroys it —
+one cut is negative. The last column is the mechanism: a team-half-personnel
+cell holds about **21 plays**, and a defence's true rate against 12 personnel
+cannot be measured from 21 snaps. Formation-vs-formation matchup is not
+reachable with the data available, and no amount of modelling fixes a sample
+size.
+
+**But team success rate allowed is a genuine find** — r 0.618, more than double
+anything in the prior work, well above EPA's 0.397, and computed entirely from
+play-by-play. The prior work concluded "defence is weak" from *fantasy points
+allowed*, which is volume-contaminated and noisy; success rate is bounded per
+play, so explosive plays cannot drag it, and it behaves completely differently.
+
+**And then stability turned out not to be predictive power.** As a player-level
+multiplier over four week-1 samples:
+
+| market | MAE change | seasons won |
+|---|---|---|
+| TE receiving | **-0.24** | **4/4** |
+| WR receiving | -0.03 | 3/4 |
+| RB rushing | +0.03 | 2/4 |
+| RB receiving | +0.02 | 1/4 |
+| QB passing | -0.98 | 2/4 |
+
+The whole factor spans 0.94 to 1.06. A six per cent nudge cannot move a
+projection far however well it is measured. This is the prior work's warning
+arriving from the other direction: there the matchup signal was real but
+unstable, here it is real *and* stable and still tiny.
+
+**Shipped for tight-end receiving only**, which is the one market clearing the
+three-of-four bar. It earns that place by being independent rather than large:
+stacked on the existing matchup factor it takes TE receiving from 16.71 to 16.52
+MAE, 4/4 seasons, and the two factors correlate **0.110** — different
+information, not the same signal twice. Clamped to 0.90-1.12, tighter than the
+main factor because the measured spread is tighter. Both are recorded separately
+per pick so neither can hide behind the other.
+
+Live board: 34 rows, factors 0.900 to 1.087.
+
 ---
 
 ## Operations

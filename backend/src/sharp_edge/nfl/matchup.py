@@ -59,6 +59,10 @@ NFLVERSE_WEEKLY = (
     "https://github.com/nflverse/nflverse-data/releases/download/stats_player/"
     "stats_player_week_{season}.parquet"
 )
+NFLVERSE_PBP = (
+    "https://github.com/nflverse/nflverse-data/releases/download/pbp/"
+    "play_by_play_{season}.parquet"
+)
 
 # Position -> the markets that earned the adjustment. See the table in the
 # module docstring for everything that was tested and did not.
@@ -74,6 +78,35 @@ MIN_BASELINE_YARDS = 10.0
 
 # One freak game must not carry a defence's whole number.
 MAX_RATIO = 4.0
+
+# A second, independent defensive factor — team success rate allowed.
+#
+# It is by a distance the most *stable* defensive trait measured here:
+# split-half r 0.618 over 186,137 plays, against 0.397 for EPA per play and
+# 0.06-0.26 for everything in the prior work. It is also computed purely from
+# play-by-play, so it owes nothing to the betting market.
+#
+# **Stability is not predictive power, and this is the case that proves it.**
+# Tested as a player-level multiplier on four week-1 samples it does almost
+# nothing, because the whole spread of the factor is 0.94 to 1.06 — a six per
+# cent nudge cannot move a projection far however well it is measured:
+#
+#     market              MAE change   seasons won
+#     TE receiving          -0.24         4/4
+#     WR receiving          -0.03         3/4
+#     RB rushing            +0.03         2/4
+#     RB receiving          +0.02         1/4
+#     QB passing            -0.98         2/4
+#
+# Only tight end clears the bar of improving in three seasons of four, which is
+# why that is the only place it is applied. It earns its place there by being
+# *independent* rather than large: stacked on the existing matchup factor it
+# takes TE receiving from 16.71 to 16.52 MAE, 4/4 seasons, and the two factors
+# correlate only 0.110 — different information, not the same signal twice.
+SUCCESS_RATE_MARKETS = {"TE": ("receiving_yards",)}
+
+# Tighter than the main factor's clamp because the measured spread is tighter.
+SR_MIN_FACTOR, SR_MAX_FACTOR = 0.90, 1.12
 
 # How far the factor is allowed to move a projection. The measured spread over
 # 2022-25 runs about 0.80 to 1.23 at the 10th and 90th percentiles, so this
@@ -120,6 +153,67 @@ def _compute(season: int) -> dict:
         f = float(np.average(rows.ratio, weights=rows.baseline))
         out[team] = min(MAX_FACTOR, max(MIN_FACTOR, f))
     return out
+
+
+def _compute_success_rate(season: int) -> dict:
+    """``{team: factor}`` — success rate allowed, over the league average.
+
+    Success rate rather than EPA on purpose: it is bounded per play, so a
+    handful of explosive plays cannot drag a defence's number the way they drag
+    a mean EPA, and that is exactly why it is the more stable of the two
+    (0.618 against 0.397).
+    """
+    import pandas as pd
+
+    df = pd.read_parquet(
+        NFLVERSE_PBP.format(season=season),
+        columns=["defteam", "success", "epa"],
+    )
+    df = df[df.epa.notna() & df.defteam.notna()]
+    if df.empty:
+        return {}
+    by_team = df.groupby("defteam").agg(sr=("success", "mean"), n=("success", "size"))
+    by_team = by_team[by_team.n >= 300]
+    if by_team.empty or not by_team.sr.mean():
+        return {}
+    league = by_team.sr.mean()
+    return {t: float(min(SR_MAX_FACTOR, max(SR_MIN_FACTOR, v / league)))
+            for t, v in by_team.sr.items()}
+
+
+_sr_cache: dict = {"season": None, "factors": {}, "fetched_at": 0.0, "error": None}
+
+
+def success_rate_factors(season: int, force: bool = False) -> dict:
+    """Cached ``{team: factor}``. Empty on any failure, and the caller then
+    applies nothing — a missing adjustment is never worse than a wrong one."""
+    now = time.time()
+    fresh = (not force and _sr_cache["season"] == season
+             and now - _sr_cache["fetched_at"] < _TTL_SECONDS and _sr_cache["factors"])
+    if fresh:
+        return _sr_cache["factors"]
+    try:
+        got = _compute_success_rate(season)
+        if got:
+            _sr_cache.update({"season": season, "factors": got,
+                              "fetched_at": now, "error": None})
+        else:
+            _sr_cache["error"] = f"no play-by-play for {season}"
+    except Exception as e:
+        logger.warning("[nfl-matchup] success rate for %s failed: %s", season, e)
+        _sr_cache["error"] = str(e)
+    return _sr_cache["factors"] if _sr_cache["season"] == season else {}
+
+
+def success_rate_for(row: dict, opponent_map: dict, team_factors: dict) -> Optional[float]:
+    """The success-rate adjustment for one row, or None where it does not apply."""
+    markets = SUCCESS_RATE_MARKETS.get((row.get("position") or "").upper())
+    if not markets or row.get("market") not in markets:
+        return None
+    opp = opponent_map.get(row.get("team"))
+    if opp is None:
+        return None
+    return team_factors.get(opp)
 
 
 def factors(season: int, force: bool = False) -> dict:
