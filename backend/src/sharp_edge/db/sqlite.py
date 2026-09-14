@@ -442,6 +442,15 @@ class SQLiteDatabase(BetDatabase):
         )
         await self._db.commit()
 
+    async def delete_nfl_pick(self, season, week, player_key, market) -> int:
+        cur = await self._db.execute(
+            """DELETE FROM nfl_picks
+               WHERE season = ? AND week = ? AND player_key = ? AND market = ?""",
+            (season, week, player_key, market),
+        )
+        await self._db.commit()
+        return cur.rowcount or 0
+
     async def upsert_nfl_snapshot(self, row: dict) -> None:
         await self._db.execute(
             """INSERT INTO nfl_board_snapshots (

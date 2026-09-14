@@ -312,6 +312,78 @@ def _result_for(pick: dict, row) -> tuple[Optional[str], Optional[float]]:
     return ("WIN" if won else "LOSS"), actual
 
 
+async def purge_late_picks(season: Optional[int] = None,
+                           week: Optional[int] = None,
+                           apply: bool = False) -> dict:
+    """Remove picks that were recorded after their own game had started.
+
+    These are not predictions. Before the kickoff guard existed, the board
+    upserted on every fetch and kept writing a week that had already been
+    played: 25 of week 1's 106 picks were created after their kickoff, went
+    19-6 (76.0%), and took the recorded hit rate from 53.4% to 59.2%. Leaving
+    them in means every number computed from the track record is wrong.
+
+    The rule is the filter — a row qualifies only when its own ``created_at``
+    is later than its own ``kickoff``. There is no way to ask this to delete
+    anything else, which is the point: it cannot be pointed at a legitimate
+    pick by getting an argument wrong.
+
+    Dry by default. ``apply=True`` performs the deletes and is the only thing
+    that writes. Rows with an unparseable or missing timestamp are left alone —
+    a pick is removed on positive evidence that it postdates its kickoff, never
+    on the absence of evidence that it does not.
+    """
+    db = _require_db()
+    rows = await db.list_nfl_picks(season=season, week=week)
+
+    # Both timestamps must be readable. _has_kicked_off falls back to "now"
+    # when handed None, which for a finished game is always true — so passing
+    # an unparsed created_at straight through would delete the entire week.
+    late = []
+    for p in rows:
+        made = _parsed(p.get("created_at"))
+        if made is None:
+            continue
+        if _has_kicked_off(p, made):
+            late.append(p)
+    out = {
+        "scanned": len(rows),
+        "late": len(late),
+        "applied": bool(apply),
+        "picks": [
+            {k: p.get(k) for k in
+             ("season", "week", "player_key", "player", "market", "side",
+              "line", "result", "created_at", "kickoff")}
+            for p in late
+        ],
+    }
+    if not apply:
+        out["deleted"] = 0
+        out["message"] = "dry run — pass apply=true to delete"
+        return out
+
+    deleted = 0
+    for p in late:
+        deleted += await db.delete_nfl_pick(
+            p["season"], p["week"], p["player_key"], p["market"])
+    out["deleted"] = deleted
+    logger.warning("[nfl-track] purged %d picks recorded after kickoff", deleted)
+    return out
+
+
+def _parsed(stamp) -> Optional[datetime]:
+    """A timestamp as an aware datetime, or None if it cannot be read."""
+    if not stamp:
+        return None
+    if isinstance(stamp, datetime):
+        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+    try:
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
 async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
     """Resolve every unsettled pick for one week against nflverse actuals.
 

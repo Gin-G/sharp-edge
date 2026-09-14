@@ -212,6 +212,17 @@ class BetDatabase(ABC):
     ) -> None: ...
 
     @abstractmethod
+    async def delete_nfl_pick(
+        self, season: int, week: int, player_key: str, market: str,
+    ) -> int:
+        """Remove one pick. Returns the number of rows deleted.
+
+        Deliberately keyed on the full primary key rather than taking a filter:
+        the only sanctioned use is removing a row that should never have been
+        written, and the caller has to name each one.
+        """
+
+    @abstractmethod
     async def upsert_nfl_snapshot(self, row: dict) -> None:
         """One row per (season, week, market): the shape of the whole board.
 

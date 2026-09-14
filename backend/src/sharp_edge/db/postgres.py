@@ -511,6 +511,20 @@ class PostgresDatabase(BetDatabase):
                 result, actual, season, week, player_key, market,
             )
 
+    async def delete_nfl_pick(self, season, week, player_key, market) -> int:
+        async with self._pool.acquire() as conn:
+            tag = await conn.execute(
+                """DELETE FROM nfl_picks
+                   WHERE season = $1 AND week = $2 AND player_key = $3
+                     AND market = $4""",
+                season, week, player_key, market,
+            )
+        # asyncpg returns the command tag, e.g. "DELETE 1".
+        try:
+            return int(str(tag).rsplit(" ", 1)[-1])
+        except (TypeError, ValueError):
+            return 0
+
     async def upsert_nfl_snapshot(self, row: dict) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(

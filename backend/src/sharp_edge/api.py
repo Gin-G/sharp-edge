@@ -762,6 +762,22 @@ async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None,
     return await nfl_tracking.settle_week(season, week, regrade=regrade)
 
 
+@app.post("/nfl/picks/purge-late")
+async def nfl_purge_late(season: Optional[int] = None, week: Optional[int] = None,
+                         apply: bool = False):
+    """Delete picks recorded after their own game started. Dry run by default.
+
+    They are not predictions, and they distort every number the track record
+    reports. The filter is the rule itself — created_at later than kickoff — so
+    this cannot be aimed at a legitimate pick.
+    """
+    try:
+        from .nfl import tracking as nfl_tracking
+    except ImportError as e:
+        raise HTTPException(500, f"NFL extras not installed: {e}")
+    return await nfl_tracking.purge_late_picks(season, week, apply=apply)
+
+
 @app.get("/nfl/screen/status")
 async def nfl_screen_status():
     try:

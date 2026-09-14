@@ -1275,3 +1275,72 @@ def test_freeze_week_filters_started_games_before_writing():
     import inspect
     src = inspect.getsource(nfl_tracking.freeze_week)
     assert "_has_kicked_off" in src, "picks must be filtered on kickoff"
+
+
+# ---------------------------------------------------------------------------
+# Purging picks that were written after their game started
+# ---------------------------------------------------------------------------
+
+class _PurgeDB:
+    def __init__(self, rows):
+        self.rows = rows
+        self.deleted = []
+
+    async def list_nfl_picks(self, season=None, week=None, result=None, limit=2000):
+        return self.rows
+
+    async def delete_nfl_pick(self, season, week, player_key, market):
+        self.deleted.append((season, week, player_key, market))
+        return 1
+
+
+def _row(key, created, kickoff="2026-09-13T17:00:00.000Z"):
+    return {"season": 2026, "week": 1, "player_key": key, "player": key,
+            "market": "rushing_yards", "side": "OVER", "line": 20.5,
+            "result": "WIN", "created_at": created, "kickoff": kickoff}
+
+
+def _purge(monkeypatch, rows, apply=False):
+    import asyncio
+    db = _PurgeDB(rows)
+    monkeypatch.setattr(nfl_tracking, "_require_db", lambda: db)
+    out = asyncio.run(nfl_tracking.purge_late_picks(apply=apply))
+    return out, db
+
+
+def test_only_picks_made_after_their_own_kickoff_are_purged(monkeypatch):
+    rows = [_row("before", "2026-09-09T18:51:00+00:00"),
+            _row("after", "2026-09-14T14:50:00+00:00")]
+    out, db = _purge(monkeypatch, rows, apply=True)
+    assert out["late"] == 1
+    assert [d[2] for d in db.deleted] == ["after"]
+
+
+def test_an_unreadable_created_at_is_never_purged(monkeypatch):
+    """_has_kicked_off falls back to now() when handed None, and for a game
+    that has finished that is always true — so a row whose timestamp cannot be
+    parsed would take the whole week with it."""
+    rows = [_row("nostamp", None), _row("garbage", "not a date")]
+    out, db = _purge(monkeypatch, rows, apply=True)
+    assert out["late"] == 0
+    assert db.deleted == []
+
+
+def test_a_missing_kickoff_is_never_purged(monkeypatch):
+    rows = [_row("nokick", "2026-09-14T14:50:00+00:00", kickoff=None)]
+    out, db = _purge(monkeypatch, rows, apply=True)
+    assert out["late"] == 0 and db.deleted == []
+
+
+def test_the_purge_is_dry_by_default(monkeypatch):
+    rows = [_row("after", "2026-09-14T14:50:00+00:00")]
+    out, db = _purge(monkeypatch, rows)
+    assert out["late"] == 1
+    assert out["deleted"] == 0
+    assert db.deleted == [], "a dry run must not write"
+
+
+def test_a_naive_created_at_is_read_as_utc(monkeypatch):
+    rows = [_row("after", "2026-09-14T14:50:00")]
+    out, _ = _purge(monkeypatch, rows)
+    assert out["late"] == 1
