@@ -790,6 +790,7 @@ def _get_tracking():
 async def picks_track_record(
     screen: str = "hr",
     since: Optional[str] = None,
+    include_metrics: bool = False,
     db: BetDatabase = Depends(get_db),
 ):
     """Hit-rate summary for a screen's persisted picks: overall, per edge
@@ -799,7 +800,8 @@ async def picks_track_record(
     if screen not in tracking.SCREENS:
         raise HTTPException(400, f"screen must be one of {tracking.SCREENS}")
     rows = await db.list_picks(screen=screen, since=since)
-    return tracking.build_track_record(screen, rows)
+    return tracking.build_track_record(screen, rows,
+                                       include_metrics=include_metrics)
 
 
 @app.get("/picks/parlay-record")

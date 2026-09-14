@@ -781,8 +781,33 @@ _PICK_FIELDS = (
 )
 
 
+def _pick_payload(row: dict, include_metrics: bool = False) -> dict:
+    """One pick for the API. ``include_metrics`` attaches the stored record.
+
+    The metrics blob is the whole row as it was scored — model_p, the FanDuel
+    price, ev, the pitcher id — and it is the ONLY surviving record of what the
+    market offered that day, because FanDuel pulls a market once its game
+    starts. Without it a question like "what would a different card have
+    picked" cannot be answered after the fact at all.
+
+    Off by default: it is several hundred bytes a pick against a payload the UI
+    renders 300 of.
+    """
+    out = {k: row.get(k) for k in _PICK_FIELDS}
+    if include_metrics:
+        raw = row.get("metrics")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                raw = None
+        out["metrics"] = raw if isinstance(raw, dict) else None
+    return out
+
+
 def build_track_record(
-    screen: str, rows: list[dict], recent_limit: int = 300
+    screen: str, rows: list[dict], recent_limit: int = 300,
+    include_metrics: bool = False,
 ) -> dict:
     """Aggregate persisted picks into hit-rate stats. ``rows`` come from
     db.list_picks ordered newest-first. Hit rate = wins / (wins + losses);
@@ -827,6 +852,6 @@ def build_track_record(
         "by_source": [{"source": s, **_finish(b)} for s, b in sorted(by_source.items())],
         "daily": [{"date": d, **_finish(b)} for d, b in sorted(daily.items())],
         "picks": [
-            {k: r.get(k) for k in _PICK_FIELDS} for r in rows[:recent_limit]
+            _pick_payload(r, include_metrics) for r in rows[:recent_limit]
         ],
     }
