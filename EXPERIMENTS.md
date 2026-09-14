@@ -820,3 +820,52 @@ suspect is the roster/lineup gap above, not the ranking.
   and would change which of these variants actually wins. Run 1 sharpens this:
   the baseline's 64.9% is within noise of break-even, so the screen may not
   currently be profitable at all.
+
+## Pitcher and bullpen walk rates do not help a hit prop (Sept 2026)
+
+Walks are the second half of the at-bat story — at four plate appearances, no
+walks records a hit 65.9% of the time, one walk 53.4%, two 36.6% — so the
+obvious next feature is the opposing staff's tendency to issue them. The
+batter's own walk rate had already failed (AUC 0.506 against the hit), so the
+hypothesis was that the *pitchers* carry the predictable part.
+
+**Setup.** 7,137 batter-games over 30 slates. Opposing starter walk rate is
+season-to-date from the MLB API (206 starters, spread 0.041-0.177 per batter
+faced); bullpen rate is the team's relievers across the window (30 teams,
+0.082-0.141). A first pass using trailing rates built inside the 30-slate
+window was underpowered — roughly four to six starts per pitcher — and is not
+the basis for the conclusion below; the season-long rates are.
+
+**The mechanism is real.** Walks rise cleanly and monotonically with the
+opposing staff's rate:
+
+    quartile   walks     PA      AB     P(hit)
+    Q1         0.310    3.99    3.64    61.2%
+    Q2         0.383    3.99    3.56    59.5%
+    Q3         0.434    4.00    3.51    61.3%
+    Q4         0.481    4.08    3.56    61.0%
+
+Q1 to Q4 is +0.171 walks per batter-game, a 55% increase. The feature is
+measuring what it claims to measure.
+
+**It does not reach the outcome, and the table says why.** A wild staff hands
+out more walks *and* more trips to the plate — more baserunners, longer
+innings, the lineup turning over further. PA goes +0.090 while walks go +0.171,
+so at-bats move only -0.086 and hit probability moves -0.2 points. The two
+effects very nearly cancel.
+
+    AUC predicting 'got a hit'
+      starter season BB rate    0.504
+      bullpen season BB rate    0.484
+      lineup slot alone         0.562
+
+Adding it to slot made things worse in the trailing-rate pass (0.572 -> 0.564),
+which is what an uninformative feature does to a fitted combination.
+
+**Conclusion: not worth adding.** This is not a power problem — the walk effect
+is clearly detected at n=7,137, it simply does not propagate to at-bats. Note
+what that implies for the walk mechanism generally: the reason walks hurt a hit
+prop is that a *particular batter* gets pitched around on a *particular day*,
+which is a batter-and-situation effect, not a staff-level trait. Staff-level
+walk rates cannot see it. If the overconfident top end above model_p 0.72 is a
+walk effect, this is not the way to capture it.
