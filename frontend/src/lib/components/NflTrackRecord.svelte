@@ -51,7 +51,28 @@
     return 'bg-surface-600/40 text-slate-500 border-border';
   }
 
+  function odds(v: number | null): string {
+    if (v === null || v === undefined) return '—';
+    return v > 0 ? `+${v}` : `${v}`;
+  }
+
+  /** A card is decided as soon as one leg loses — a parlay cannot recover —
+   *  so "pending" here means still live, not merely ungraded. */
+  function cardState(c: { result: string | null; legs: { result: string | null }[] }) {
+    if (c.result === 'WIN') return { label: 'HIT', cls: 'bg-emerald-600/20 text-emerald-300 border-emerald-600/30' };
+    if (c.result === 'LOSS') return { label: 'MISSED', cls: 'bg-rose-600/20 text-rose-300 border-rose-600/30' };
+    if (c.result === 'VOID') return { label: 'VOID', cls: 'bg-surface-600 text-slate-500 border-border' };
+    const live = c.legs.filter((l) => !l.result).length;
+    return {
+      label: live ? `${live} LEG${live > 1 ? 'S' : ''} LIVE` : 'PENDING',
+      cls: 'bg-surface-600/40 text-slate-400 border-border',
+    };
+  }
+
   $: o = data?.overall;
+  $: cardRows = (data?.cards.rows ?? []).slice().sort(
+    (a, b) => b.season - a.season || b.week - a.week
+  );
 
   /** Flattened so the template doesn't index a union type by a dynamic key —
    *  each group carries its own label alongside the bucket. */
@@ -147,6 +168,61 @@
         </div>
       {/if}
     {/each}
+
+    {#if cardRows.length}
+      <div class="border-t border-border">
+        <div class="px-5 pt-4 pb-2 flex items-baseline justify-between gap-2">
+          <span class="text-xs font-medium text-slate-400 uppercase tracking-wider">
+            The suggested parlay, week by week
+          </span>
+          <span class="text-[11px] text-slate-500">every leg must hit</span>
+        </div>
+        <div class="px-5 pb-4 space-y-3">
+          {#each cardRows as c}
+            {@const st = cardState(c)}
+            <div class="rounded-lg border border-border overflow-hidden">
+              <div class="flex items-baseline justify-between gap-3 px-4 py-2.5 bg-surface-600/30">
+                <div class="flex items-baseline gap-2.5 flex-wrap">
+                  <span class="text-sm font-semibold text-slate-200">Week {c.week}</span>
+                  <span class="text-xs text-slate-500">
+                    {c.leg_count} legs · {odds(c.american)}
+                  </span>
+                  {#if c.model_p !== null}
+                    <span class="text-xs text-slate-500">
+                      model {(100 * c.model_p).toFixed(1)}%
+                    </span>
+                  {/if}
+                </div>
+                <span class="inline-block px-2 py-0.5 text-[10px] font-medium rounded border {st.cls}">
+                  {st.label}
+                </span>
+              </div>
+              <div class="divide-y divide-border/50">
+                {#each c.legs as l}
+                  <div class="flex items-baseline justify-between gap-3 px-4 py-2">
+                    <div class="min-w-0">
+                      <div class="text-sm text-slate-200 truncate">{l.player}</div>
+                      <div class="text-xs text-slate-500">
+                        {l.side?.toLowerCase()} {l.line} {l.market.replace(/_/g, ' ')}
+                        {#if l.fd_odds !== null}<span class="text-slate-600"> · {odds(l.fd_odds)}</span>{/if}
+                      </div>
+                    </div>
+                    <div class="flex items-baseline gap-3 shrink-0">
+                      <span class="text-sm tabular-nums text-slate-300">
+                        {l.actual === null || l.actual === undefined ? '—' : l.actual}
+                      </span>
+                      <span class="inline-block px-1.5 py-0.5 text-[10px] rounded border {resultClass(l.result)}">
+                        {l.result ?? 'LIVE'}
+                      </span>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
 
     {#if data.picks.length}
       <div class="border-t border-border">

@@ -327,9 +327,10 @@ async def settle_week(season: int, week: int) -> dict:
                                  result, actual)
         counts[result] += 1
 
-    # Only score the card once every leg's game has been played.
-    if waiting == 0:
-        await _settle_card(season, week)
+    # Scored against the card's OWN legs, not the week's. Gating this on the
+    # whole week meant a parlay whose legs had both finished on Sunday sat
+    # unresolved because unrelated picks were waiting on Monday night.
+    await _settle_card(season, week)
     return {"season": season, "week": week,
             "settled": sum(counts.values()), "waiting_on_kickoff": waiting,
             **counts}
@@ -348,18 +349,33 @@ async def _settle_card(season: int, week: int) -> None:
     settled = {(p["player_key"], p["market"]): p
                for p in await db.list_nfl_picks(season=season, week=week)}
 
+    legs = the_card.get("legs") or []
+    if not legs:
+        return
+
     won = graded = 0
-    for leg in the_card.get("legs") or []:
+    pending = False
+    for leg in legs:
         p = settled.get((leg["player_key"], leg["market"]))
-        if not p or not p.get("result") or p["result"] == "VOID":
+        if not p or not p.get("result"):
+            pending = True
             continue
+        if p["result"] == "VOID":
+            continue        # a voided leg drops out, as the book treats it
         graded += 1
         if p["result"] in ("WIN", "PUSH"):
             won += 1
+
+    # One lost leg kills a parlay, so the card is decided the moment any leg
+    # loses — no reason to wait on the rest. Otherwise every leg has to be in
+    # before it can be called a win, or a two-legger would be graded a winner
+    # off the one leg that happened to finish first.
+    lost = graded > won
+    if not lost and pending:
+        return
     if graded == 0:
         return
-    result = "WIN" if won == graded else "LOSS"
-    await db.settle_nfl_card(season, week, result, won, graded)
+    await db.settle_nfl_card(season, week, "LOSS" if lost else "WIN", won, graded)
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +448,20 @@ async def track_record(season: Optional[int] = None) -> dict:
     db = _require_db()
     rows = await db.list_nfl_picks(season=season)
     cards = await db.list_nfl_cards(season=season)
+
+    # The legs are the frozen snapshot taken before kickoff, so they carry no
+    # result — that lives on the pick. Join them here rather than in the UI:
+    # "what was the parlay and did it hit" is one question and should not need
+    # the client to re-derive half of it.
+    by_pick = {(q["season"], q["week"], q["player_key"], q["market"]): q
+               for q in rows}
+    for c in cards:
+        for leg in c.get("legs") or []:
+            q = by_pick.get((c["season"], c["week"],
+                             leg.get("player_key"), leg.get("market")))
+            if q:
+                leg["result"] = q.get("result")
+                leg["actual"] = q.get("actual")
 
     graded_cards = [c for c in cards if c.get("result")]
     return {

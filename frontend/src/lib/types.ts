@@ -430,7 +430,16 @@ export interface NflTrackRecord {
     won: number;
     rows: {
       season: number; week: number; leg_count: number; american: number | null;
+      decimal_odds: number | null; model_p: number | null;
       result: string | null; legs_won: number | null; legs_settled: number | null;
+      /** The frozen legs, with each leg's settled result joined on by the
+       *  backend — the snapshot itself is written before kickoff and has no
+       *  result of its own. */
+      legs: {
+        player: string; market: string; side: string; line: number;
+        team: string | null; event: string | null; fd_odds: number | null;
+        result: string | null; actual: number | null;
+      }[];
     }[];
   };
   picks: {

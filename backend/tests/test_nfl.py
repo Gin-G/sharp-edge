@@ -817,11 +817,89 @@ def test_a_pick_waits_for_its_own_kickoff():
     assert '"VOID"' in src
 
 
-def test_card_is_not_scored_while_a_leg_is_unplayed():
-    """A parlay cannot be graded off the legs that happen to have finished."""
+class _CardDB:
+    """Minimal stand-in for the picks/cards store, enough to grade one card."""
+
+    def __init__(self, legs, picks):
+        self.card = {"season": 2026, "week": 1, "legs": legs, "result": None}
+        self.picks = picks
+        self.settled = None
+
+    async def get_nfl_card(self, season, week):
+        return self.card
+
+    async def list_nfl_picks(self, season=None, week=None):
+        return self.picks
+
+    async def settle_nfl_card(self, season, week, result, won, graded):
+        self.settled = (result, won, graded)
+
+
+def _leg(key, market="rushing_yards"):
+    return {"player_key": key, "market": market}
+
+
+def _pick(key, result, market="rushing_yards"):
+    return {"player_key": key, "market": market, "result": result}
+
+
+def _grade(monkeypatch, legs, picks):
+    """Run the real _settle_card against a stub store."""
+    import asyncio
+
+    db = _CardDB(legs, picks)
+    monkeypatch.setattr(nfl_tracking, "_require_db", lambda: db)
+    asyncio.run(nfl_tracking._settle_card(2026, 1))
+    return db.settled
+
+
+def test_card_is_not_scored_while_a_leg_is_unplayed(monkeypatch):
+    """A parlay cannot be graded off the legs that happen to have finished.
+
+    The two-leg case that matters: one leg won, the other has not kicked off.
+    Grading here would book a winner off half a ticket.
+    """
+    assert _grade(monkeypatch,
+                  [_leg("a"), _leg("b")],
+                  [_pick("a", "WIN"), _pick("b", None)]) is None
+
+
+def test_a_lost_leg_settles_the_card_immediately(monkeypatch):
+    """One lost leg kills a parlay, so the rest of the week is irrelevant.
+
+    This is the week-1 case: both card legs finished Sunday and one lost, but
+    the card sat unresolved because unrelated picks were waiting on Monday
+    night football.
+    """
+    result = _grade(monkeypatch,
+                    [_leg("a"), _leg("b")],
+                    [_pick("a", "LOSS"), _pick("b", None)])
+    assert result is not None and result[0] == "LOSS"
+
+
+def test_card_wins_only_when_every_leg_is_in(monkeypatch):
+    assert _grade(monkeypatch,
+                  [_leg("a"), _leg("b")],
+                  [_pick("a", "WIN"), _pick("b", "WIN")]) == ("WIN", 2, 2)
+
+
+def test_a_voided_leg_drops_out_rather_than_killing_the_ticket(monkeypatch):
+    assert _grade(monkeypatch,
+                  [_leg("a"), _leg("b")],
+                  [_pick("a", "VOID"), _pick("b", "WIN")]) == ("WIN", 1, 1)
+
+
+def test_card_settlement_is_no_longer_gated_on_the_whole_week(monkeypatch):
+    """settle_week must grade the card off its own legs.
+
+    Pinning the old `if waiting == 0:` guard in source text is what let the
+    week-scope bug survive: the guard was present and correct-looking, and
+    still blocked a decided card.
+    """
     import inspect
     src = inspect.getsource(nfl_tracking.settle_week)
-    assert "if waiting == 0:" in src
+    assert "if waiting == 0:" not in src
+    assert "_settle_card" in src
 
 
 # ---------------------------------------------------------------------------
