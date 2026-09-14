@@ -835,12 +835,16 @@ class _CardDB:
         self.settled = (result, won, graded)
 
 
-def _leg(key, market="rushing_yards"):
-    return {"player_key": key, "market": market}
+def _leg(key, market="rushing_yards", line=10.5, side="OVER"):
+    return {"player_key": key, "market": market, "line": line, "side": side}
 
 
-def _pick(key, result, market="rushing_yards"):
-    return {"player_key": key, "market": market, "result": result}
+def _pick(key, result, market="rushing_yards", actual=None, line=10.5):
+    if actual is None and result in ("WIN", "LOSS"):
+        # Consistent with the leg default: an OVER 10.5 that won cleared it.
+        actual = 20.0 if result == "WIN" else 0.0
+    return {"player_key": key, "market": market, "result": result,
+            "actual": actual, "line": line}
 
 
 def _grade(monkeypatch, legs, picks):
@@ -887,6 +891,47 @@ def test_a_voided_leg_drops_out_rather_than_killing_the_ticket(monkeypatch):
     assert _grade(monkeypatch,
                   [_leg("a"), _leg("b")],
                   [_pick("a", "VOID"), _pick("b", "WIN")]) == ("WIN", 1, 1)
+
+
+def test_a_card_is_graded_at_its_own_frozen_line(monkeypatch):
+    """A card cannot inherit a pick's result when the line has moved.
+
+    The week-1 case, exactly: the card was frozen at Malik Willis under 38.5;
+    the pick was upserted to under 39.5 before kickoff and settled a WIN on
+    39.0 rushing yards. Inheriting that result reported the card a winner while
+    displaying a line the same 39.0 loses.
+    """
+    result = _grade(
+        monkeypatch,
+        [_leg("willis", line=38.5, side="UNDER")],
+        [_pick("willis", "WIN", actual=39.0, line=39.5)],
+    )
+    assert result is not None and result[0] == "LOSS", (
+        "39.0 does not stay under a frozen 38.5")
+
+
+def test_a_leg_is_graded_on_the_frozen_line_in_both_directions(monkeypatch):
+    """The mirror case: the pick lost at its moved line, the frozen one wins."""
+    assert _grade(monkeypatch,
+                  [_leg("a", line=40.5, side="UNDER")],
+                  [_pick("a", "LOSS", actual=39.0, line=38.5)]) == ("WIN", 1, 1)
+
+
+def test_regrade_rewrites_a_card_that_was_settled_wrongly(monkeypatch):
+    """Without this the bad result is permanent: _settle_card returns early on
+    any card that already has one."""
+    import asyncio
+
+    db = _CardDB([_leg("willis", line=38.5, side="UNDER")],
+                 [_pick("willis", "WIN", actual=39.0, line=39.5)])
+    db.card["result"] = "WIN"          # the wrong value already stored
+    monkeypatch.setattr(nfl_tracking, "_require_db", lambda: db)
+
+    asyncio.run(nfl_tracking._settle_card(2026, 1))
+    assert db.settled is None, "must not touch a settled card by default"
+
+    asyncio.run(nfl_tracking._settle_card(2026, 1, regrade=True))
+    assert db.settled is not None and db.settled[0] == "LOSS"
 
 
 def test_card_settlement_is_no_longer_gated_on_the_whole_week(monkeypatch):

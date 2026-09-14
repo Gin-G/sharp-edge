@@ -281,12 +281,21 @@ def _result_for(pick: dict, row) -> tuple[Optional[str], Optional[float]]:
     return ("WIN" if won else "LOSS"), actual
 
 
-async def settle_week(season: int, week: int) -> dict:
-    """Resolve every unsettled pick for one week against nflverse actuals."""
+async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
+    """Resolve every unsettled pick for one week against nflverse actuals.
+
+    ``regrade`` re-scores an already-settled card. The picks are left alone —
+    they are graded at their own line and are right — but a card written before
+    a line moved can hold a result that its frozen legs do not support, and
+    without this there is no way to correct one.
+    """
     db = _require_db()
     picks = [p for p in await db.list_nfl_picks(season=season, week=week)
              if not p.get("result")]
     if not picks:
+        # Still re-score the card: every pick being settled is exactly when a
+        # card most needs grading, not a reason to skip it.
+        await _settle_card(season, week, regrade=regrade)
         return {"season": season, "week": week, "settled": 0,
                 "message": "nothing pending"}
 
@@ -330,13 +339,36 @@ async def settle_week(season: int, week: int) -> dict:
     # Scored against the card's OWN legs, not the week's. Gating this on the
     # whole week meant a parlay whose legs had both finished on Sunday sat
     # unresolved because unrelated picks were waiting on Monday night.
-    await _settle_card(season, week)
+    await _settle_card(season, week, regrade=regrade)
     return {"season": season, "week": week,
             "settled": sum(counts.values()), "waiting_on_kickoff": waiting,
             **counts}
 
 
-async def _settle_card(season: int, week: int) -> None:
+def _leg_result(leg: dict, actual: Optional[float]) -> Optional[str]:
+    """Grade one frozen card leg against the actual, at the leg's OWN line.
+
+    A card cannot inherit its legs' results from the picks table. A pick is
+    upserted with the current line for as long as it is unresolved, while the
+    card is frozen once, before kickoff — so by settlement the two can hold
+    different lines for the same player. Week 1: the Malik Willis pick had
+    moved to under 39.5 and settled a win on 39.0 rushing yards, while the card
+    had been frozen at under 38.5, which that same 39.0 loses.
+
+    The frozen line is the one that matters: it is the bet the card actually
+    represents, and the betslip link it was written with.
+    """
+    if actual is None or leg.get("line") is None or not leg.get("side"):
+        return None
+    line = float(leg["line"])
+    actual = float(actual)
+    if actual == line:
+        return "PUSH"
+    over = actual > line
+    return "WIN" if (over if leg["side"] == "OVER" else not over) else "LOSS"
+
+
+async def _settle_card(season: int, week: int, regrade: bool = False) -> None:
     """Score the frozen card off its legs' settled results.
 
     A card wins only if every leg does — it is one parlay. A VOID leg drops out
@@ -344,7 +376,7 @@ async def _settle_card(season: int, week: int) -> None:
     """
     db = _require_db()
     the_card = await db.get_nfl_card(season, week)
-    if not the_card or the_card.get("result"):
+    if not the_card or (the_card.get("result") and not regrade):
         return
     settled = {(p["player_key"], p["market"]): p
                for p in await db.list_nfl_picks(season=season, week=week)}
@@ -362,8 +394,14 @@ async def _settle_card(season: int, week: int) -> None:
             continue
         if p["result"] == "VOID":
             continue        # a voided leg drops out, as the book treats it
+        # Graded at the leg's frozen line, not by inheriting p["result"] —
+        # the pick's line may have moved after the card was written.
+        res = _leg_result(leg, p.get("actual"))
+        if res is None:
+            pending = True
+            continue
         graded += 1
-        if p["result"] in ("WIN", "PUSH"):
+        if res in ("WIN", "PUSH"):
             won += 1
 
     # One lost leg kills a parlay, so the card is decided the moment any leg
@@ -460,8 +498,11 @@ async def track_record(season: Optional[int] = None) -> dict:
             q = by_pick.get((c["season"], c["week"],
                              leg.get("player_key"), leg.get("market")))
             if q:
-                leg["result"] = q.get("result")
                 leg["actual"] = q.get("actual")
+                # At the leg's own frozen line — see _leg_result. The pick's
+                # result can disagree when the line moved after the freeze.
+                leg["result"] = ("VOID" if q.get("result") == "VOID"
+                                 else _leg_result(leg, q.get("actual")))
 
     graded_cards = [c for c in cards if c.get("result")]
     return {

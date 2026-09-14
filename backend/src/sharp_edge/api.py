@@ -739,7 +739,8 @@ async def nfl_track_record(season: Optional[int] = None):
 
 
 @app.post("/nfl/settle")
-async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None):
+async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None,
+                     regrade: bool = False):
     """Settle one week against nflverse actuals.
 
     Defaults to the most recent week that still has pending picks, so the
@@ -758,7 +759,7 @@ async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None):
             return {"settled": 0, "message": "nothing pending"}
         target = max((p["season"], p["week"]) for p in pending)
         season, week = target
-    return await nfl_tracking.settle_week(season, week)
+    return await nfl_tracking.settle_week(season, week, regrade=regrade)
 
 
 @app.get("/nfl/screen/status")
