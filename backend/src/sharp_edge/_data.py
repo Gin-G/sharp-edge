@@ -460,7 +460,8 @@ def _boxscore_summary(game_pk: int) -> dict:
     Only the small extracted summary is cached — full boxscore payloads would
     blow up memory over a season backfill.
     """
-    empty_side = {"batters": (), "starters": (), "starter": None, "batting": {}}
+    empty_side = {"batters": (), "starters": (), "slots": {},
+                  "starter": None, "batting": {}}
     try:
         data = statsapi.get("game_boxscore", {"gamePk": game_pk})
     except Exception:
@@ -472,6 +473,7 @@ def _boxscore_summary(game_pk: int) -> dict:
         players = team.get("players") or {}
         batters = []
         starters = []
+        slots = {}
         batting = {}
         for p in players.values():
             person = p.get("person") or {}
@@ -483,11 +485,24 @@ def _boxscore_summary(game_pk: int) -> dict:
             order = str(p.get("battingOrder") or "")
             if pid and order.endswith("00"):
                 starters.append(pid)
+                # Keep the slot itself, not just the fact of starting. Where a
+                # batter hits sets how many trips he gets, and that is the
+                # largest single driver of whether he records a hit: leadoff
+                # averages 4.46 plate appearances against 3.45 for ninth, and
+                # 72.6% against 54.3% to get a hit. See sharp_edge.lineup.
+                slots[pid] = int(order[:-2])
             # Final batting line — present for anyone who came to the plate.
             line = ((p.get("stats") or {}).get("batting") or {})
             if pid and line:
                 batting[pid] = {
                     "pa": int(line.get("plateAppearances") or 0),
+                    # At-bats, separately from plate appearances, because a
+                    # walk spends a trip without offering a swing — and a hit
+                    # prop needs the swing. At four plate appearances, no walks
+                    # records a hit 65.9% of the time, one walk 53.4%, two 36.6%.
+                    "ab": int(line.get("atBats") or 0),
+                    "bb": int(line.get("baseOnBalls") or 0),
+                    "hbp": int(line.get("hitByPitch") or 0),
                     "hits": int(line.get("hits") or 0),
                     "hr": int(line.get("homeRuns") or 0),
                 }
@@ -500,6 +515,7 @@ def _boxscore_summary(game_pk: int) -> dict:
         out[side] = {
             "batters": tuple(batters),
             "starters": tuple(starters),
+            "slots": slots,
             "starter": starter,
             "batting": batting,
         }
