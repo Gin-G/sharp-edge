@@ -113,6 +113,29 @@ export const MARKET_LABEL: Record<string, string> = {
   receptions: 'Receptions',
 };
 
+/** Which family a market belongs to.
+ *
+ *  Receiving yards and receptions are one group because they are one read:
+ *  both come off the same target projection, so a player showing OVER on yards
+ *  and UNDER on receptions is the model contradicting itself, and that is only
+ *  visible when the two sit together.
+ */
+export const MARKET_GROUP: Record<string, string> = {
+  receiving_yards: 'Receiving',
+  receptions: 'Receiving',
+  rushing_yards: 'Rushing',
+  passing_yards: 'Passing',
+};
+
+/** Display order. Receiving first because it is most of the board. */
+export const GROUP_ORDER = ['Receiving', 'Rushing', 'Passing'] as const;
+
+export const GROUP_BLURB: Record<string, string> = {
+  Receiving: 'Yards and receptions off the same target projection',
+  Rushing: 'Carries and yardage',
+  Passing: 'Quarterback yardage — runs 4-5 points overconfident, off the card',
+};
+
 /** Kickoff as a short local weekday + time. */
 export function fmtKickoff(iso: string | null): string {
   if (!iso) return '—';

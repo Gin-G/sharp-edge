@@ -4,6 +4,7 @@
   import {
     NFL_CACHE_KEY, load as loadScreen, initialState,
     fmtOdds, fmtPct, fmtSigned, fmtEv, evClass, MARKET_LABEL, fmtKickoff,
+    MARKET_GROUP, GROUP_ORDER, GROUP_BLURB,
   } from '$lib/nflScreen';
   import type { NflScreen, NflProp } from '$lib/types';
   import NflCard from '$lib/components/NflCard.svelte';
@@ -38,6 +39,40 @@
 
   $: overs = rows.filter((r) => r.signal === 'OVER').length;
   $: unders = rows.filter((r) => r.signal === 'UNDER').length;
+
+  /** The board split by market family, empty groups dropped.
+   *
+   *  Grouped rather than filtered because the families answer different
+   *  questions and are not comparable: a receiving edge is measured in yards
+   *  off a target projection, a passing edge in yards off a model that is
+   *  known to run overconfident. Stacking them in one list invites reading the
+   *  biggest number as the best bet.
+   */
+  $: groups = GROUP_ORDER
+    .map((name) => ({
+      name,
+      blurb: GROUP_BLURB[name],
+      rows: rows.filter((r) => MARKET_GROUP[r.market] === name),
+    }))
+    .filter((g) => g.rows.length > 0);
+
+  /** Everything the board carries, whether or not it is modelled. The counts
+   *  are the honest part: game lines are priced but carry no projection, so
+   *  they are listed as prices rather than as edges. */
+  $: coverage = data
+    ? [
+        ...GROUP_ORDER.map((name) => ({
+          label: name,
+          n: (data.props ?? []).filter((r) => MARKET_GROUP[r.market] === name).length,
+          modelled: true,
+          href: null as string | null,
+        })),
+        { label: 'Touchdowns', n: data.tds?.length ?? 0, modelled: true,
+          href: '/nfl/touchdowns' },
+        { label: 'Game lines', n: data.games?.length ?? 0, modelled: false,
+          href: '/nfl/games' },
+      ]
+    : [];
 
   // How much the raw rule and the rescaled one disagree. Worth a line on the
   // page rather than only in the code: it is the single biggest judgement call
@@ -170,19 +205,44 @@
       </div>
     {/if}
 
-    <!-- Board -->
+    <!-- What the board covers -->
+    <section class="card p-0 overflow-hidden">
+      <div class="px-5 py-3 border-b border-border">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
+          Markets on the board
+        </h2>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 divide-x divide-y sm:divide-y-0 divide-border">
+        {#each coverage as c}
+          <div class="px-5 py-3">
+            <div class="text-xs text-slate-500 uppercase tracking-wider">{c.label}</div>
+            <div class="text-xl font-bold text-white tabular-nums mt-0.5">{c.n}</div>
+            {#if c.modelled}
+              <div class="text-[11px] text-slate-500 mt-0.5">projected</div>
+            {:else}
+              <div class="text-[11px] text-amber-400/80 mt-0.5" title="Priced from FanDuel but with no model behind them yet — nothing to compare the price to.">
+                priced only
+              </div>
+            {/if}
+            {#if c.href}
+              <a href={c.href} class="text-[11px] text-sky-400 hover:text-sky-300">view →</a>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    </section>
+
+    <!-- Board, one section per market family -->
+    {#each groups as g (g.name)}
     <section class="card overflow-hidden p-0">
       <div class="px-5 py-4 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
         <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-          Projection vs Line
+          {g.name} <span class="text-slate-600 normal-case font-normal">· {g.rows.length}</span>
         </h2>
-        <span class="text-xs text-slate-500">
-          fires at ±{data.thresholds.receiving_yards} yds / ±{data.thresholds.receptions} rec,
-          measured on the rescaled gap
-        </span>
+        <span class="text-xs text-slate-500">{g.blurb}</span>
       </div>
 
-      {#if rows.length === 0}
+      {#if g.rows.length === 0}
         <div class="px-5 py-6 text-sm text-slate-500">
           Nothing past the threshold with these filters.
         </div>
@@ -207,7 +267,7 @@
               </tr>
             </thead>
             <tbody>
-              {#each rows as r (r.market + r.key + r.line)}
+              {#each g.rows as r (r.market + r.key + r.line)}
                 <tr class="border-b border-border/50 hover:bg-surface-600/30 {r.bettable ? '' : 'opacity-60'}">
                   <td class="px-4 py-2.5">
                     <span class="inline-block px-2 py-0.5 text-xs rounded border {sideClass(r.signal || r.side || '')}">
@@ -254,6 +314,13 @@
         </div>
       {/if}
     </section>
+    {/each}
+
+    {#if groups.length === 0}
+      <section class="card px-5 py-6 text-sm text-slate-500">
+        Nothing past the threshold with these filters.
+      </section>
+    {/if}
 
     <!-- How much work the rescaling is doing -->
     <section class="card p-0 overflow-hidden">
