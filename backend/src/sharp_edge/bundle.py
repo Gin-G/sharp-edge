@@ -1,7 +1,8 @@
 """The day's bets, and a link that loads them into the slip.
 
-**What gets picked.** The batters most likely to record a hit, taken off the
-top of the board by model probability, one per game, capped at two. Not the
+**What gets picked.** Every batter the model puts at or above
+``MIN_MODEL_P`` to record a hit, one per game, with a two-leg floor — so the
+card's length is an output of the board rather than a cap. Not the
 best *screen qualifiers*: the filters are gone from selection, because measured
 over 129 days they were picking worse bets and paying more for them. See the
 ranking block in ``batters.screen_for_date`` for the numbers.
@@ -15,8 +16,10 @@ opposite objectives — value rewards a longer price, and a longer price is the
 book saying the leg is less likely to win. Two-leg cards swept 50% against a
 model that said 52%; three-leg cards swept 16.7% against a model that said 45%.
 
-**The objective is the sweep, not the leg.** The card is bet as one ticket, so
-what matters is the share of days every leg wins. See ``MAX_LEGS``.
+**The bar is a length control, not a quality filter.** Leg quality is flat at
+about 67% across the whole top of the board and the model cannot rank within
+it; above 0.72 its confidence stops meaning anything and the picks get worse.
+See ``MIN_MODEL_P``.
 
 **One leg per game.** Two batters facing the same starter are one bet on that
 pitcher having a bad day, not two independent reads. A book prices them as a
@@ -53,53 +56,46 @@ BETSLIP_BASE = "https://account.sportsbook.fanduel.com/sportsbook/addToBetslip"
 
 MIN_LEGS: int = 2
 
-MAX_LEGS: Optional[int] = 2
+MAX_LEGS: Optional[int] = None
 
-# Why a cap, and why two.
+# The bar a leg has to clear, and why it is 0.72 and not higher.
 #
-# Measured over the 36 days to 2026-09-14, on the question the card is for —
-# did the player get a hit:
+# The card is every batter the model puts at or above MIN_MODEL_P to record a
+# hit, one per game, with the two-leg floor below it. Length is an output of
+# the bar rather than a cap: a day with five good bats produces a five-leg
+# card and a thin one produces two.
 #
-#     shipped card, tail chosen on price     56.0%   (28/50)
-#     top two by model probability           65.0%   (39/60)
-#     two picked at RANDOM off the board     66.2%
-#     the screen as a whole                  67.1%   (163/243)
+# Raising the bar past 0.72 does NOT buy better picks. It buys worse ones.
+# Replayed over the 36 days to 2026-09-14:
 #
-# Two things follow, and the second is the uncomfortable one.
+#     bar    days   median legs   leg hit rate   sweep
+#     0.68    35        10           67.8%       17.6%
+#     0.70    34         7           67.6%       25.8%
+#     0.72    33         3           66.7%       44.8%   <- here
+#     0.74    27         2           48.7%       33.3%
+#     0.76    22         1           54.5%       38.5%
 #
-# First, the old tail selection was costing about eleven points of hit rate.
-# Sorting the tail by `model_p x decimal` rewards a longer price, and a longer
-# price is the book saying the leg is less likely to win, so the card was
-# systematically reaching for the worse bets on the board. Removing that is
-# where the gain is.
+# Leg quality is flat at about 67% all the way up to 0.72 and then falls off a
+# cliff. That is not noise in the tail, it is the model's calibration: it is
+# honest in the bulk (0.675-0.725 predicts 69-71% and delivers 67-71%) and
+# overconfident above it — 0.775-0.800 predicts 81.1% and delivers 56.2%. The
+# names it is surest about are the ones it is worst about.
 #
-# Second, model_p cannot rank its own picks. Over those 243 graded picks its
-# AUC is 0.507 and its correlation with actually getting a hit is -0.026 —
-# both indistinguishable from nothing. Picking the top two by probability
-# (65.0%) does not beat picking two at random off the same board (66.2%); a
-# random draw wins about two thirds of the time. The model is well calibrated
-# in the bulk (0.675-0.725 predicts 69-71% and delivers 67-71%) and badly
-# overconfident above it: 0.775-0.800 predicts 81.1% and delivers 56.2%.
+# Below 0.72 the bar stops binding: the card runs to seven and ten legs, leg
+# quality is unchanged, and sweep collapses because sweep multiplies. So 0.72
+# is where the card is as long as it can be without either admitting legs that
+# are no better or reaching into the range where the model breaks down.
 #
-# So selection is not where the remaining edge is. The screen is good at
-# finding ~67% bats and cannot tell which of them is the better one. Choose on
-# probability anyway — it is the objective, it is free, and it is not price —
-# but do not expect it to beat a coin toss over the same names, and treat any
-# future claim that a reordering helped with suspicion unless it clears that
-# random baseline.
-#
-# What IS left is leg count, because sweep multiplies flat ~67% legs:
-#
-#     legs        2       3       4
-#     predicted  45%     30%     20%
-#     backtest   51.9%   46.7%   36.7%
-#
-# Against the same days the shipped card swept 36.4%. Matched head to head on
-# the 21 days where both produced a card, top-2 swept 47.6% against 38.1%,
-# disagreeing on only eight days (5-3) — McNemar p = 0.36. The direction is
-# right and thirty days cannot prove the size of it.
-#
-# Raise this for longer, higher-paying, rarer cards. It is the one real knob.
+# The deeper caveat, which this bar does not fix and should not be read as
+# fixing: over 243 graded picks model_p has an AUC of 0.507 and correlates
+# -0.026 with getting a hit. It cannot rank the board. Picking the top two by
+# probability (65.0%) does not beat two drawn at random off the same board
+# (66.2%). The bar works as a LENGTH control and as a guard against the
+# overconfident tail, not because 0.73 is a better bet than 0.71 — it isn't.
+# Making it a better bet means giving the model something it does not have;
+# see IDEA.md for the two features most likely to do that.
+
+MIN_MODEL_P: float = 0.72
 
 # NO LONGER USED BY DEFAULT. Kept because the reasoning is worth having, and
 # because `min_edge_pts` still offers a price floor on request. This constant
@@ -194,6 +190,7 @@ def build(
     max_legs: Optional[int] = DEFAULT_MAX_LEGS,
     min_edge_pts: float | None = None,
     cross_game: bool = True,
+    min_model_p: float | None = None,
 ) -> list[dict]:
     """The day's bets: the picks most likely to record a hit, best first.
 
@@ -227,6 +224,7 @@ def build(
     ``min_edge_pts`` is still honoured when passed explicitly, for anyone who
     does want a price floor. It just isn't the default any more.
     """
+    min_model_p = MIN_MODEL_P if min_model_p is None else min_model_p
     priced = [
         r for r in records
         if r.get("fd_market_id") is not None
@@ -267,8 +265,9 @@ def build(
     out = candidates[:floor]
     rest = candidates[floor:]
 
-    # Everything past the floor, most likely first — the same rule that chose
-    # the first two. `candidates` is already in probability order.
+    # Everything past the floor that clears the bar, most likely first — the
+    # same rule that chose the first two. `candidates` is already in
+    # probability order, so the first one below the bar ends it.
     #
     # This used to sort the tail by `_value` (model_p x decimal) and admit
     # anything above MIN_LEG_VALUE, which made the card a probability card for
@@ -281,6 +280,8 @@ def build(
     # `min_edge_pts`, applied above, is still the way to ask for a price floor.
     for r in rest:
         if not _room():
+            break
+        if (r.get("model_p") or 0) < min_model_p:
             break
         out.append(r)
     return out

@@ -70,10 +70,11 @@ def test_a_price_floor_is_still_available_on_request():
 def test_one_leg_per_game_by_default():
     """57% of naive top-2 bundles were two batters facing the same starter —
     a same-game parlay, which a book prices below the product of its legs."""
+    # All above MIN_MODEL_P, so the bar is not what decides the length here.
     rows = [
-        _pick("a", +0.05, -150, pitcher=99),
-        _pick("b", +0.04, -150, pitcher=99),   # same starter
-        _pick("c", +0.01, -150, pitcher=77),
+        _pick("a", +0.05, -150, pitcher=99, model_p=0.78),
+        _pick("b", +0.04, -150, pitcher=99, model_p=0.77),   # same starter
+        _pick("c", +0.01, -150, pitcher=77, model_p=0.76),
     ]
     got = bundle.build(rows, max_legs=3)
     assert [r["batter"] for r in got] == ["a", "c"]
@@ -92,19 +93,41 @@ def test_falls_back_to_the_event_when_the_pitcher_is_unknown():
     assert [r["batter"] for r in bundle.build(rows)] == ["a", "c"]
 
 
-def test_the_card_is_capped_at_two_legs():
-    """Sweep multiplies flat ~67% legs, so length is the one lever that moves
-    it: two legs sweep ~45%, four ~20%. Five qualifiers no longer make a
-    five-leg card."""
-    rows = [_pick(f"p{i}", None, -150, pitcher=i, model_p=0.72 - i * 0.001)
+def test_length_comes_from_the_bar_not_a_cap():
+    """Every batter at or above MIN_MODEL_P goes on, so a strong board makes a
+    long card and a thin one makes two."""
+    assert bundle.MAX_LEGS is None
+    strong = [_pick(f"p{i}", None, -150, pitcher=i, model_p=0.80 - i * 0.001)
+              for i in range(5)]
+    assert len(bundle.build(strong)) == 5
+    thin = [_pick(f"q{i}", None, -150, pitcher=i, model_p=0.70 - i * 0.001)
             for i in range(5)]
-    assert bundle.MAX_LEGS == 2
-    assert len(bundle.build(rows)) == 2
+    assert len(bundle.build(thin)) == bundle.MIN_LEGS
+
+
+def test_a_leg_below_the_bar_never_joins_a_card_that_already_has_two():
+    """0.72 is where the model stops being honest; below it the card just gets
+    longer without getting better, and sweep multiplies."""
+    rows = [
+        _pick("a", None, -150, pitcher=1, model_p=0.78),
+        _pick("b", None, -150, pitcher=2, model_p=0.75),
+        _pick("c", None, -150, pitcher=3, model_p=0.7199),
+    ]
+    assert [r["batter"] for r in bundle.build(rows)] == ["a", "b"]
+    rows[2]["model_p"] = 0.72          # exactly on the bar qualifies
+    assert len(bundle.build(rows)) == 3
+
+
+def test_the_bar_is_overridable():
+    rows = [_pick(f"p{i}", None, -150, pitcher=i, model_p=0.71 - i * 0.001)
+            for i in range(4)]
+    assert len(bundle.build(rows)) == bundle.MIN_LEGS
+    assert len(bundle.build(rows, min_model_p=0.70)) == 4
 
 
 def test_an_explicit_cap_is_still_honoured():
     """Nothing sets one now, but callers that pass a ceiling get it."""
-    rows = [_pick(f"p{i}", None, -150, pitcher=i, model_p=0.7 - i * 0.01)
+    rows = [_pick(f"p{i}", None, -150, pitcher=i, model_p=0.80 - i * 0.005)
             for i in range(10)]
     assert len(bundle.build(rows, max_legs=3)) == 3
     # ...and a ceiling below the two-leg floor still binds
@@ -285,11 +308,15 @@ def test_no_leg_is_ever_chosen_on_price():
         _pick("best_priced", None, -110, pitcher=4, model_p=0.710),
     ]
     assert [r["batter"] for r in bundle.build(rows)] == ["top1", "top2"]
-    # And with room for a third, it is still the most likely one that goes on.
-    got = [r["batter"] for r in bundle.build(rows, max_legs=3)]
-    assert got == ["top1", "top2", "best_priced"]
-    rows.append(_pick("likelier", None, -260, pitcher=5, model_p=0.718))
-    got = [r["batter"] for r in bundle.build(rows, max_legs=3)]
+    # And where a third leg does qualify, it is the likelier one that goes on,
+    # not the cheaper one.
+    rows = [
+        _pick("top1", None, -300, pitcher=1, model_p=0.760),
+        _pick("top2", None, -300, pitcher=2, model_p=0.750),
+        _pick("best_priced", None, -110, pitcher=4, model_p=0.730),
+        _pick("likelier", None, -260, pitcher=5, model_p=0.740),
+    ]
+    got = [r["batter"] for r in bundle.build(rows)]
     assert got[2] == "likelier", "price must not outrank probability"
 
 
