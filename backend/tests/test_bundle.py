@@ -92,13 +92,14 @@ def test_falls_back_to_the_event_when_the_pitcher_is_unknown():
     assert [r["batter"] for r in bundle.build(rows)] == ["a", "c"]
 
 
-def test_there_is_no_cap_by_default():
-    """Five qualifying picks make a five-leg card — the caller asked for the
-    whole qualifying set, not the best few of it."""
+def test_the_card_is_capped_at_two_legs():
+    """Sweep multiplies flat ~67% legs, so length is the one lever that moves
+    it: two legs sweep ~45%, four ~20%. Five qualifiers no longer make a
+    five-leg card."""
     rows = [_pick(f"p{i}", None, -150, pitcher=i, model_p=0.72 - i * 0.001)
             for i in range(5)]
-    assert bundle.MAX_LEGS is None
-    assert len(bundle.build(rows)) == 5
+    assert bundle.MAX_LEGS == 2
+    assert len(bundle.build(rows)) == 2
 
 
 def test_an_explicit_cap_is_still_honoured():
@@ -269,26 +270,33 @@ def test_a_short_minus_money_card_is_allowed():
     assert bundle.summarise(got)["american"] < 100
 
 
-def test_the_added_leg_is_chosen_on_price_not_on_rank():
-    """Below the top two the model cannot tell the board apart — ranks 3 to 8
-    hit within a point of each other over 129 days — while their prices range
-    from -105 to -425. So the extra leg is picked on what it pays."""
+def test_no_leg_is_ever_chosen_on_price():
+    """The tail used to be sorted by model_p x decimal, which rewards a longer
+    price — and a longer price is the book saying the leg is less likely to
+    win. Measured over 36 days it cost about eleven points of hit rate: the
+    card's legs hit 56.0% against 67.1% for the screen they came from.
+
+    With the cap at two this is the whole card, so `best_priced` must not
+    displace a more likely batter however cheap it is.
+    """
     rows = [
         _pick("top1", None, -300, pitcher=1, model_p=0.720),
         _pick("top2", None, -300, pitcher=2, model_p=0.719),
-        _pick("next_by_rank", None, -260, pitcher=3, model_p=0.718),
         _pick("best_priced", None, -110, pitcher=4, model_p=0.710),
-        _pick("mid", None, -190, pitcher=5, model_p=0.715),
     ]
-    got = [r["batter"] for r in bundle.build(rows)]
-    assert got[:2] == ["top1", "top2"]
-    assert got[2] == "best_priced"
+    assert [r["batter"] for r in bundle.build(rows)] == ["top1", "top2"]
+    # And with room for a third, it is still the most likely one that goes on.
+    got = [r["batter"] for r in bundle.build(rows, max_legs=3)]
+    assert got == ["top1", "top2", "best_priced"]
+    rows.append(_pick("likelier", None, -260, pitcher=5, model_p=0.718))
+    got = [r["batter"] for r in bundle.build(rows, max_legs=3)]
+    assert got[2] == "likelier", "price must not outrank probability"
 
 
-def test_a_leg_that_takes_more_than_it_gives_is_never_added():
-    """A 70% leg at -475 multiplies the payout by 1.24 and costs 30% of the
-    ticket. Padding the card with it would buy a plus sign by making the bet
-    worse, so a short card is the honest answer."""
+def test_a_dear_leg_no_longer_decides_anything():
+    """Price is out of selection entirely, so a -475 third leg is excluded by
+    the two-leg cap rather than by its price. The card stays short either way;
+    what changed is the reason."""
     rows = [
         _pick("top1", None, -300, pitcher=1, model_p=0.72),
         _pick("top2", None, -300, pitcher=2, model_p=0.71),

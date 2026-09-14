@@ -1,19 +1,22 @@
 """The day's bets, and a link that loads them into the slip.
 
-**What gets picked.** The two batters most likely to record a hit, taken off
-the top of the board by model probability, one per game — plus every other leg
-that pays for the risk it adds, with no cap. Not the best *screen qualifiers*:
-the filters are gone from selection, because measured over 129 days they were
-picking worse bets and paying more for them. See the ranking block in
-``batters.screen_for_date`` for the numbers.
+**What gets picked.** The batters most likely to record a hit, taken off the
+top of the board by model probability, one per game, capped at two. Not the
+best *screen qualifiers*: the filters are gone from selection, because measured
+over 129 days they were picking worse bets and paying more for them. See the
+ranking block in ``batters.screen_for_date`` for the numbers.
 
-**Price is shown, not obeyed — and that finally costs nothing.** Odds and EV
-ride along on every leg because they're worth knowing, but they don't decide
-the card; gating on EV handed selection to the market, and legs vanished when
-a line moved a few cents. The reason that used to hurt was that the old picks
-were genuinely badly priced: median leg -260, a 72% break-even against a 70.5%
-read. Betting the board instead moves the median leg to -185, so the card
-clears its own price without the price having to choose it.
+**Price is shown, not obeyed.** Odds and EV ride along on every leg because
+they're worth knowing, but they do not decide the card. That now holds for the
+whole card rather than just its first two legs: the tail used to be sorted by
+``model_p x decimal`` and admitted above a value bar, which made this a
+probability card for two legs and an EV card after that. On a parlay those are
+opposite objectives — value rewards a longer price, and a longer price is the
+book saying the leg is less likely to win. Two-leg cards swept 50% against a
+model that said 52%; three-leg cards swept 16.7% against a model that said 45%.
+
+**The objective is the sweep, not the leg.** The card is bet as one ticket, so
+what matters is the share of days every leg wins. See ``MAX_LEGS``.
 
 **One leg per game.** Two batters facing the same starter are one bet on that
 pitcher having a bad day, not two independent reads. A book prices them as a
@@ -50,23 +53,60 @@ BETSLIP_BASE = "https://account.sportsbook.fanduel.com/sportsbook/addToBetslip"
 
 MIN_LEGS: int = 2
 
-# No ceiling. Every pick that qualifies goes on the card, so a slate with five
-# good bets produces a five-leg card.
-#
-# This is a deliberate choice against the sweep numbers, and the trade should
-# be visible to whoever reads this next. Sweep rate — the share of days every
-# leg won, over 129 days — falls hard with each leg, because below the top two
-# the board is flat at about 70% and every addition multiplies by roughly that:
-#
-#     legs      1      2      3      4      5      6      7
-#     sweep   80.6%  58.9%  41.7%  29.9%  ~21%   ~15%   ~10%
-#
-# A five-leg card sweeps something like one day in five. That is the cost of
-# listing every qualifier, and it is the owner's call: the upside is that the
-# days it does land pay several times what a two-leg card pays.
-MAX_LEGS: Optional[int] = None
+MAX_LEGS: Optional[int] = 2
 
-# What "qualifies" means, and why it is not a probability bar.
+# Why a cap, and why two.
+#
+# Measured over the 36 days to 2026-09-14, on the question the card is for —
+# did the player get a hit:
+#
+#     shipped card, tail chosen on price     56.0%   (28/50)
+#     top two by model probability           65.0%   (39/60)
+#     two picked at RANDOM off the board     66.2%
+#     the screen as a whole                  67.1%   (163/243)
+#
+# Two things follow, and the second is the uncomfortable one.
+#
+# First, the old tail selection was costing about eleven points of hit rate.
+# Sorting the tail by `model_p x decimal` rewards a longer price, and a longer
+# price is the book saying the leg is less likely to win, so the card was
+# systematically reaching for the worse bets on the board. Removing that is
+# where the gain is.
+#
+# Second, model_p cannot rank its own picks. Over those 243 graded picks its
+# AUC is 0.507 and its correlation with actually getting a hit is -0.026 —
+# both indistinguishable from nothing. Picking the top two by probability
+# (65.0%) does not beat picking two at random off the same board (66.2%); a
+# random draw wins about two thirds of the time. The model is well calibrated
+# in the bulk (0.675-0.725 predicts 69-71% and delivers 67-71%) and badly
+# overconfident above it: 0.775-0.800 predicts 81.1% and delivers 56.2%.
+#
+# So selection is not where the remaining edge is. The screen is good at
+# finding ~67% bats and cannot tell which of them is the better one. Choose on
+# probability anyway — it is the objective, it is free, and it is not price —
+# but do not expect it to beat a coin toss over the same names, and treat any
+# future claim that a reordering helped with suspicion unless it clears that
+# random baseline.
+#
+# What IS left is leg count, because sweep multiplies flat ~67% legs:
+#
+#     legs        2       3       4
+#     predicted  45%     30%     20%
+#     backtest   51.9%   46.7%   36.7%
+#
+# Against the same days the shipped card swept 36.4%. Matched head to head on
+# the 21 days where both produced a card, top-2 swept 47.6% against 38.1%,
+# disagreeing on only eight days (5-3) — McNemar p = 0.36. The direction is
+# right and thirty days cannot prove the size of it.
+#
+# Raise this for longer, higher-paying, rarer cards. It is the one real knob.
+
+# NO LONGER USED BY DEFAULT. Kept because the reasoning is worth having, and
+# because `min_edge_pts` still offers a price floor on request. This constant
+# described how the card's tail was chosen before selection moved to pure
+# probability; see MAX_LEGS for what replaced it and why.
+#
+# What "qualifies" meant, and why it was not a probability bar.
 #
 # The obvious rule would be "model_p above some threshold", and it does not
 # work. The model cannot tell the top of the board apart — its top ten span
@@ -119,7 +159,7 @@ MIN_LEG_VALUE: float = 1.10
 # in the UI, so it is visible rather than silently padded.
 
 # Retained so callers that passed an explicit cap keep working; ``build``
-# treats it as a hard ceiling when given, and there is none by default.
+# treats it as a hard ceiling when given, defaulting to MAX_LEGS.
 DEFAULT_MAX_LEGS: Optional[int] = MAX_LEGS
 
 
@@ -227,13 +267,20 @@ def build(
     out = candidates[:floor]
     rest = candidates[floor:]
 
-    # Every remaining leg that pays for the risk it adds, best value first.
-    # Five qualifiers means a five-leg card; see MAX_LEGS for what that costs.
-    for r in sorted(rest, key=_value, reverse=True):
+    # Everything past the floor, most likely first — the same rule that chose
+    # the first two. `candidates` is already in probability order.
+    #
+    # This used to sort the tail by `_value` (model_p x decimal) and admit
+    # anything above MIN_LEG_VALUE, which made the card a probability card for
+    # two legs and an EV card after that. On a parlay those are opposite
+    # objectives: value rewards a longer price, and a longer price is the book
+    # saying the leg is less likely to win. It showed up exactly where you
+    # would expect — two-leg cards swept 50% against a model that said 52%,
+    # three-leg cards swept 16.7% against a model that said 45%.
+    #
+    # `min_edge_pts`, applied above, is still the way to ask for a price floor.
+    for r in rest:
         if not _room():
-            break
-        if _value(r) <= MIN_LEG_VALUE:
-            # Sorted by value, so nothing after this one qualifies either.
             break
         out.append(r)
     return out
