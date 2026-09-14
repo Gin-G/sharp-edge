@@ -1236,3 +1236,42 @@ async def test_build_board_executes_end_to_end(monkeypatch):
     payload = scr.as_payload(board)
     assert payload["usage_blend"]["rows"] == 1
     assert payload["matchup"]["rows"] == 1
+
+
+# ---------------------------------------------------------------------------
+# A pick is a prediction: nothing is recorded after its game starts
+# ---------------------------------------------------------------------------
+
+def test_a_started_game_is_not_recorded_as_a_pick():
+    """freeze_week upserts on every board fetch. A board still serving last
+    week's slate would otherwise keep writing picks for finished games — 25 of
+    week 1's 106 were written the morning after, and went 19-6, because they
+    were not predictions."""
+    past = "2026-09-13T17:03:00.000Z"
+    future = "2099-09-13T17:03:00.000Z"
+    assert nfl_tracking._has_kicked_off({"kickoff": past}) is True
+    assert nfl_tracking._has_kicked_off({"kickoff": future}) is False
+
+
+def test_a_missing_kickoff_is_not_treated_as_started():
+    """Withhold a row only on positive evidence its game began — a parse
+    failure must not silently stop the board recording anything at all."""
+    assert nfl_tracking._has_kicked_off({}) is False
+    assert nfl_tracking._has_kicked_off({"kickoff": None}) is False
+    assert nfl_tracking._has_kicked_off({"kickoff": "not a date"}) is False
+
+
+def test_a_naive_kickoff_is_read_as_utc():
+    """The board's kickoffs carry a Z; the DB round-trips some without one.
+    Comparing a naive datetime against an aware now() raises, which would
+    abort the whole freeze."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 9, 14, 0, 0, tzinfo=timezone.utc)
+    assert nfl_tracking._has_kicked_off({"kickoff": "2026-09-13T17:03:00"}, now) is True
+    assert nfl_tracking._has_kicked_off({"kickoff": "2026-09-15T17:03:00"}, now) is False
+
+
+def test_freeze_week_filters_started_games_before_writing():
+    import inspect
+    src = inspect.getsource(nfl_tracking.freeze_week)
+    assert "_has_kicked_off" in src, "picks must be filtered on kickoff"

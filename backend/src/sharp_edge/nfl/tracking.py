@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from . import card as card_mod
@@ -101,6 +101,33 @@ def _metrics(row: dict) -> str:
     return json.dumps({k: row.get(k) for k in keep if row.get(k) is not None})
 
 
+def _has_kicked_off(row: dict, now: Optional[datetime] = None) -> bool:
+    """Has this row's game already started?
+
+    A pick is a prediction, and a prediction made after kickoff is not one. The
+    board upserts on every fetch, so without this check a board still serving
+    last week's slate keeps writing picks for games that have finished — and
+    keeps revising the lines of picks already recorded, replacing the number
+    that was actually available with whatever the settled market returns.
+
+    Both happened in week 1: 25 picks were written the morning after the games,
+    and D.J. Moore's recorded line moved from 47.5 to an implausible 112.5.
+
+    Unparseable or missing kickoff returns False — a row is only withheld on
+    positive evidence that its game has started.
+    """
+    raw = row.get("kickoff")
+    if not raw:
+        return False
+    try:
+        when = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when <= (now or datetime.now(timezone.utc))
+
+
 def _pick_row(r: dict, season: int, week: int, source: str) -> dict:
     return {
         "season": season, "week": week,
@@ -137,14 +164,18 @@ async def freeze_week(payload: dict, source: str = "live") -> dict:
     db = _require_db()
     season, week = payload["season"], payload["week"]
 
-    picks = card_mod.suggestions(payload.get("props") or [])
+    # Only rows whose game is still ahead of us. Everything already under way
+    # is left exactly as it was recorded before kickoff — see _has_kicked_off.
+    picks = [r for r in card_mod.suggestions(payload.get("props") or [])
+             if not _has_kicked_off(r)]
     written = await db.upsert_nfl_picks(
         [_pick_row(r, season, week, source) for r in picks]
     )
 
     await _snapshot_board(payload)
 
-    the_card = card_mod.build(payload.get("props") or [])
+    the_card = [r for r in (card_mod.build(payload.get("props") or []) or [])
+                if not _has_kicked_off(r)]
     frozen = False
     if the_card:
         summary = card_mod.summarise(the_card)
