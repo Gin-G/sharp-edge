@@ -26,7 +26,11 @@ jobs:
 
       - name: Install backend deps
         run: |
-          pip install -r backend/requirements.txt pytest
+          # pytest-asyncio is not optional: the board's end-to-end smoke test is
+          # an async def, and without the plugin pytest reports it as a failure
+          # rather than skipping it. It is declared in pyproject's [dev] extra,
+          # which this install does not pull in.
+          pip install -r backend/requirements.txt pytest pytest-asyncio
           pip install --no-deps -e backend/
 
       - name: Run backend tests
