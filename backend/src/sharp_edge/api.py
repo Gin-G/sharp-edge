@@ -799,7 +799,8 @@ async def picks_track_record(
     tracking = _get_tracking()
     if screen not in tracking.SCREENS:
         raise HTTPException(400, f"screen must be one of {tracking.SCREENS}")
-    rows = await db.list_picks(screen=screen, since=since)
+    rows = await db.list_picks(screen=screen, since=since,
+                               include_metrics=include_metrics)
     return tracking.build_track_record(screen, rows,
                                        include_metrics=include_metrics)
 
