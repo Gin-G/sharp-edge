@@ -869,3 +869,51 @@ prop is that a *particular batter* gets pitched around on a *particular day*,
 which is a batter-and-situation effect, not a staff-level trait. Staff-level
 walk rates cannot see it. If the overconfident top end above model_p 0.72 is a
 walk effect, this is not the way to capture it.
+
+## Refitting with projected at-bats: no gain, because recent_ab already had it
+
+Lineup slot predicts the hit on its own (AUC 0.545 over 5,934 starter-games),
+and at-bats drive the outcome (AB=2 hits 36.1%, AB=4 68.9%), so the obvious
+move was to project at-bats from the assumed slot and refit `pricing._COEF`.
+
+**Setup.** 30,783 decided board rows over 129 days (2026-04-01 to 2026-08-09),
+split by date — first half fits, second half tests, as `calibrate_model.py`
+already does. `proj_ab` is built the way the board would have to build it: the
+slot assumed from the batter's **prior** starts, never the one he took that
+day. 1,856 boxscores were pulled to reconstruct the history; 99.5% of rows got
+a prior slot.
+
+**Result: nothing.**
+
+    feature set                       AUC     log-loss
+    shipped 4                       0.5756    0.66033
+    4 + proj_ab                     0.5769    0.65985
+    proj_ab REPLACING recent_ab     0.5754    0.66029
+    proj_ab alone                   0.5499    0.66558
+    recent_ab alone                 0.5441    0.66662
+
+AUC delta from adding it: **+0.0013, bootstrap 95% CI [-0.0027, +0.0052]**.
+Straddles zero.
+
+**Why, and it is the interesting part.** `proj_ab` and `recent_ab` correlate at
+**+0.410**. Both are measuring "this man is a regular who bats near the top",
+one through his lineup slot and one through how many at-bats he has taken
+lately. `proj_ab` is the better single feature — alone it beats `recent_ab`
+alone, 0.5499 to 0.5441 — but swapping one for the other is a wash and running
+both buys 0.0013. The comment on `recent_ab` in this script always said "a
+regular, not a bench bat; **also more PA today**"; that parenthetical turns out
+to be carrying most of the lineup signal already.
+
+**Not shipped.** A change with no measurable gain is not worth a new live data
+dependency: the board would have to pull and maintain boxscore lineup history
+before every card, which is a fetch that can fail or go stale on exactly the
+days it matters. `sharp_edge.lineup` and `calibrate_model.py --slots` are kept,
+because the slot numbers are worth having and the harness should exist for the
+next attempt.
+
+**What this does not settle.** The live overconfidence above model_p 0.72 —
+0.775-0.800 predicting 81.1% and delivering 56.2% — was measured on picks in
+Aug/Sept, and this backtest is April-August with only 29-68 held-out rows above
+0.72. It cannot confirm or rule out that projecting at-bats would fix the top
+end; there is simply not enough of a top end in this sample to look at. Testing
+that needs the live pick record to grow, not another backtest on this window.

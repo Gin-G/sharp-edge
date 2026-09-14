@@ -38,6 +38,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -70,6 +71,49 @@ FEATURES = [
 # of them is imputed.
 
 
+LINEUP_FEATURE = "proj_ab"
+
+
+def attach_lineup(d: pd.DataFrame, slots_path: Path) -> pd.DataFrame:
+    """Add ``proj_ab`` — expected at-bats from the slot the batter usually hits in.
+
+    The number has to be built the way the board would build it, or the fit is
+    a lie: the lineup is not published when the card is made, so the slot is
+    assumed from the batter's **prior** starts, never from the one he actually
+    took that day. Anything else leaks the outcome's own cause backwards.
+
+    Slots come from a dump of finished boxscores, ``{date: {player_id: slot}}``.
+    A batter with no prior start gets ``lineup.DEFAULT_SLOT`` rather than being
+    dropped, which is what the live path does for a call-up.
+    """
+    from sharp_edge import lineup as L
+
+    raw = json.loads(slots_path.read_text())
+    by_date = {k: {str(pid): int(v) for pid, v in day.items()}
+               for k, day in sorted(raw.items())}
+    dates = sorted(by_date)
+
+    # Walk forward once, keeping each batter's slot history as of each date.
+    history: dict[str, list[int]] = {}
+    as_of: dict[tuple[str, str], int] = {}
+    for dt_ in dates:
+        for pid, hist in history.items():
+            if hist:
+                as_of[(dt_, pid)] = L.expected_slot(hist)
+        for pid, slot in by_date[dt_].items():
+            history.setdefault(pid, []).append(slot)
+
+    key = list(zip(d["pick_date"].astype(str), d["batter_id"].astype(str)))
+    assumed = [as_of.get(k) for k in key]
+    d = d.copy()
+    d["assumed_slot"] = assumed
+    d[LINEUP_FEATURE] = [L.projected_ab(s) for s in assumed]
+    known = sum(1 for s in assumed if s is not None)
+    print(f"lineup: {known:,}/{len(d):,} rows have a prior slot "
+          f"({100*known/len(d):.1f}%); the rest use slot {L.DEFAULT_SLOT}")
+    return d
+
+
 def load(outdir: Path) -> pd.DataFrame:
     files = sorted(outdir.glob("board_*.parquet"))
     if not files:
@@ -80,15 +124,17 @@ def load(outdir: Path) -> pd.DataFrame:
     return d
 
 
-def design(d: pd.DataFrame, medians: dict | None = None) -> tuple[np.ndarray, dict]:
+def design(d: pd.DataFrame, medians: dict | None = None,
+           features: list[str] | None = None) -> tuple[np.ndarray, dict]:
     """Feature matrix with median imputation and an intercept.
 
     Medians come from the *training* half when one is supplied — imputing test
     rows with statistics computed over the test set is a quiet form of
     leakage.
     """
-    medians = medians or {c: float(d[c].median()) for c in FEATURES}
-    cols = [d[c].fillna(medians[c]).astype(float).values for c in FEATURES]
+    features = features or FEATURES
+    medians = medians or {c: float(d[c].median()) for c in features}
+    cols = [d[c].fillna(medians[c]).astype(float).values for c in features]
     X = np.column_stack([np.ones(len(d))] + cols)
     return X, medians
 
@@ -235,9 +281,15 @@ def main() -> None:
     ap.add_argument("--dir", type=Path, default=DEFAULT_DIR)
     ap.add_argument("--emit", action="store_true",
                     help="print coefficients ready to paste into pricing.py")
+    ap.add_argument("--slots", type=Path, default=None,
+                    help="boxscore slot dump; adds proj_ab as a feature")
     args = ap.parse_args()
 
     d = load(args.dir)
+    features = list(FEATURES)
+    if args.slots:
+        d = attach_lineup(d, args.slots)
+        features.append(LINEUP_FEATURE)
     dates = sorted(d["pick_date"].unique())
     cut = dates[len(dates) // 2]
     train, test = d[d["pick_date"] < cut], d[d["pick_date"] >= cut]
@@ -246,8 +298,8 @@ def main() -> None:
     print(f"base rate: {100*d['y'].mean():.1f}%")
     print(f"split by date at {cut}: {len(train):,} train / {len(test):,} test\n")
 
-    Xtr, med = design(train)
-    Xte, _ = design(test, med)
+    Xtr, med = design(train, features=features)
+    Xte, _ = design(test, med, features=features)
     ytr, yte = train["y"].values, test["y"].values
 
     beta = fit_logistic(Xtr, ytr)
@@ -263,7 +315,7 @@ def main() -> None:
         print(f"{name:<28}{auc(yte, p):>8.4f}{log_loss(yte, p):>11.5f}")
 
     print("\ncoefficients (log-odds per unit):")
-    for name, b in zip(["intercept"] + FEATURES, beta):
+    for name, b in zip(["intercept"] + features, beta):
         print(f"  {name:<14}{b:>+10.4f}")
 
     print("\ncalibration of the new model, held-out half:")
