@@ -330,41 +330,36 @@ def test_a_day_with_no_snapshot_at_all_still_fails(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# A split with no sample behind it is not a signal
+# The model must not extrapolate past its training range
 # ---------------------------------------------------------------------------
 
-def test_a_three_pa_split_does_not_price_a_batter_at_99_percent():
-    """The live board is the whole active roster, so it carries call-ups the
-    backtest cannot produce. Scott Bandura, no MLB record this season, was
-    priced at 99.1% on 2026-09-14 off a near-perfect three-PA split."""
-    thin = {"vs_hand_avg": 0.972, "vs_hand_pa": 3, "recent_ab": 5}
-    assert pricing.model_probability(thin) < 0.70
+def test_a_batter_is_never_priced_at_99_percent():
+    """vs_hand_avg tops out at .667 in 30,774 training rows and carries a +6.03
+    coefficient, so an unclipped .972 walks the logistic straight out of the
+    data — Scott Bandura was quoted at 99.2% on 2026-09-14."""
+    absurd = {"vs_hand_avg": 0.972, "vs_hand_pa": 3, "recent_ab": 5}
+    assert pricing.model_probability(absurd) < 0.90
 
 
-def test_a_real_sample_is_left_alone():
-    """The fix must not neutralise the model's strongest feature on the rows
-    that have earned it."""
-    real = {"vs_hand_avg": 0.368, "vs_hand_pa": 90, "recent_ab": 24}
-    blanked = {"vs_hand_avg": None, "vs_hand_pa": 90, "recent_ab": 24}
-    assert pricing.model_probability(real) > 0.70
-    assert pricing.model_probability(real) != pricing.model_probability(blanked)
+def test_a_hot_bat_on_few_plate_appearances_keeps_its_score():
+    """A limited sample does not make a hot bat less hot. Thin splits predict
+    at least as well as thick ones (20-40 PA: .350+ hits 84.8% against 41.9%
+    for sub-.250), so this must not be discounted for sample size."""
+    thin_hot = {"vs_hand_avg": 0.400, "vs_hand_pa": 30, "recent_ab": 12}
+    thick_hot = {"vs_hand_avg": 0.400, "vs_hand_pa": 900, "recent_ab": 12}
+    assert pricing.model_probability(thin_hot) > 0.75
+    assert pricing.model_probability(thin_hot) == pricing.model_probability(thick_hot)
 
 
-def test_the_boundary_is_inclusive():
-    at = {"vs_hand_avg": 0.500, "vs_hand_pa": pricing.MIN_VS_HAND_PA}
-    below = {"vs_hand_avg": 0.500, "vs_hand_pa": pricing.MIN_VS_HAND_PA - 1}
-    assert pricing.model_probability(at) > pricing.model_probability(below)
-
-
-def test_a_missing_pa_count_is_not_read_as_a_thin_split():
-    """Absent is not the same as small. Callers that do not carry vs_hand_pa
-    must keep scoring on the split they do have, or the strongest feature is
-    silently switched off everywhere."""
-    no_count = {"vs_hand_avg": 0.400}
-    assert pricing.model_probability(no_count) == pricing.model_probability(
-        {"vs_hand_avg": 0.400, "vs_hand_pa": 500})
-    assert pricing.model_probability({"vs_hand_avg": 0.400, "vs_hand_pa": "?"}) \
-        == pricing.model_probability(no_count)
+def test_the_cap_binds_only_above_the_training_range():
+    """.450 sits above the 99.9th percentile (.402), so ordinary rows are
+    untouched and only genuine extrapolation is held back."""
+    assert pricing.model_probability({"vs_hand_avg": 0.400}) == \
+        pricing.model_probability({"vs_hand_avg": 0.400})
+    assert pricing.model_probability({"vs_hand_avg": 0.500}) == \
+        pricing.model_probability({"vs_hand_avg": pricing.VS_HAND_AVG_CAP})
+    assert pricing.model_probability({"vs_hand_avg": 0.440}) < \
+        pricing.model_probability({"vs_hand_avg": pricing.VS_HAND_AVG_CAP})
 
 
 def test_the_input_record_is_not_mutated():

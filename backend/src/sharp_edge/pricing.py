@@ -135,7 +135,7 @@ def model_probability(rec) -> float:
         except (TypeError, ValueError):
             rec = {}
 
-    rec = _blank_thin_split(rec)
+    rec = _clip_features(rec)
 
     z = _COEF["intercept"]
     for f in _FEATURES:
@@ -151,54 +151,55 @@ def model_probability(rec) -> float:
     return _sigmoid(z)
 
 
-# A split needs a sample before it means anything. Below this many plate
-# appearances against the hand, vs_hand_avg is not a weak signal — it is no
-# signal, and the model already has a way to say so: impute the median, the
-# same as a missing feature.
+# The model must not extrapolate past the data it was fitted on.
 #
-# The live board is built from the whole active roster, so it carries players
-# the backtest structurally cannot produce. A September call-up who is 3-for-3
-# against right-handers reads as a .972 hitter, and vs_hand_avg carries a
-# coefficient of +6.03, so the model priced Scott Bandura at 99.1% to record a
-# hit on 2026-09-14 — a man with no MLB record this season. The recent_ab floor
-# kept him off the card, but the number was still published on the board.
+# vs_hand_avg is the batter's CAREER average against the hand, and it carries
+# the largest coefficient in the model at +6.03. In 30,774 training rows it
+# never exceeds .667, and only 5 rows clear .500 — the 99.9th percentile is
+# .402. So a value of .972 is not an extreme observation, it is a value the
+# fit has never seen, and the logistic happily extends a straight line into it:
+# on 2026-09-14 the board priced Scott Bandura, a call-up with no MLB record
+# this season, at 99.2% to record a hit off a near-perfect three-PA split.
 #
-# The threshold costs almost nothing where there IS a sample. Refit over 30,783
-# board rows, split by date:
+# Clipping the feature at .450 — above the 99.9th percentile, so it binds on 7
+# rows in the whole training set — costs nothing measurable and takes that
+# quote to 84.0%, which is inside the range batters actually achieve.
 #
 #     rule                          AUC      log-loss   rows hit
-#     shipped (use any sample)     0.5756     0.66033          0
-#     treat <10 PA as unknown      0.5748     0.66055         68
-#     treat <20 PA as unknown      0.5744     0.66068        156   <- here
-#     treat <30 PA as unknown      0.5718     0.66159        382
-#     treat <50 PA as unknown      0.5705     0.66198        691
+#     uncapped                     0.5756     0.66033          0
+#     clip at .450                 0.5756     0.66023          7
 #
-# Note what is NOT done here. Regressing vs_hand_avg toward the league mean by
-# sample size is the textbook move and it is worse at every strength tested —
-# AUC 0.5745 at K=25 down to 0.5656 at K=400 — because it compresses the 40-300
-# PA range where the split genuinely carries signal. The problem is only ever
-# the tail with no sample at all, so only the tail is touched.
-MIN_VS_HAND_PA: int = 20
+# What this deliberately does NOT do is discount a hot bat for having few plate
+# appearances behind it. That was tried first and it was wrong. A thin split
+# predicts as well as a thick one, and by this sample better:
+#
+#     vs_hand_pa    hot (>=.350)   cold (<.250)     gap
+#       0-20 PA        64.7%          41.7%       +23.0  (n=17, p=0.11)
+#      20-40 PA        84.8%          41.9%       +42.9  (p<0.001)
+#     40-100 PA        78.3%          49.5%       +28.8  (p=0.009)
+#       300+ PA        72.0%          55.3%       +16.7  (p=1.2e-21)
+#
+# Blanking splits under 20 PA cost 0.0012 AUC and would have cut a .400 bat in
+# 30 PA from 79.6% to 61.3%, throwing away a real signal to fix a scaling bug.
+# A limited sample does not make a hot bat less hot; it only means the model
+# should not be asked about a number it has never seen.
+VS_HAND_AVG_CAP: float = 0.450
 
 
-def _blank_thin_split(rec: dict) -> dict:
-    """Drop ``vs_hand_avg`` when too few plate appearances produced it.
+def _clip_features(rec: dict) -> dict:
+    """Hold features inside the range the model was fitted over.
 
-    Returns the record unchanged when the sample is adequate or unknown — an
-    absent ``vs_hand_pa`` is not evidence the split is thin, and blanking on it
-    would quietly neutralise the model's strongest feature across any caller
-    that does not carry the column.
+    Returns a copy when anything is clipped, so a caller's row is never
+    mutated by having been priced.
     """
-    pa = rec.get("vs_hand_pa")
-    if pa is None:
-        return rec
+    v = rec.get("vs_hand_avg")
     try:
-        pa = float(pa)
+        v = float(v) if v is not None else None
     except (TypeError, ValueError):
         return rec
-    if pa != pa or pa >= MIN_VS_HAND_PA:
+    if v is None or v != v or v <= VS_HAND_AVG_CAP:
         return rec
-    return {**rec, "vs_hand_avg": None}
+    return {**rec, "vs_hand_avg": VS_HAND_AVG_CAP}
 
 
 def devig_probability(american: int, overround: float = 1.0) -> float:
