@@ -327,3 +327,47 @@ def test_a_day_with_no_snapshot_at_all_still_fails(tmp_path, monkeypatch):
     code = _run_snapshot_main(tmp_path, monkeypatch, "2026-08-16",
                               prices={}, make_existing=False)
     assert code == 1
+
+
+# ---------------------------------------------------------------------------
+# A split with no sample behind it is not a signal
+# ---------------------------------------------------------------------------
+
+def test_a_three_pa_split_does_not_price_a_batter_at_99_percent():
+    """The live board is the whole active roster, so it carries call-ups the
+    backtest cannot produce. Scott Bandura, no MLB record this season, was
+    priced at 99.1% on 2026-09-14 off a near-perfect three-PA split."""
+    thin = {"vs_hand_avg": 0.972, "vs_hand_pa": 3, "recent_ab": 5}
+    assert pricing.model_probability(thin) < 0.70
+
+
+def test_a_real_sample_is_left_alone():
+    """The fix must not neutralise the model's strongest feature on the rows
+    that have earned it."""
+    real = {"vs_hand_avg": 0.368, "vs_hand_pa": 90, "recent_ab": 24}
+    blanked = {"vs_hand_avg": None, "vs_hand_pa": 90, "recent_ab": 24}
+    assert pricing.model_probability(real) > 0.70
+    assert pricing.model_probability(real) != pricing.model_probability(blanked)
+
+
+def test_the_boundary_is_inclusive():
+    at = {"vs_hand_avg": 0.500, "vs_hand_pa": pricing.MIN_VS_HAND_PA}
+    below = {"vs_hand_avg": 0.500, "vs_hand_pa": pricing.MIN_VS_HAND_PA - 1}
+    assert pricing.model_probability(at) > pricing.model_probability(below)
+
+
+def test_a_missing_pa_count_is_not_read_as_a_thin_split():
+    """Absent is not the same as small. Callers that do not carry vs_hand_pa
+    must keep scoring on the split they do have, or the strongest feature is
+    silently switched off everywhere."""
+    no_count = {"vs_hand_avg": 0.400}
+    assert pricing.model_probability(no_count) == pricing.model_probability(
+        {"vs_hand_avg": 0.400, "vs_hand_pa": 500})
+    assert pricing.model_probability({"vs_hand_avg": 0.400, "vs_hand_pa": "?"}) \
+        == pricing.model_probability(no_count)
+
+
+def test_the_input_record_is_not_mutated():
+    rec = {"vs_hand_avg": 0.972, "vs_hand_pa": 3}
+    pricing.model_probability(rec)
+    assert rec["vs_hand_avg"] == 0.972

@@ -135,6 +135,8 @@ def model_probability(rec) -> float:
         except (TypeError, ValueError):
             rec = {}
 
+    rec = _blank_thin_split(rec)
+
     z = _COEF["intercept"]
     for f in _FEATURES:
         v = rec.get(f)
@@ -147,6 +149,56 @@ def model_probability(rec) -> float:
         z += _COEF[f] * v
 
     return _sigmoid(z)
+
+
+# A split needs a sample before it means anything. Below this many plate
+# appearances against the hand, vs_hand_avg is not a weak signal — it is no
+# signal, and the model already has a way to say so: impute the median, the
+# same as a missing feature.
+#
+# The live board is built from the whole active roster, so it carries players
+# the backtest structurally cannot produce. A September call-up who is 3-for-3
+# against right-handers reads as a .972 hitter, and vs_hand_avg carries a
+# coefficient of +6.03, so the model priced Scott Bandura at 99.1% to record a
+# hit on 2026-09-14 — a man with no MLB record this season. The recent_ab floor
+# kept him off the card, but the number was still published on the board.
+#
+# The threshold costs almost nothing where there IS a sample. Refit over 30,783
+# board rows, split by date:
+#
+#     rule                          AUC      log-loss   rows hit
+#     shipped (use any sample)     0.5756     0.66033          0
+#     treat <10 PA as unknown      0.5748     0.66055         68
+#     treat <20 PA as unknown      0.5744     0.66068        156   <- here
+#     treat <30 PA as unknown      0.5718     0.66159        382
+#     treat <50 PA as unknown      0.5705     0.66198        691
+#
+# Note what is NOT done here. Regressing vs_hand_avg toward the league mean by
+# sample size is the textbook move and it is worse at every strength tested —
+# AUC 0.5745 at K=25 down to 0.5656 at K=400 — because it compresses the 40-300
+# PA range where the split genuinely carries signal. The problem is only ever
+# the tail with no sample at all, so only the tail is touched.
+MIN_VS_HAND_PA: int = 20
+
+
+def _blank_thin_split(rec: dict) -> dict:
+    """Drop ``vs_hand_avg`` when too few plate appearances produced it.
+
+    Returns the record unchanged when the sample is adequate or unknown — an
+    absent ``vs_hand_pa`` is not evidence the split is thin, and blanking on it
+    would quietly neutralise the model's strongest feature across any caller
+    that does not carry the column.
+    """
+    pa = rec.get("vs_hand_pa")
+    if pa is None:
+        return rec
+    try:
+        pa = float(pa)
+    except (TypeError, ValueError):
+        return rec
+    if pa != pa or pa >= MIN_VS_HAND_PA:
+        return rec
+    return {**rec, "vs_hand_avg": None}
 
 
 def devig_probability(american: int, overround: float = 1.0) -> float:
