@@ -105,3 +105,63 @@ DraftKings first, then line shopping across books.
 - [ ] Archive NFL closing lines the way data/odds/ does for MLB, so the shrink factors can be fit instead of guessed
 - [ ] Refit the passing-yards model — it runs 4-5pts overconfident and is off the card until it doesn't
 - [ ] Deduplicate bets across books so the same wager placed twice does not double-count P/L
+
+## The batter model is four features, and the missing one is at-bats
+
+`pricing._FEATURES` is `vs_hand_avg`, `recent_ab`, `p_l3_h9`, `p_l3_k9`. That is
+the whole model. `recent_ab` is the batter's at-bats over the prior week and is
+documented as a "does he play?" guard, not a projection of today. There is no
+lineup slot, no walk expectation, and no bullpen — every `p_*` feature
+describes the opposing **starter**.
+
+It shows: over 243 graded picks `model_p` has an **AUC of 0.507** and
+correlates **-0.026** with getting a hit. It cannot rank its own board. Picking
+the top two by probability (65.0%) does not beat two drawn at random off the
+same board (66.2%).
+
+What the model is missing is the variable that dominates the outcome. Measured
+over 1,674 starter-games across 12 slates (Sept 2026):
+
+**Official at-bats, not plate appearances, is the thing.** A hit prop needs a
+swing, and a walk burns a trip to the plate without giving one.
+
+    AB        1      2      3      4      5+
+    P(hit)  21.1%  36.1%  50.7%  68.9%  83.9%
+
+**Lineup slot sets the plate appearances.**
+
+    slot      1      2      3      4      5      6      7      8      9
+    PA      4.49   4.37   4.27   4.22   4.06   3.87   3.64   3.52   3.42
+    AB      4.07   3.77   3.77   3.75   3.66   3.44   3.25   3.16   3.06
+    P(hit)  72.6%  64.5%  62.9%  66.1%  55.9%  57.0%  57.0%  55.4%  54.3%
+
+Leadoff against ninth is +1.07 PA and **+18.3 points of hit probability**
+(72.6% vs 54.3%); slots 1-2 against 8-9 is 68.5% vs 54.8%, Fisher p = 1.6e-04.
+That single spread is larger than anything the current four features capture.
+
+**Walks are the second half, and they are predictable.** At equal plate
+appearances each walk costs about twelve points:
+
+    PA=4   0 walks 65.9% (3.95 AB) | 1 walk 53.4% (2.98 AB) | 2 walks 36.6% (1.98 AB)
+    PA=5   0 walks 82.6% (4.94 AB) | 1 walk 76.0% (3.95 AB) | 2 walks 54.1% (3.00 AB)
+
+Good hitters get pitched around, so the batters the model likes most are the
+ones most likely to lose at-bats to a walk — which is a mechanism for the
+overconfident top end, where 0.775-0.800 predicts 81.1% and delivers 56.2%.
+
+- [ ] **Project at-bats and feed it in.** `AB ≈ PA(lineup slot, team) − walks`,
+      where walks come from the batter's own BB% against the starter's and the
+      **bullpen's** walk rates. Starter BB/9 is already fetched alongside
+      `p_l3_h9`; bullpen rates are not fetched at all. A starter goes five or
+      six innings, so roughly a third of a batter's trips are against relievers
+      the model has never looked at.
+- [ ] **Get the lineup pre-game.** `_boxscore_summary` already parses
+      `battingOrder` (slot `X00`) but only from finished games, for settlement.
+      A `Scheduled` game's boxscore returns no batting order at all — checked
+      on 2026-09-14, ten games, zero slots — so the live path needs whatever
+      MLB posts a few hours out, with the prior-week modal slot as the fallback
+      when it is not up yet. Without a live lineup this feature cannot ship, so
+      this is the gating piece rather than the modelling.
+- [ ] Re-check the top end after the above. If the overconfidence above 0.72 is
+      the walk effect, projecting at-bats should flatten it — and that is the
+      test, not in-sample fit.
