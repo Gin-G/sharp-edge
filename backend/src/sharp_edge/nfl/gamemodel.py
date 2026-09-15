@@ -232,7 +232,12 @@ def _schedule(force: bool = False) -> list[dict]:
     keep = ["season", "week", "gameday", "home_team", "away_team",
             "home_score", "away_score", "spread_line", "total_line"]
     df = df[[c for c in keep if c in df.columns]]
-    rows = df.where(df.notna(), None).to_dict("records")
+    # astype(object) first, or this does nothing useful: `where` on a float
+    # column substitutes None back as NaN, so every unplayed game comes out
+    # with a score of NaN rather than None. `x is not None` then passes it
+    # through, and the first int() on it raises — which is exactly how
+    # /nfl/games/settle returned a 500 while the model itself looked healthy.
+    rows = df.astype(object).where(df.notna(), None).to_dict("records")
     _cache.update({"rows": rows, "fetched_at": now})
     return rows
 

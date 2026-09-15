@@ -104,3 +104,32 @@ def test_no_betting_signal_is_emitted():
     r = gm.build(_season(), [{"home_team": "AAA", "away_team": "ZZZ"}])[0]
     for banned in ("ev", "edge_pts", "signal", "side", "kelly", "bet"):
         assert banned not in r
+
+
+def test_unplayed_games_come_back_as_none_not_nan(monkeypatch):
+    """pandas `where(notna(), None)` on a float column substitutes NaN, not
+    None. `x is not None` then lets an unplayed game through, and the first
+    int() on its score raises — /nfl/games/settle returned a 500 that way
+    while the model itself looked fine, because its own week filter happened
+    to exclude the bad rows.
+    """
+    import pandas as pd
+
+    frame = pd.DataFrame([
+        {"game_type": "REG", "season": 2026, "week": 1, "gameday": "2026-09-13",
+         "home_team": "KC", "away_team": "DEN", "home_score": 27.0,
+         "away_score": 20.0, "spread_line": 3.0, "total_line": 44.0},
+        {"game_type": "REG", "season": 2026, "week": 2, "gameday": "2026-09-21",
+         "home_team": "BUF", "away_team": "NYJ", "home_score": None,
+         "away_score": None, "spread_line": 6.5, "total_line": 47.0},
+    ])
+    monkeypatch.setattr(pd, "read_csv", lambda *a, **k: frame)
+    gm._cache.update({"rows": [], "fetched_at": 0.0})
+
+    rows = gm._schedule(force=True)
+    unplayed = [r for r in rows if r["week"] == 2][0]
+    assert unplayed["home_score"] is None, "NaN would pass an `is not None` check"
+    played = [r for r in rows
+              if r["home_score"] is not None and r["away_score"] is not None]
+    assert len(played) == 1, "an unplayed game must not count as a result"
+    assert int(played[0]["home_score"]) == 27
