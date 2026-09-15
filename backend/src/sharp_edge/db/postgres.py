@@ -158,6 +158,28 @@ CREATE TABLE IF NOT EXISTS nfl_board_snapshots (
     prob_offset DOUBLE PRECISION,
     PRIMARY KEY (season, week, market)
 );
+CREATE TABLE IF NOT EXISTS nfl_game_predictions (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    home_team TEXT NOT NULL,
+    away_team TEXT NOT NULL,
+    event TEXT,
+    kickoff TEXT,
+    exp_home_points DOUBLE PRECISION,
+    exp_away_points DOUBLE PRECISION,
+    exp_total DOUBLE PRECISION,
+    exp_margin DOUBLE PRECISION,
+    home_win_p DOUBLE PRECISION,
+    market_spread DOUBLE PRECISION,
+    market_total DOUBLE PRECISION,
+    thin BOOLEAN,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    home_score INTEGER,
+    away_score INTEGER,
+    resolved_at TIMESTAMPTZ,
+    PRIMARY KEY (season, week, home_team, away_team)
+);
+
 CREATE TABLE IF NOT EXISTS nfl_cards (
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -524,6 +546,42 @@ class PostgresDatabase(BetDatabase):
             return int(str(tag).rsplit(" ", 1)[-1])
         except (TypeError, ValueError):
             return 0
+
+    async def upsert_nfl_game_predictions(self, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """INSERT INTO nfl_game_predictions (season,week,home_team,away_team,event,kickoff,exp_home_points,exp_away_points,exp_total,exp_margin,home_win_p,market_spread,market_total,thin)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                   ON CONFLICT (season, week, home_team, away_team) DO UPDATE SET
+                       event=EXCLUDED.event, kickoff=EXCLUDED.kickoff, exp_home_points=EXCLUDED.exp_home_points, exp_away_points=EXCLUDED.exp_away_points, exp_total=EXCLUDED.exp_total, exp_margin=EXCLUDED.exp_margin, home_win_p=EXCLUDED.home_win_p, market_spread=EXCLUDED.market_spread, market_total=EXCLUDED.market_total, thin=EXCLUDED.thin
+                   WHERE nfl_game_predictions.home_score IS NULL""",
+                [tuple(r.get(c) for c in ('season', 'week', 'home_team', 'away_team', 'event', 'kickoff', 'exp_home_points', 'exp_away_points', 'exp_total', 'exp_margin', 'home_win_p', 'market_spread', 'market_total', 'thin')) for r in rows],
+            )
+        return len(rows)
+
+    async def list_nfl_game_predictions(self, season=None, week=None) -> list[dict]:
+        sql = "SELECT * FROM nfl_game_predictions WHERE 1=1"
+        args: list = []
+        if season is not None:
+            args.append(season); sql += f" AND season = ${len(args)}"
+        if week is not None:
+            args.append(week); sql += f" AND week = ${len(args)}"
+        async with self._pool.acquire() as conn:
+            rs = await conn.fetch(sql + " ORDER BY season DESC, week DESC", *args)
+        return [dict(r) for r in rs]
+
+    async def settle_nfl_game(self, season, week, home_team, away_team,
+                              home_score, away_score) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE nfl_game_predictions
+                      SET home_score = $1, away_score = $2, resolved_at = NOW()
+                    WHERE season = $3 AND week = $4 AND home_team = $5
+                      AND away_team = $6""",
+                home_score, away_score, season, week, home_team, away_team,
+            )
 
     async def upsert_nfl_snapshot(self, row: dict) -> None:
         async with self._pool.acquire() as conn:

@@ -778,6 +778,30 @@ async def nfl_purge_late(season: Optional[int] = None, week: Optional[int] = Non
     return await nfl_tracking.purge_late_picks(season, week, apply=apply)
 
 
+@app.get("/nfl/games/record")
+async def nfl_game_record(season: Optional[int] = None):
+    """How the game model has done against results and against the market.
+
+    Predictions only — no side is taken on these, and none should be until the
+    live record says the model finds something the backtest did not.
+    """
+    try:
+        from .nfl import tracking as nfl_tracking
+    except ImportError as e:
+        raise HTTPException(500, f"NFL extras not installed: {e}")
+    return await nfl_tracking.game_model_record(season)
+
+
+@app.post("/nfl/games/settle")
+async def nfl_game_settle(season: Optional[int] = None, week: Optional[int] = None):
+    """Attach final scores to game predictions whose games have finished."""
+    try:
+        from .nfl import tracking as nfl_tracking
+    except ImportError as e:
+        raise HTTPException(500, f"NFL extras not installed: {e}")
+    return await nfl_tracking.settle_game_predictions(season, week)
+
+
 @app.get("/nfl/screen/status")
 async def nfl_screen_status():
     try:

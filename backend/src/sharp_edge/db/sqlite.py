@@ -129,6 +129,28 @@ CREATE TABLE IF NOT EXISTS nfl_board_snapshots (
     prob_offset REAL,
     PRIMARY KEY (season, week, market)
 );
+CREATE TABLE IF NOT EXISTS nfl_game_predictions (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    home_team TEXT NOT NULL,
+    away_team TEXT NOT NULL,
+    event TEXT,
+    kickoff TEXT,
+    exp_home_points REAL,
+    exp_away_points REAL,
+    exp_total REAL,
+    exp_margin REAL,
+    home_win_p REAL,
+    market_spread REAL,
+    market_total REAL,
+    thin INTEGER,
+    created_at TEXT DEFAULT (datetime('now')),
+    home_score INTEGER,
+    away_score INTEGER,
+    resolved_at TEXT,
+    PRIMARY KEY (season, week, home_team, away_team)
+);
+
 CREATE TABLE IF NOT EXISTS nfl_cards (
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -450,6 +472,41 @@ class SQLiteDatabase(BetDatabase):
         )
         await self._db.commit()
         return cur.rowcount or 0
+
+    async def upsert_nfl_game_predictions(self, rows: list[dict]) -> int:
+        n = 0
+        for r in rows:
+            await self._db.execute(
+                """INSERT INTO nfl_game_predictions (season,week,home_team,away_team,event,kickoff,exp_home_points,exp_away_points,exp_total,exp_margin,home_win_p,market_spread,market_total,thin)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(season, week, home_team, away_team) DO UPDATE SET
+                       event=excluded.event, kickoff=excluded.kickoff, exp_home_points=excluded.exp_home_points, exp_away_points=excluded.exp_away_points, exp_total=excluded.exp_total, exp_margin=excluded.exp_margin, home_win_p=excluded.home_win_p, market_spread=excluded.market_spread, market_total=excluded.market_total, thin=excluded.thin
+                   WHERE nfl_game_predictions.home_score IS NULL""",
+                tuple(r.get(c) for c in ('season', 'week', 'home_team', 'away_team', 'event', 'kickoff', 'exp_home_points', 'exp_away_points', 'exp_total', 'exp_margin', 'home_win_p', 'market_spread', 'market_total', 'thin')),
+            )
+            n += 1
+        await self._db.commit()
+        return n
+
+    async def list_nfl_game_predictions(self, season=None, week=None) -> list[dict]:
+        sql = "SELECT * FROM nfl_game_predictions WHERE 1=1"
+        args: list = []
+        if season is not None:
+            sql += " AND season = ?"; args.append(season)
+        if week is not None:
+            sql += " AND week = ?"; args.append(week)
+        cur = await self._db.execute(sql + " ORDER BY season DESC, week DESC", args)
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def settle_nfl_game(self, season, week, home_team, away_team,
+                              home_score, away_score) -> None:
+        await self._db.execute(
+            """UPDATE nfl_game_predictions
+                  SET home_score = ?, away_score = ?, resolved_at = datetime('now')
+                WHERE season = ? AND week = ? AND home_team = ? AND away_team = ?""",
+            (home_score, away_score, season, week, home_team, away_team),
+        )
+        await self._db.commit()
 
     async def upsert_nfl_snapshot(self, row: dict) -> None:
         await self._db.execute(

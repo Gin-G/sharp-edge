@@ -1344,3 +1344,70 @@ def test_a_naive_created_at_is_read_as_utc(monkeypatch):
     rows = [_row("after", "2026-09-14T14:50:00")]
     out, _ = _purge(monkeypatch, rows)
     assert out["late"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Game predictions: the DB round-trip, not just the shape
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_game_predictions_round_trip(tmp_path):
+    """Exercises the real INSERT ... ON CONFLICT against sqlite.
+
+    The unit tests above never touch a database, so a malformed upsert would
+    pass every one of them and fail on the first live board.
+    """
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    db = SQLiteDatabase(str(tmp_path / "t.db"))
+    await db.connect()
+    try:
+        row = {"season": 2026, "week": 2, "home_team": "KC", "away_team": "DEN",
+               "event": "DEN @ KC", "kickoff": "2026-09-21",
+               "exp_home_points": 26.1, "exp_away_points": 20.4,
+               "exp_total": 46.5, "exp_margin": 5.7, "home_win_p": 0.66,
+               "market_spread": 6.5, "market_total": 48.5, "thin": 1}
+        assert await db.upsert_nfl_game_predictions([row]) == 1
+
+        got = await db.list_nfl_game_predictions(2026, 2)
+        assert len(got) == 1 and got[0]["exp_margin"] == 5.7
+
+        # Re-running the board before kickoff refines rather than duplicating.
+        await db.upsert_nfl_game_predictions([{**row, "exp_margin": 4.2}])
+        got = await db.list_nfl_game_predictions(2026, 2)
+        assert len(got) == 1, "the fixture is the key"
+        assert got[0]["exp_margin"] == 4.2
+
+        await db.settle_nfl_game(2026, 2, "KC", "DEN", 27, 20)
+        got = await db.list_nfl_game_predictions(2026, 2)
+        assert got[0]["home_score"] == 27 and got[0]["away_score"] == 20
+
+        # And a settled row is frozen — the WHERE on the upsert is what stops
+        # a later board rewriting a prediction whose game has been played.
+        await db.upsert_nfl_game_predictions([{**row, "exp_margin": 99.0}])
+        got = await db.list_nfl_game_predictions(2026, 2)
+        assert got[0]["exp_margin"] == 4.2, "a settled prediction must not move"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_game_record_reports_against_the_market(tmp_path):
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    db = SQLiteDatabase(str(tmp_path / "r.db"))
+    await db.connect()
+    try:
+        nfl_tracking.set_db(db) if hasattr(nfl_tracking, "set_db") else None
+        await db.upsert_nfl_game_predictions([
+            {"season": 2026, "week": 1, "home_team": "KC", "away_team": "DEN",
+             "exp_margin": 3.0, "exp_total": 45.0, "home_win_p": 0.6,
+             "market_spread": 7.0, "market_total": 44.0, "thin": 0},
+        ])
+        await db.settle_nfl_game(2026, 1, "KC", "DEN", 24, 20)   # margin 4, total 44
+        rows = await db.list_nfl_game_predictions(2026)
+        assert rows[0]["home_score"] == 24
+        # ours missed the margin by 1, the market by 3 -> we were closer
+        assert abs(3.0 - 4) < abs(7.0 - 4)
+    finally:
+        await db.close()

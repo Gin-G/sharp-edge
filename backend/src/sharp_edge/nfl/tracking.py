@@ -174,6 +174,14 @@ async def freeze_week(payload: dict, source: str = "live") -> dict:
 
     await _snapshot_board(payload)
 
+    # The game model's view of the slate, recorded on the same terms as the
+    # props: written before kickoff, never revised after. Predictions only —
+    # no side is being taken on them.
+    try:
+        await record_game_predictions(season, week, payload.get("game_model") or [])
+    except Exception as exc:                 # must not cost the card its freeze
+        logger.warning("[nfl-track] game predictions not recorded: %s", exc)
+
     the_card = [r for r in (card_mod.build(payload.get("props") or []) or [])
                 if not _has_kicked_off(r)]
     frozen = False
@@ -310,6 +318,113 @@ def _result_for(pick: dict, row) -> tuple[Optional[str], Optional[float]]:
     over = actual > line
     won = over if pick["side"] == "OVER" else not over
     return ("WIN" if won else "LOSS"), actual
+
+
+async def record_game_predictions(season: int, week: int,
+                                  rows: list[dict]) -> int:
+    """Persist this week's game predictions, before their games start.
+
+    Same rule as the props: a fixture already under way is left alone, so the
+    number on record is the one that was in front of us beforehand.
+    """
+    db = _require_db()
+    fresh = [r for r in rows if not _has_kicked_off(r)]
+    if not fresh:
+        return 0
+    return await db.upsert_nfl_game_predictions(fresh)
+
+
+async def settle_game_predictions(season: Optional[int] = None,
+                                  week: Optional[int] = None) -> dict:
+    """Attach final scores to predictions whose games have finished."""
+    import asyncio
+
+    db = _require_db()
+    rows = [r for r in await db.list_nfl_game_predictions(season, week)
+            if r.get("home_score") is None]
+    if not rows:
+        return {"settled": 0, "message": "nothing pending"}
+
+    try:
+        from . import gamemodel
+        sched = await asyncio.to_thread(gamemodel._schedule, True)
+    except Exception as e:
+        return {"settled": 0, "error": str(e)}
+
+    final = {(g["season"], g["week"], g["home_team"], g["away_team"]): g
+             for g in sched
+             if g.get("home_score") is not None and g.get("away_score") is not None}
+    n = 0
+    for r in rows:
+        g = final.get((r["season"], r["week"], r["home_team"], r["away_team"]))
+        if g is None:
+            continue
+        await db.settle_nfl_game(r["season"], r["week"], r["home_team"],
+                                 r["away_team"], int(g["home_score"]),
+                                 int(g["away_score"]))
+        n += 1
+    return {"settled": n, "pending": len(rows) - n}
+
+
+async def game_model_record(season: Optional[int] = None) -> dict:
+    """How the game model is doing, against the result AND against the market.
+
+    Two comparisons, and the second is the one that matters. Beating a naive
+    baseline is easy; the market is the standard, and the backtest says we do
+    not meet it — margin MAE 10.98 against 9.73 over 2021-25. This exists to
+    find out whether that holds live, not to justify a bet.
+
+    No betting signal is derived from any of this. `beat_market` counts games
+    where our number landed closer, which is a measurement, not a record.
+    """
+    db = _require_db()
+    rows = [r for r in await db.list_nfl_game_predictions(season)
+            if r.get("home_score") is not None]
+    if not rows:
+        return {"games": 0, "message": "nothing settled yet"}
+
+    def acc(vals):
+        return round(sum(vals) / len(vals), 2) if vals else None
+
+    m_err, t_err, mk_m_err, mk_t_err = [], [], [], []
+    beat_m = beat_t = mk_games = 0
+    wins = correct = 0
+    for r in rows:
+        margin = r["home_score"] - r["away_score"]
+        total = r["home_score"] + r["away_score"]
+        if r.get("exp_margin") is not None:
+            m_err.append(abs(r["exp_margin"] - margin))
+            if r.get("home_win_p") is not None:
+                wins += 1
+                correct += int((r["home_win_p"] >= 0.5) == (margin > 0))
+        if r.get("exp_total") is not None:
+            t_err.append(abs(r["exp_total"] - total))
+        if r.get("market_spread") is not None and r.get("exp_margin") is not None:
+            mk_games += 1
+            mk_m_err.append(abs(r["market_spread"] - margin))
+            beat_m += int(abs(r["exp_margin"] - margin)
+                          < abs(r["market_spread"] - margin))
+        if r.get("market_total") is not None and r.get("exp_total") is not None:
+            mk_t_err.append(abs(r["market_total"] - total))
+            beat_t += int(abs(r["exp_total"] - total)
+                          < abs(r["market_total"] - total))
+    return {
+        "games": len(rows),
+        "margin_mae": acc(m_err),
+        "total_mae": acc(t_err),
+        "market_margin_mae": acc(mk_m_err),
+        "market_total_mae": acc(mk_t_err),
+        "beat_market_margin": beat_m,
+        "beat_market_total": beat_t,
+        "compared_with_market": mk_games,
+        "winner_called": f"{correct}/{wins}" if wins else None,
+        "backtest_reference": {
+            "margin_mae": 10.98, "market_margin_mae": 9.73,
+            "total_mae": 10.69, "market_total_mae": 10.32,
+            "note": ("2021-25, refit weekly. The model is expected to lose to "
+                     "the market; this records whether it does."),
+        },
+    }
 
 
 async def purge_late_picks(season: Optional[int] = None,

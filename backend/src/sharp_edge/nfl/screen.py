@@ -35,7 +35,7 @@ from typing import Optional
 import httpx
 
 from ..fanduel.odds import american_to_implied
-from . import (card as card_mod, matchup as nfl_matchup, model,
+from . import (card as card_mod, gamemodel, matchup as nfl_matchup, model,
                odds as nfl_odds, projections as nfl_proj, usage as nfl_usage)
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,9 @@ class NFLBoard:
     props: list[dict] = field(default_factory=list)
     tds: list[dict] = field(default_factory=list)
     games: list[dict] = field(default_factory=list)
+    #: Our own score/total/margin view of each game. Predictions only — no
+    #: price, no edge, no side, until the live record earns one.
+    game_model: list[dict] = field(default_factory=list)
     fits: dict = field(default_factory=dict)
     prob_fits: dict = field(default_factory=dict)
     preseason: bool = False
@@ -176,6 +179,28 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
 
     by_key = proj.by_key()
     board.games = fd.games
+
+    # Our own view of each game, fitted on results only so it can be compared
+    # with the line rather than derived from it. Attached to the market rows by
+    # team pair; a game we cannot rate keeps its prices and gets no prediction.
+    # There is deliberately no edge or side here — see nfl/gamemodel.py.
+    try:
+        preds = {(p["home_team"], p["away_team"]): p
+                 for p in gamemodel.for_week(season, week, force=force)}
+    except Exception as exc:                      # never cost the board its props
+        logger.warning("[nfl-screen] game model unavailable: %s", exc)
+        preds = {}
+    board.game_model = list(preds.values())
+    if preds:
+        by_event: dict = {}
+        for p in preds.values():
+            by_event[f"{p['away_team']} @ {p['home_team']}"] = p
+        for g in board.games:
+            hit = by_event.get(g.get("event"))
+            if hit:
+                g["model"] = {k: hit[k] for k in
+                              ("exp_home_points", "exp_away_points", "exp_total",
+                               "exp_margin", "home_win_p", "thin")}
 
     # How much of any disagreement with the market to keep. Set once for the
     # whole board: it is a statement about the projections, not about a market.
@@ -560,6 +585,7 @@ def as_payload(board: NFLBoard) -> dict:
         },
         "tds": board.tds,
         "games": board.games,
+        "game_model": board.game_model,
         "fits": board.fits,
         "prob_fits": board.prob_fits,
         "thresholds": THRESHOLDS,

@@ -223,6 +223,26 @@ class BetDatabase(ABC):
         """
 
     @abstractmethod
+    async def upsert_nfl_game_predictions(self, rows: list[dict]) -> int:
+        """Record this week's game predictions, revising while unresolved.
+
+        Keyed on the fixture, so re-running the board before kickoff refines
+        the number rather than stacking rows. A prediction that already has a
+        score attached is never rewritten.
+        """
+
+    @abstractmethod
+    async def list_nfl_game_predictions(
+        self, season: Optional[int] = None, week: Optional[int] = None,
+    ) -> list[dict]: ...
+
+    @abstractmethod
+    async def settle_nfl_game(
+        self, season: int, week: int, home_team: str, away_team: str,
+        home_score: int, away_score: int,
+    ) -> None: ...
+
+    @abstractmethod
     async def upsert_nfl_snapshot(self, row: dict) -> None:
         """One row per (season, week, market): the shape of the whole board.
 
