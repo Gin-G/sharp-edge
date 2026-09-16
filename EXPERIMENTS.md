@@ -917,3 +917,63 @@ Aug/Sept, and this backtest is April-August with only 29-68 held-out rows above
 0.72. It cannot confirm or rule out that projecting at-bats would fix the top
 end; there is simply not enough of a top end in this sample to look at. Testing
 that needs the live pick record to grow, not another backtest on this window.
+
+## Recent vs-hand splits: real signal, far too weak to act on (Sept 2026)
+
+The board picks the same names constantly — Bateman on 12 of 26 cards, Chandler
+Simpson on 65% of boards. The reason is structural rather than stale data: a
+variance decomposition of the shipped model puts **76% of the score on
+`vs_hand_avg`** and 87% on batter terms against 13% on the pitcher, and
+`vs_hand_avg` is a CAREER split that barely moves. Arraez's ran .329 to .332
+across fifteen days (sd 0.0009) on 3,044 career plate appearances. The data is
+fresh — PA counts climb daily — the model simply does not respond to the day.
+
+So: replace the career split with recent form against the same hand, on the
+theory that a career .300 hitter in a .100 week is not a good pick today.
+
+**Built** from the backtest boards themselves, which record batter, date,
+opposing hand, hits and PA — a near complete daily log (34,787 player-games,
+624 batters, 129 dates). Coverage is better than expected: 91% of rows have a
+7-day vs-hand sample (median 12 PA), 96% have 30-day (median 41 PA).
+
+**The signal is real and it is small.** Unlike the overall 7-day average, which
+is non-monotone and therefore noise, the hand-specific version orders correctly:
+
+    7d vs this hand    ice<.150  59.9% | cold 61.1% | ok 61.2% | warm 61.7% | hot>.400 62.7%
+    30d vs this hand   ice<.150  57.9% | cold 60.8% | ok 62.6% | warm 62.6% | hot>.400 60.2%
+    CAREER vs hand     .150-.225 53.0% |            ok 62.2% |            warm-.400 72.0%
+
+The career split spreads **19 points**; the 7-day split spreads **2.8**. Making
+it hand-specific was the right instinct — it fixed the monotonicity the generic
+hot-bat gate never had — and it is still roughly a seventh of the strength.
+
+**It adds nothing to the model.**
+
+    shipped 4                          AUC 0.5756   log-loss 0.66032
+    + 7d vs-hand (shrunk)              AUC 0.5746   log-loss 0.66047
+    + 30d vs-hand (shrunk)             AUC 0.5753   log-loss 0.66035
+    + both                             AUC 0.5746   log-loss 0.66046
+    recent splits INSTEAD of career    AUC 0.5476   log-loss 0.66599
+
+**And as a slump FILTER it actively hurts, monotonically with strictness.**
+Scoring the top two of each board across 129 days:
+
+    no filter (ships today)      201/258 = 77.9%
+    drop 7d vs-hand < .150       200/258 = 77.5%
+    drop 7d vs-hand < .200       199/258 = 77.1%
+    drop 7d vs-hand < .225       193/258 = 74.8%
+    drop 30d vs-hand < .200      196/258 = 76.0%
+    drop 30d vs-hand < .225      194/258 = 75.2%
+    drop 7d<.200 AND 30d<.225    190/258 = 73.6%
+
+p = 0.304, so no single filter is significantly worse — but there is no
+threshold that helps, and the damage rises with the bar. The mechanism is
+plain: excluding a good hitter for a cold fortnight does not promote a better
+bet, it promotes a worse hitter. The slump costs less than the replacement.
+
+**Not shipped.** Worth noting what this says about "hot batters against cold
+pitchers": the pitcher half is already only 13% of the score and its strongest
+term correlates +0.011 with a hit, and the batter half is better served by the
+career number than the recent one. The screen was built that way once and
+retired for measuring worse over 129 days; this is the third route back to it
+that the data has turned down.
