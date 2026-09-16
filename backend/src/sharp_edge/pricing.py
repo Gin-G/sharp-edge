@@ -49,11 +49,12 @@ BASE_RATE = 0.771
 # H/9 — which is the screen's whole original premise, and is close to how the
 # market itself weights them.
 _COEF = {
-    "intercept": -1.133761,
-    "vs_hand_avg": 6.028424,
-    "recent_ab": 0.011981,
-    "p_l3_h9": 0.004995,
-    "p_l3_k9": -0.019688,
+    "intercept": -1.087595,
+    "vs_hand_avg": 5.962546,
+    "recent_ab": 0.011948,
+    "p_season_baa": 0.115625,
+    "p_l3_k9": -0.018677,
+    "p_sharp": -0.079013,
 }
 
 # Training medians, for imputing a missing feature. Using live medians instead
@@ -61,8 +62,9 @@ _COEF = {
 _MEDIANS = {
     "vs_hand_avg": 0.2510,
     "recent_ab": 17.0000,
-    "p_l3_h9": 8.2000,
+    "p_season_baa": 0.2360,
     "p_l3_k9": 8.3100,
+    "p_sharp": 0.0000,
 }
 
 # The Platt correction is gone, and its removal is the point.
@@ -96,7 +98,24 @@ _MEDIANS = {
 # that pool's mean and drags the top-2 estimate *down* to 73.3% against a 76.7%
 # outcome. The uncorrected number is the better one.
 
-_FEATURES = ["vs_hand_avg", "recent_ab", "p_l3_h9", "p_l3_k9"]
+# The opposing starter is described by a SEASON rate, not a last-three-starts
+# one. p_l3_h9 was the screen's original signal and it is the same small-sample
+# trap the batter side has: p_season_baa correlates +0.0149 with a hit against
+# +0.0111, and buckets monotonically where the last-3 version does not.
+#
+# p_sharp is a boolean left over from the retired screen — a threshold on the
+# starter's recent form. It carries nothing the l3 stats do not, and it still
+# earns its place, because the model is linear and the effect is not: being
+# hard to hit matters more than being marginally harder to hit.
+#
+#     shipped before (l3_h9 + l3_k9)       AUC 0.5756
+#     now (season_baa + l3_k9 + p_sharp)   AUC 0.5767
+#     delta +0.0012, bootstrap 95% CI [+0.0003, +0.0020]
+#
+# Worth reading against the ceiling: batter terms alone score 0.5723, so the
+# entire opposing-pitcher contribution is +0.0044 and this recovers a quarter
+# of it. The pitcher side is small. It is now slightly less badly spent.
+_FEATURES = ["vs_hand_avg", "recent_ab", "p_season_baa", "p_l3_k9", "p_sharp"]
 
 # Minimum model-vs-market gap, in probability points, before a pick counts as
 # a bet.

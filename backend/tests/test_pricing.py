@@ -61,9 +61,27 @@ def test_batter_quality_outweighs_the_starter():
 
 
 def test_a_more_hittable_starter_still_helps_at_the_margin():
-    lo = pricing.model_probability(_row(p_l3_h9=6.0))
-    hi = pricing.model_probability(_row(p_l3_h9=16.0))
+    """Measured on the starter's SEASON average against, not his last three
+    starts. p_l3_h9 was dropped for the same reason a 7-day batter split was:
+    too small a sample to mean much (+0.0111 against +0.0149, and it buckets
+    non-monotonically)."""
+    lo = pricing.model_probability(_row(p_season_baa=0.200))
+    hi = pricing.model_probability(_row(p_season_baa=0.290))
     assert hi > lo
+
+
+def test_last_three_starts_no_longer_moves_the_number():
+    """Guards the swap. If p_l3_h9 quietly returns to _FEATURES this fails."""
+    assert pricing.model_probability(_row(p_l3_h9=6.0)) == \
+        pricing.model_probability(_row(p_l3_h9=16.0))
+
+
+def test_a_sharp_starter_suppresses_the_probability():
+    """p_sharp is a threshold on the starter's recent form, carrying nothing
+    the l3 stats do not — it earns its place as a nonlinearity, because being
+    hard to hit matters more than being marginally harder to hit."""
+    assert pricing.model_probability(_row(p_sharp=True)) < \
+        pricing.model_probability(_row(p_sharp=False))
 
 
 def test_strikeout_pitchers_suppress_the_probability():

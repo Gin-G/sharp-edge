@@ -57,11 +57,31 @@ DEFAULT_DIR = Path.home() / ".sharp-edge" / "backtest" / "batters"
 # points of split-half drift. Imputing a noisy feature for half the rows buys
 # nothing.
 FEATURES = [
-    "vs_hand_avg",   # r=+0.119 — batter quality, the dominant term
-    "recent_ab",     # r=+0.070 — a regular, not a bench bat; also more PA today
-    "p_l3_h9",       # r=+0.011 — the screen's original signal
-    "p_l3_k9",       # r=-0.028 — strikeouts suppress contact
+    "vs_hand_avg",    # r=+0.119 — batter quality, the dominant term
+    "recent_ab",      # r=+0.070 — a regular, not a bench bat; also more PA today
+    "p_season_baa",   # r=+0.015 — the starter over a real sample
+    "p_l3_k9",        # r=-0.028 — strikeouts suppress contact
+    "p_sharp",        # a threshold on l3 form; a nonlinearity, not new data
 ]
+
+# p_l3_h9 is gone, and the swap is the point. A last-3-starts rate is the same
+# small-sample trap the batter side has: p_season_baa correlates +0.0149 with a
+# hit against +0.0111 for p_l3_h9, and buckets monotonically (59.3 -> 62.1)
+# where the last-3 version does not (59.5, 59.1, 61.6, 61.1, 61.8).
+#
+# p_sharp is a boolean the retired screen left behind — "this starter has been
+# hard to hit lately", a threshold on p_l3_h9/p_l3_baa. It carries no
+# information the l3 stats do not, and it still helps, because the model is
+# linear and the effect is not: being sharp matters more than being slightly
+# sharper. Most of the gain below is this term.
+#
+#     shipped (l3_h9 + l3_k9)            AUC 0.5756
+#     season_baa + l3_k9 + p_sharp       AUC 0.5767
+#     delta +0.0012, bootstrap 95% CI [+0.0003, +0.0020]
+#
+# Read that against what the pitcher side is worth at all: batter terms alone
+# score 0.5723, so the whole opposing-pitcher contribution is +0.0044 and this
+# recovers about a quarter of it. Small, and real.
 
 # recent_avg is deliberately absent. Univariately it points the right way
 # (r=+0.015) but in the fit it takes a *negative* coefficient — it is collinear
@@ -352,12 +372,12 @@ def main() -> None:
               f"actual {100*yte[ms].mean():.1f}%)")
 
     if args.emit:
-        full_X, full_med = design(d)
+        full_X, full_med = design(d, features=features)
         full_beta = fit_logistic(full_X, d["y"].values)
         print("\n# --- paste into pricing.py, refit on the full history ---")
         print("_COEF = {")
         print(f'    "intercept": {full_beta[0]:.6f},')
-        for name, b in zip(FEATURES, full_beta[1:]):
+        for name, b in zip(features, full_beta[1:]):
             print(f'    "{name}": {b:.6f},')
         print("}")
         print("_MEDIANS = {")
