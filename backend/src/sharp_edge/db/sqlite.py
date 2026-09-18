@@ -329,8 +329,10 @@ class SQLiteDatabase(BetDatabase):
             conditions.append("time_placed >= ?")
             params.append(since)
         if until:
+            # Date-only means through the end of that day; a bare "YYYY-MM-DD"
+            # sorts before every timestamp on it and would drop the day.
             conditions.append("time_placed <= ?")
-            params.append(until)
+            params.append(f"{until}T23:59:59.999999" if len(until) == 10 else until)
         where = f"WHERE {' AND '.join(conditions)}"
         cursor = await self._db.execute(
             f"""SELECT date(time_placed) as day, COUNT(*) as total_bets,

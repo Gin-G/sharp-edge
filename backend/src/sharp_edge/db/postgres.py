@@ -21,6 +21,15 @@ def _to_dt(v):
     raise TypeError(f"unsupported timestamp type: {type(v).__name__}")
 
 
+def _until_dt(v):
+    """A date-only `until` means through the end of that day. Coercing it
+    straight to a datetime lands on 00:00 and drops the day entirely."""
+    dt = _to_dt(v)
+    if isinstance(v, str) and len(v) == 10:
+        dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return dt
+
+
 def _nfl_row(row) -> dict:
     """Normalise an nfl_picks / nfl_cards row for JSON.
 
@@ -387,7 +396,7 @@ class PostgresDatabase(BetDatabase):
             idx += 1
         if until:
             conditions.append(f"time_placed <= ${idx}")
-            params.append(_to_dt(until))
+            params.append(_until_dt(until))
             idx += 1
         where = f"WHERE {' AND '.join(conditions)}"
         async with self._pool.acquire() as conn:
