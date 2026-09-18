@@ -369,3 +369,44 @@ def test_a_card_with_no_edge_is_sized_at_zero():
 def test_an_empty_bundle_reports_no_stake():
     s = bundle.summarise([])
     assert s["kelly"] is None and s["kelly_quarter"] is None
+
+
+# --------------------------------------------------------------------------
+# A batter who was not in yesterday's lineup
+# --------------------------------------------------------------------------
+
+def test_a_recently_scratched_batter_is_dropped_before_ranking():
+    """A VOID says he did not bat. Over 44,017 board rows that batter VOIDs
+    again 44.1% of the time against 16.5%, and hits 57.4% against 62.7% when
+    he does play — so he is removed, not demoted."""
+    rows = [
+        _pick("scratched", None, -150, pitcher=1, model_p=0.90),
+        _pick("fit1", None, -150, pitcher=2, model_p=0.78),
+        _pick("fit2", None, -150, pitcher=3, model_p=0.77),
+    ]
+    rows[0]["batter_id"] = 111
+    got = [r["batter"] for r in bundle.build(rows, exclude_ids={111})]
+    assert "scratched" not in got, "the top name must not survive on probability"
+    assert got == ["fit1", "fit2"]
+
+
+def test_no_exclusions_changes_nothing():
+    rows = [_pick(f"p{i}", None, -150, pitcher=i, model_p=0.80 - i * 0.01)
+            for i in range(3)]
+    for r in rows:
+        r["batter_id"] = int(r["batter"][1:])
+    assert bundle.build(rows) == bundle.build(rows, exclude_ids=set())
+    assert bundle.build(rows, exclude_ids=None) == bundle.build(rows)
+
+
+def test_a_thin_split_is_not_excluded():
+    """The sample-size floor was tested alongside this and rejected: requiring
+    100+ PA against the hand took card hit rate from 80.3% to 75.4%. Only the
+    not-in-the-lineup signal is acted on."""
+    rows = [
+        _pick("thin", None, -150, pitcher=1, model_p=0.78),
+        _pick("deep", None, -150, pitcher=2, model_p=0.77),
+    ]
+    rows[0]["vs_hand_pa"] = 9
+    rows[1]["vs_hand_pa"] = 1900
+    assert [r["batter"] for r in bundle.build(rows)] == ["thin", "deep"]

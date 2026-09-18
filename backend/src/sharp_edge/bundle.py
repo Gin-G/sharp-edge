@@ -185,12 +185,39 @@ def betslip_url(selections: Iterable[dict]) -> Optional[str]:
     return f"{BETSLIP_BASE}?{'&'.join(parts)}"
 
 
+# Days back over which a VOID disqualifies a batter from the card.
+#
+# A VOID means he did not bat — scratched, benched, or platooned out. Measured
+# over 44,017 board rows, that is the strongest short-term signal on the board
+# and it says two separate things:
+#
+#     VOIDed in the last 3 days -> VOIDs again today   44.1%  (16.5% otherwise)
+#     ...and when he DOES play, he hits                57.4%  (62.7% otherwise)
+#
+# The second is the one worth having. p = 1.5e-20 over 30,783 graded rows: a
+# recently scratched batter is a worse bet even when he makes the lineup,
+# because whatever kept him out — a knock, a platoon, a manager's read — is
+# still true today and the model cannot see any of it.
+#
+# On the card it removes wasted slots at no cost to quality: hit rate 80.8%
+# against 80.3% (p=0.895, i.e. unchanged) while the VOID rate falls from 39.1%
+# to 17.1% (p=3e-08). Three days beats one (79.8%) and seven (78.3%).
+#
+# This is NOT a sample-size floor on vs_hand_pa. That was tested at the same
+# time and rejected: requiring 100+ plate appearances against the hand cut
+# VOIDs just as hard but took hit rate from 80.3% to 75.4%, because it promotes
+# a worse hitter for the crime of a thin split. A thin split predicts; a man
+# who was not in yesterday's lineup is a different problem.
+VOID_LOOKBACK_DAYS: int = 3
+
+
 def build(
     records: list[dict],
     max_legs: Optional[int] = DEFAULT_MAX_LEGS,
     min_edge_pts: float | None = None,
     cross_game: bool = True,
     min_model_p: float | None = None,
+    exclude_ids: set | None = None,
 ) -> list[dict]:
     """The day's bets: the picks most likely to record a hit, best first.
 
@@ -225,6 +252,11 @@ def build(
     does want a price floor. It just isn't the default any more.
     """
     min_model_p = MIN_MODEL_P if min_model_p is None else min_model_p
+    # Batters who did not bat in the last few days — see VOID_LOOKBACK_DAYS.
+    # Dropped before ranking so they cannot take a slot at all, rather than
+    # being demoted and still arriving on a thin slate.
+    if exclude_ids:
+        records = [r for r in records if r.get("batter_id") not in exclude_ids]
     priced = [
         r for r in records
         if r.get("fd_market_id") is not None

@@ -509,7 +509,16 @@ async def batter_screen():
     # everything past them is chosen on what it pays. No cap.
     from . import bundle as _bundle
 
-    legs = _bundle.build(picks)
+    # Batters who did not bat in the last few days. They VOID again 44% of the
+    # time and hit 5 points worse when they do play, so they are dropped before
+    # the card is ranked rather than after.
+    from . import tracking as _tr
+    try:
+        scratched = await _tr.recently_voided("batter", _bundle.VOID_LOOKBACK_DAYS)
+    except Exception as e:
+        logger.warning("recent-VOID filter unavailable: %s", e)
+        scratched = set()
+    legs = _bundle.build(picks, exclude_ids=scratched)
 
     # Freeze the day's card the first time it is built, then serve the frozen
     # one. Rebuilding live looks right and isn't: FanDuel pulls the market on
