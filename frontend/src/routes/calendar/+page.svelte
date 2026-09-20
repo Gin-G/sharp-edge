@@ -103,6 +103,10 @@
   );
 
   $: lastActive = allDays.length ? allDays[allDays.length - 1].day : null;
+  // Built in JS, not markup — Svelte trims the leading space inside an {#if}.
+  $: subtitle = lastActive
+    ? `Daily P/L heatmap · last settled ${lastActive}`
+    : 'Daily P/L heatmap';
 </script>
 
 <svelte:head><title>Calendar — Sharp Edge</title></svelte:head>
@@ -111,9 +115,7 @@
   <div class="flex flex-wrap items-start justify-between gap-3">
     <div>
       <h1 class="text-xl font-bold text-white">Calendar</h1>
-      <p class="text-sm text-slate-400 mt-0.5">
-        Daily P/L heatmap{#if lastActive} · last settled {lastActive}{/if}
-      </p>
+      <p class="text-sm text-slate-400 mt-0.5">{subtitle}</p>
     </div>
     <div class="flex flex-wrap items-center gap-2">
       {#each ranges as r}

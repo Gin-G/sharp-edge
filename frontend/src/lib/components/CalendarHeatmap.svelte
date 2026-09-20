@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { tick } from 'svelte';
   import type { CalendarDay } from '$lib/types';
 
   /** Inclusive ISO date bounds (YYYY-MM-DD). The grid pads out to whole
@@ -159,12 +158,13 @@
     return `${pretty}\n${wins}-${total_bets - wins} · ${money(wagered)} wagered · ${sign}${money(net_profit)}`;
   }
 
-  // Keep the most recent weeks in view when the grid overflows its card.
-  let scroller: HTMLDivElement | null = null;
-  $: if (scroller && cells.length && !loading) {
-    tick().then(() => {
-      if (scroller) scroller.scrollLeft = scroller.scrollWidth;
-    });
+  /** Keep the most recent weeks in view when the grid overflows its card.
+   *  An action rather than a reactive statement: calling tick() from inside
+   *  one re-enters the flush on every update and wedges the main thread. */
+  function pinRight(node: HTMLElement, _key: unknown) {
+    const scroll = () => { node.scrollLeft = node.scrollWidth; };
+    scroll();
+    return { update: scroll };
   }
 </script>
 
@@ -187,7 +187,7 @@
   {#if loading}
     <div class="h-[132px] bg-surface-800 rounded animate-pulse"></div>
   {:else}
-    <div class="overflow-x-auto -mx-1 px-1" bind:this={scroller}>
+    <div class="overflow-x-auto -mx-1 px-1" use:pinRight={start + end + cells.length}>
       <svg
         viewBox="0 0 {svgW} {svgH}"
         width={svgW}
