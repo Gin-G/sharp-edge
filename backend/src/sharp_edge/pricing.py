@@ -24,6 +24,8 @@ calibration is only valid for the population that produced it.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from typing import Optional
 
@@ -122,6 +124,27 @@ _MEDIANS = {
 # entire opposing-pitcher contribution is +0.0044 and this recovers a quarter
 # of it. The pitcher side is small. It is now slightly less badly spent.
 _FEATURES = ["vs_hand_avg", "recent_ab", "p_season_baa", "p_l3_k9", "p_sharp"]
+
+
+# Which model produced a number, stamped onto every pick as it is recorded.
+#
+# The track record has to say what was suggested on the day, under the model
+# in force on the day. Without a version on the row there is no way to tell a
+# pick made under one fit from a pick made under another, and the two write
+# paths that can touch a recorded day — the intra-day re-screen and a manual
+# backfill — would silently mix them.
+#
+# Derived from the coefficients and the regression constants rather than typed
+# by hand, so it cannot be forgotten: change any number the model depends on
+# and the version changes with it.
+def _model_version() -> str:
+    payload = json.dumps(
+        {"coef": _COEF, "medians": _MEDIANS, "features": _FEATURES,
+         "cap": VS_HAND_AVG_CAP, "k": VS_HAND_REGRESSION_PA,
+         "league": VS_HAND_LEAGUE_AVG},
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 # Minimum model-vs-market gap, in probability points, before a pick counts as
 # a bet.
@@ -251,6 +274,10 @@ VS_HAND_AVG_CAP: float = 0.450
 #     a .400 split on 800 PA shrinks to .351
 VS_HAND_REGRESSION_PA: float = 395.0
 VS_HAND_LEAGUE_AVG: float = 0.252
+
+# Defined here rather than beside _model_version because it hashes the two
+# constants above; anything that changes the model must land before this line.
+MODEL_VERSION: str = _model_version()
 
 
 def shrink_vs_hand(avg: float, pa: Optional[float]) -> float:

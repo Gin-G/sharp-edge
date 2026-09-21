@@ -1077,3 +1077,42 @@ matched price history to measure it rather than estimate it.
 Finally, hold the AUC 0.586 loosely. The coefficients are out of sample and
 the constant is unfitted, but the decision to regress at all was taken because
 of these 275 legs. A further month of graded live picks settles it.
+
+### The track record is frozen per model, not rewritten (Sept 2026)
+
+Recording the refit exposed a hole in the pick history that the refit itself
+would have walked straight into. What the table must answer is "what did we
+suggest that day", and that has exactly one answer per day: the model in
+force when the card was published.
+
+Three write paths could reach a recorded day, and two of them were unsafe
+once the model changed under them:
+
+  * `start_catchup` — safe. Plans only days with no `screen_runs` row, so a
+    restart re-runs nothing.
+  * the intra-day re-screen (`regenerate_today`, `replace=True`) — **unsafe**.
+    It clears the day's unresolved picks and writes the current board. On
+    2026-09-21 that was seven live picks made under the old model and a
+    pending card; the next refresh would have replaced them with what the new
+    model would have said, and the record would have claimed a suggestion that
+    was never made.
+  * a manual backfill over a past range — **unsafe, and worse**, because it
+    does not overwrite. `insert_picks` is `ON CONFLICT DO NOTHING`, so the new
+    model's *different* batters are added beside the old ones and the day
+    silently becomes a blend of two models with nothing to tell them apart.
+
+Settled rows were never at risk — `delete_picks` defaults to
+`unresolved_only=True` — so this only ever threatened today and any pending
+day, which is precisely the window where a suggestion still matters.
+
+Every pick now carries `metrics.model_version`, a hash of the coefficients,
+medians, feature list and regression constants, so it cannot be forgotten when
+a number changes. Any write to a (screen, date) already recorded under a
+different version is refused and logged, and `regenerate_today` reports
+`frozen` rather than a silent zero. Picks written before the stamp existed
+read as `legacy` and freeze too, which is right: they are exactly the rows
+whose model can no longer be identified.
+
+Changing the model therefore freezes every day that preceded it. That is the
+intended behaviour, not a limitation — the shadow screen and the live record
+are only worth anything if they say what was actually on the card that day.

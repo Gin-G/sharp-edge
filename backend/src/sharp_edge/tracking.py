@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 import pybaseball as pb
 
+from sharp_edge import pricing
 from sharp_edge._data import (
     DEAD_STATES_SUBSTRINGS,
     _HIT_EVENTS,
@@ -127,6 +128,16 @@ def persist_screen_result(
     produces a different pick set) instead of piling new rows on top of it.
     Settled outcomes are never touched, so this is only meaningful for today.
 
+    A day already recorded under a DIFFERENT model is frozen: neither replaced
+    nor added to. The track record answers "what did we suggest that day",
+    and that question has one answer per day — the model in force when the
+    card was published. Re-screening under a new fit would rewrite a
+    suggestion that was already made, and a backfill would be worse, since
+    ON CONFLICT DO NOTHING means a new model's different batters get *added*
+    alongside the old ones and the day silently becomes a blend of two.
+    Changing the model therefore freezes every day that preceded it, which is
+    the point.
+
     The run itself is always logged, even when the frame is empty: a day
     with no picks writes no rows, and without that marker a catch-up would
     treat it as never screened and redo it on every restart."""
@@ -134,6 +145,16 @@ def persist_screen_result(
         picks_df is None or picks_df.empty or "batter_id" not in picks_df.columns
     )
     rows = [] if empty else _pick_rows(screen, picks_df, pick_date, source)
+    prior = _recorded_model_versions(screen, pick_date)
+    foreign = prior - {pricing.MODEL_VERSION}
+    if foreign:
+        logger.info(
+            "[tracking] %s %s: frozen — recorded under model %s, running %s; "
+            "leaving the day as it was suggested",
+            screen, pick_date.isoformat(), ",".join(sorted(foreign)),
+            pricing.MODEL_VERSION,
+        )
+        return 0
     deleted = _run_db(_db.delete_picks(screen, pick_date.isoformat())) if replace else 0
     inserted = _run_db(_db.insert_picks(rows)) if rows else 0
     _run_db(_db.record_screen_run(screen, pick_date.isoformat(), len(rows)))
@@ -144,12 +165,44 @@ def persist_screen_result(
     return inserted
 
 
+def _recorded_model_versions(screen: str, pick_date: date) -> set[str]:
+    """Model versions already recorded against this (screen, date).
+
+    Empty for a day never screened. A pick written before the stamp existed
+    reports "legacy", which is a foreign version to anything running now and
+    so freezes that day too — correct, since those picks are exactly the ones
+    whose model can no longer be identified.
+    """
+    try:
+        rows = _run_db(_db.list_picks(
+            screen, since=pick_date.isoformat(), until=pick_date.isoformat(),
+            include_metrics=True,
+        ))
+    except Exception:
+        logger.exception("[tracking] could not read prior picks for %s %s",
+                         screen, pick_date)
+        raise
+    out = set()
+    for r in rows:
+        m = r.get("metrics")
+        if isinstance(m, str):
+            try:
+                m = json.loads(m)
+            except ValueError:
+                m = {}
+        out.add((m or {}).get("model_version") or "legacy")
+    return out
+
+
 def _pick_rows(
     screen: str, picks_df: pd.DataFrame, pick_date: date, source: str
 ) -> list[dict]:
     rows = []
     for rank, rec in enumerate(picks_df.to_dict(orient="records"), start=1):
         metrics = {k: _json_safe(v) for k, v in rec.items()}
+        # What was suggested on the day is only meaningful alongside which
+        # model suggested it; see pricing.MODEL_VERSION.
+        metrics["model_version"] = pricing.MODEL_VERSION
         score = rec.get("hr_score")
         pitcher_id = rec.get("pitcher_id")
         rows.append({
@@ -578,6 +631,13 @@ def regenerate_today() -> dict:
         cached = mod.get_cached()
         if cached is None:
             out[screen] = {"status": "no-cache"}
+            continue
+        frozen = _recorded_model_versions(screen, today) - {pricing.MODEL_VERSION}
+        if frozen:
+            # Not a failure, and not something to retry: the day was published
+            # under a different model and stays as it was suggested.
+            out[screen] = {"status": "frozen", "picks": 0,
+                           "recorded_under": sorted(frozen)}
             continue
         n = persist_screen_result(screen, cached.picks, today, replace=True)
         out[screen] = {"status": "ok", "picks": n}

@@ -216,6 +216,89 @@ def test_persist_replace_keeps_settled_picks(tracked_db):
     assert {r["batter_id"] for r in rows} == {111, 333}
 
 
+def test_a_day_recorded_under_another_model_is_frozen(tracked_db, monkeypatch):
+    """The track record answers "what did we suggest that day", and that has
+    one answer per day: the model in force when the card was published.
+    Re-screening after a refit must leave the day exactly as it was."""
+    from sharp_edge import pricing
+    db, loop = tracked_db
+    run = lambda c: asyncio.run_coroutine_threadsafe(c, loop).result(30)
+    morning = pd.DataFrame([
+        {"batter": "Realmuto", "batter_id": 501, "team": "PHI",
+         "opposing_pitcher": "Will Warren", "pitcher_id": 900,
+         "venue": "P", "hr_score": 20.0, "tags": "BvP"},
+    ])
+    assert tracking.persist_screen_result("hr", morning, YESTERDAY) == 1
+
+    # The model is refit; every later write path sees a different version.
+    monkeypatch.setattr(pricing, "MODEL_VERSION", "refit-abc123")
+    after = pd.DataFrame([
+        {"batter": "Harper", "batter_id": 502, "team": "PHI",
+         "opposing_pitcher": "Cam Schlittler", "pitcher_id": 901,
+         "venue": "P", "hr_score": 22.0, "tags": "BvP"},
+    ])
+    # Neither an intra-day replace nor a plain backfill may touch the day.
+    assert tracking.persist_screen_result("hr", after, YESTERDAY, replace=True) == 0
+    assert tracking.persist_screen_result("hr", after, YESTERDAY, "backfill") == 0
+
+    rows = run(db.list_picks("hr"))
+    assert [r["batter"] for r in rows] == ["Realmuto"], \
+        "the day must read as it was suggested, not as the new model would have"
+
+
+def test_a_backfill_never_blends_two_models_into_one_day(tracked_db, monkeypatch):
+    """The dangerous case is not overwriting but *adding*: insert_picks is
+    ON CONFLICT DO NOTHING, so a new model's different batters would land
+    beside the old ones and the day would silently become a mix."""
+    from sharp_edge import pricing
+    db, loop = tracked_db
+    run = lambda c: asyncio.run_coroutine_threadsafe(c, loop).result(30)
+    tracking.persist_screen_result("hr", _hr_picks(), TWO_DAYS_AGO, "backfill")
+    before = {r["batter_id"] for r in run(db.list_picks("hr"))}
+
+    monkeypatch.setattr(pricing, "MODEL_VERSION", "refit-abc123")
+    other = pd.DataFrame([
+        {"batter": "Someone Else", "batter_id": 777, "team": "X",
+         "opposing_pitcher": "Y", "pitcher_id": 998, "venue": "Z",
+         "hr_score": 30.0, "tags": ""},
+    ])
+    assert tracking.persist_screen_result("hr", other, TWO_DAYS_AGO, "backfill") == 0
+    assert {r["batter_id"] for r in run(db.list_picks("hr"))} == before
+
+
+def test_the_same_model_still_re_screens_normally(tracked_db):
+    """Freezing is about a model change, not about re-screening. Within one
+    model a swapped probable pitcher must still supersede the morning slate."""
+    db, loop = tracked_db
+    run = lambda c: asyncio.run_coroutine_threadsafe(c, loop).result(30)
+    morning = pd.DataFrame([
+        {"batter": "Realmuto", "batter_id": 501, "team": "PHI",
+         "opposing_pitcher": "Will Warren", "pitcher_id": 900,
+         "venue": "P", "hr_score": 20.0, "tags": "BvP"},
+    ])
+    tracking.persist_screen_result("hr", morning, YESTERDAY)
+    updated = pd.DataFrame([
+        {"batter": "Harper", "batter_id": 502, "team": "PHI",
+         "opposing_pitcher": "Cam Schlittler", "pitcher_id": 901,
+         "venue": "P", "hr_score": 22.0, "tags": "BvP"},
+    ])
+    assert tracking.persist_screen_result("hr", updated, YESTERDAY, replace=True) == 1
+    assert [r["batter"] for r in run(db.list_picks("hr"))] == ["Harper"]
+
+
+def test_every_recorded_pick_carries_the_model_that_made_it(tracked_db):
+    from sharp_edge import pricing
+    db, loop = tracked_db
+    run = lambda c: asyncio.run_coroutine_threadsafe(c, loop).result(30)
+    tracking.persist_screen_result("hr", _hr_picks(), TWO_DAYS_AGO, "backfill")
+    rows = run(db.list_picks("hr", include_metrics=True))
+    assert rows
+    for r in rows:
+        m = r["metrics"]
+        m = json.loads(m) if isinstance(m, str) else m
+        assert m["model_version"] == pricing.MODEL_VERSION
+
+
 def test_regenerate_today_replaces_from_live_cache(tracked_db, monkeypatch):
     """regenerate_today swaps today's recorded picks for the current warm board."""
     db, loop = tracked_db
