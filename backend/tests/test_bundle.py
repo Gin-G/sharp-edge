@@ -4,9 +4,16 @@ import pytest
 
 from sharp_edge import bundle
 
+# Fixtures say "a hair above the bar" / "clearly below it", never a literal
+# probability. The bar has moved once already — MIN_MODEL_P went 0.72 -> 0.68
+# when vs_hand_avg started being regressed by its sample size and the whole
+# scale compressed — and every test that hard-coded 0.72 broke without a
+# single one of them being about that number.
+BAR = bundle.MIN_MODEL_P
+
 
 def _pick(name, ev, odds, pitcher, market="708.1", selection="1",
-          model_p=0.70, implied=None, event="e1"):
+          model_p=BAR - 0.02, implied=None, event="e1"):
     """A priced pick, with implied/edge/EV derived from the odds.
 
     Deriving rather than passing them keeps fixtures self-consistent — an edge
@@ -97,37 +104,37 @@ def test_length_comes_from_the_bar_not_a_cap():
     """Every batter at or above MIN_MODEL_P goes on, so a strong board makes a
     long card and a thin one makes two."""
     assert bundle.MAX_LEGS is None
-    strong = [_pick(f"p{i}", None, -150, pitcher=i, model_p=0.80 - i * 0.001)
+    strong = [_pick(f"p{i}", None, -150, pitcher=i, model_p=BAR + 0.08 - i * 0.001)
               for i in range(5)]
     assert len(bundle.build(strong)) == 5
-    thin = [_pick(f"q{i}", None, -150, pitcher=i, model_p=0.70 - i * 0.001)
+    thin = [_pick(f"q{i}", None, -150, pitcher=i, model_p=BAR - 0.02 - i * 0.001)
             for i in range(5)]
     assert len(bundle.build(thin)) == bundle.MIN_LEGS
 
 
 def test_a_leg_below_the_bar_never_joins_a_card_that_already_has_two():
-    """0.72 is where the model stops being honest; below it the card just gets
-    longer without getting better, and sweep multiplies."""
+    """Below the bar the card just gets longer without getting better, and
+    sweep multiplies."""
     rows = [
-        _pick("a", None, -150, pitcher=1, model_p=0.78),
-        _pick("b", None, -150, pitcher=2, model_p=0.75),
-        _pick("c", None, -150, pitcher=3, model_p=0.7199),
+        _pick("a", None, -150, pitcher=1, model_p=BAR + 0.06),
+        _pick("b", None, -150, pitcher=2, model_p=BAR + 0.03),
+        _pick("c", None, -150, pitcher=3, model_p=BAR - 0.0001),
     ]
     assert [r["batter"] for r in bundle.build(rows)] == ["a", "b"]
-    rows[2]["model_p"] = 0.72          # exactly on the bar qualifies
+    rows[2]["model_p"] = BAR           # exactly on the bar qualifies
     assert len(bundle.build(rows)) == 3
 
 
 def test_the_bar_is_overridable():
-    rows = [_pick(f"p{i}", None, -150, pitcher=i, model_p=0.71 - i * 0.001)
+    rows = [_pick(f"p{i}", None, -150, pitcher=i, model_p=BAR - 0.01 - i * 0.001)
             for i in range(4)]
     assert len(bundle.build(rows)) == bundle.MIN_LEGS
-    assert len(bundle.build(rows, min_model_p=0.70)) == 4
+    assert len(bundle.build(rows, min_model_p=BAR - 0.02)) == 4
 
 
 def test_an_explicit_cap_is_still_honoured():
     """Nothing sets one now, but callers that pass a ceiling get it."""
-    rows = [_pick(f"p{i}", None, -150, pitcher=i, model_p=0.80 - i * 0.005)
+    rows = [_pick(f"p{i}", None, -150, pitcher=i, model_p=BAR + 0.08 - i * 0.005)
             for i in range(10)]
     assert len(bundle.build(rows, max_legs=3)) == 3
     # ...and a ceiling below the two-leg floor still binds
@@ -261,7 +268,7 @@ def test_the_first_two_legs_are_the_two_most_likely():
     """Ranks 1 and 2 are the only ones the model can actually separate — 78.9%
     and 75.8% over 129 days, against a flat ~70% below them — so they are
     taken on probability and taken first."""
-    rows = [_pick(f"p{i}", None, -200, pitcher=i, model_p=0.72 - i * 0.001)
+    rows = [_pick(f"p{i}", None, -200, pitcher=i, model_p=BAR - i * 0.001)
             for i in range(8)]
     got = bundle.build(rows)
     assert [r["batter"] for r in got][:2] == ["p0", "p1"]
@@ -271,9 +278,9 @@ def test_the_first_two_legs_are_the_two_most_likely():
 def test_the_floor_holds_when_nothing_else_qualifies():
     """A thin slate still produces a parlay, not a single."""
     rows = [
-        _pick("top1", None, -200, pitcher=1, model_p=0.72),
-        _pick("top2", None, -200, pitcher=2, model_p=0.71),
-        _pick("dear", None, -600, pitcher=3, model_p=0.70),
+        _pick("top1", None, -200, pitcher=1, model_p=BAR),
+        _pick("top2", None, -200, pitcher=2, model_p=BAR - 0.01),
+        _pick("dear", None, -600, pitcher=3, model_p=BAR - 0.02),
     ]
     got = bundle.build(rows)
     assert [r["batter"] for r in got] == ["top1", "top2"]
@@ -284,9 +291,9 @@ def test_a_short_minus_money_card_is_allowed():
     0.87. Padding the card with it would buy a plus sign by making the bet
     worse, so the card stays short and the price stays visible."""
     rows = [
-        _pick("top1", None, -300, pitcher=1, model_p=0.720),
-        _pick("top2", None, -300, pitcher=2, model_p=0.719),
-        _pick("dear", None, -475, pitcher=3, model_p=0.700),
+        _pick("top1", None, -300, pitcher=1, model_p=BAR),
+        _pick("top2", None, -300, pitcher=2, model_p=BAR - 0.001),
+        _pick("dear", None, -475, pitcher=3, model_p=BAR - 0.02),
     ]
     got = bundle.build(rows)
     assert [r["batter"] for r in got] == ["top1", "top2"]
@@ -303,18 +310,18 @@ def test_no_leg_is_ever_chosen_on_price():
     displace a more likely batter however cheap it is.
     """
     rows = [
-        _pick("top1", None, -300, pitcher=1, model_p=0.720),
-        _pick("top2", None, -300, pitcher=2, model_p=0.719),
-        _pick("best_priced", None, -110, pitcher=4, model_p=0.710),
+        _pick("top1", None, -300, pitcher=1, model_p=BAR),
+        _pick("top2", None, -300, pitcher=2, model_p=BAR - 0.001),
+        _pick("best_priced", None, -110, pitcher=4, model_p=BAR - 0.01),
     ]
     assert [r["batter"] for r in bundle.build(rows)] == ["top1", "top2"]
     # And where a third leg does qualify, it is the likelier one that goes on,
     # not the cheaper one.
     rows = [
-        _pick("top1", None, -300, pitcher=1, model_p=0.760),
-        _pick("top2", None, -300, pitcher=2, model_p=0.750),
-        _pick("best_priced", None, -110, pitcher=4, model_p=0.730),
-        _pick("likelier", None, -260, pitcher=5, model_p=0.740),
+        _pick("top1", None, -300, pitcher=1, model_p=BAR + 0.04),
+        _pick("top2", None, -300, pitcher=2, model_p=BAR + 0.03),
+        _pick("best_priced", None, -110, pitcher=4, model_p=BAR + 0.01),
+        _pick("likelier", None, -260, pitcher=5, model_p=BAR + 0.02),
     ]
     got = [r["batter"] for r in bundle.build(rows)]
     assert got[2] == "likelier", "price must not outrank probability"
@@ -325,9 +332,9 @@ def test_a_dear_leg_no_longer_decides_anything():
     the two-leg cap rather than by its price. The card stays short either way;
     what changed is the reason."""
     rows = [
-        _pick("top1", None, -300, pitcher=1, model_p=0.72),
-        _pick("top2", None, -300, pitcher=2, model_p=0.71),
-        _pick("dear", None, -475, pitcher=3, model_p=0.70),
+        _pick("top1", None, -300, pitcher=1, model_p=BAR),
+        _pick("top2", None, -300, pitcher=2, model_p=BAR - 0.01),
+        _pick("dear", None, -475, pitcher=3, model_p=BAR - 0.02),
     ]
     got = bundle.build(rows)
     assert [r["batter"] for r in got] == ["top1", "top2"]
@@ -335,10 +342,10 @@ def test_a_dear_leg_no_longer_decides_anything():
 
 
 def test_dear_legs_never_pad_the_card_however_many_there_are():
-    """A board of -900 favourites is a board with nothing worth adding: each
-    scores 0.70 * 1.11 = 0.78, so twelve of them add exactly nothing and the
-    card stays at the floor."""
-    rows = [_pick(f"p{i}", None, -900, pitcher=i, model_p=0.70)
+    """A board of -900 favourites below the bar is a board with nothing worth
+    adding: twelve of them add exactly nothing and the card stays at the
+    floor."""
+    rows = [_pick(f"p{i}", None, -900, pitcher=i, model_p=BAR - 0.02)
             for i in range(12)]
     assert len(bundle.build(rows)) == bundle.MIN_LEGS
 
@@ -347,9 +354,9 @@ def test_summarise_sizes_the_stake_at_quarter_kelly():
     """Full Kelly on these cards routinely computes above 30% of bankroll,
     which is not a stake. The quarter is returned already divided rather than
     left as a note nobody applies."""
-    legs = [_pick("a", None, -160, pitcher=1, model_p=0.72),
-            _pick("b", None, -115, pitcher=2, model_p=0.71),
-            _pick("c", None, -160, pitcher=3, model_p=0.70)]
+    legs = [_pick("a", None, -160, pitcher=1, model_p=BAR),
+            _pick("b", None, -115, pitcher=2, model_p=BAR - 0.01),
+            _pick("c", None, -160, pitcher=3, model_p=BAR - 0.02)]
     s = bundle.summarise(legs)
     assert s["kelly"] > 0
     assert s["kelly_quarter"] == pytest.approx(s["kelly"] / 4, abs=1e-4)

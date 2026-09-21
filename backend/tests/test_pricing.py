@@ -33,8 +33,8 @@ def test_american_decimal_roundtrip():
 # --------------------------------------------------------------------------
 
 def _row(**kw):
-    base = {"vs_hand_avg": 0.260, "recent_ab": 20, "recent_avg": 0.290,
-            "p_l3_h9": 9.0, "p_l3_k9": 8.0}
+    base = {"vs_hand_avg": 0.260, "vs_hand_pa": 900, "recent_ab": 20,
+            "recent_avg": 0.290, "p_l3_h9": 9.0, "p_l3_k9": 8.0}
     base.update(kw)
     return base
 
@@ -356,28 +356,59 @@ def test_a_batter_is_never_priced_at_99_percent():
     coefficient, so an unclipped .972 walks the logistic straight out of the
     data — Scott Bandura was quoted at 99.2% on 2026-09-14."""
     absurd = {"vs_hand_avg": 0.972, "vs_hand_pa": 3, "recent_ab": 5}
-    assert pricing.model_probability(absurd) < 0.90
+    # Three PA now regresses this to league average, so it is not merely held
+    # below 90% — it is not treated as a read at all.
+    assert pricing.model_probability(absurd) < 0.70
 
 
-def test_a_hot_bat_on_few_plate_appearances_keeps_its_score():
-    """A limited sample does not make a hot bat less hot. Thin splits predict
-    at least as well as thick ones (20-40 PA: .350+ hits 84.8% against 41.9%
-    for sub-.250), so this must not be discounted for sample size."""
+def test_a_hot_bat_on_few_plate_appearances_is_discounted_for_its_sample():
+    """The reverse of what this file used to assert, and the live board is why.
+
+    The backtest said thin splits predicted as well as thick ones, but it could
+    not have said otherwise: historical boards are built from box scores, so
+    they hold men who were in the lineup — median vs_hand_pa at the betting bar
+    is 837 against 81 on the live roster board. Over 275 graded live legs the
+    split under 400 PA claimed 73.6% and delivered 58.3% (z = -3.75) while the
+    thick half claimed 70.7% and delivered 71.9%."""
     thin_hot = {"vs_hand_avg": 0.400, "vs_hand_pa": 30, "recent_ab": 12}
     thick_hot = {"vs_hand_avg": 0.400, "vs_hand_pa": 900, "recent_ab": 12}
-    assert pricing.model_probability(thin_hot) > 0.75
-    assert pricing.model_probability(thin_hot) == pricing.model_probability(thick_hot)
+    assert pricing.model_probability(thin_hot) < pricing.model_probability(thick_hot)
+    # A thirty-PA split is nearly all sampling noise, so it lands near a
+    # league-average bat rather than near a .400 hitter.
+    league = {"vs_hand_avg": pricing.VS_HAND_LEAGUE_AVG,
+              "vs_hand_pa": 900, "recent_ab": 12}
+    assert abs(pricing.model_probability(thin_hot)
+               - pricing.model_probability(league)) < 0.02
 
 
-def test_the_cap_binds_only_above_the_training_range():
-    """.450 sits above the 99.9th percentile (.402), so ordinary rows are
-    untouched and only genuine extrapolation is held back."""
-    assert pricing.model_probability({"vs_hand_avg": 0.400}) == \
-        pricing.model_probability({"vs_hand_avg": 0.400})
-    assert pricing.model_probability({"vs_hand_avg": 0.500}) == \
-        pricing.model_probability({"vs_hand_avg": pricing.VS_HAND_AVG_CAP})
-    assert pricing.model_probability({"vs_hand_avg": 0.440}) < \
-        pricing.model_probability({"vs_hand_avg": pricing.VS_HAND_AVG_CAP})
+def test_a_split_with_nothing_behind_it_carries_no_information():
+    """vs_hand_pa of zero is a batter with no record against the hand, not a
+    batter who is league average — but league average is the honest read, and
+    it is what the fit was given for those rows."""
+    for avg in (0.100, 0.260, 0.900):
+        assert pricing.model_probability({"vs_hand_avg": avg, "vs_hand_pa": 0}) == \
+            pytest.approx(pricing.model_probability(
+                {"vs_hand_avg": pricing.VS_HAND_LEAGUE_AVG, "vs_hand_pa": 0}))
+
+
+def test_regression_is_monotone_in_the_sample_behind_it():
+    """More evidence for the same average means more of it survives."""
+    probs = [pricing.model_probability({"vs_hand_avg": 0.400, "vs_hand_pa": pa})
+             for pa in (0, 30, 100, 400, 900, 3000)]
+    assert probs == sorted(probs)
+    assert probs[-1] > probs[0]
+
+
+def test_the_cap_still_catches_a_genuine_outlier():
+    """Regression handles the small-sample case, so the cap is left guarding
+    only what it was written for: a real, long-sampled extreme. A .667 career
+    split on 1,500 PA still regresses to .583, which is outside the range the
+    fit ever saw."""
+    assert pricing.shrink_vs_hand(0.667, 1500) > pricing.VS_HAND_AVG_CAP
+    outlier = pricing.model_probability({"vs_hand_avg": 0.667, "vs_hand_pa": 1500})
+    at_cap = pricing.model_probability({"vs_hand_avg": pricing.VS_HAND_AVG_CAP,
+                                        "vs_hand_pa": 10 ** 9})
+    assert outlier == pytest.approx(at_cap, abs=1e-6)
 
 
 def test_the_input_record_is_not_mutated():

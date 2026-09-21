@@ -58,44 +58,74 @@ MIN_LEGS: int = 2
 
 MAX_LEGS: Optional[int] = None
 
-# The bar a leg has to clear, and why it is 0.72 and not higher.
+# The bar a leg has to clear, and why it moved to 0.70.
 #
 # The card is every batter the model puts at or above MIN_MODEL_P to record a
 # hit, one per game, with the two-leg floor below it. Length is an output of
 # the bar rather than a cap: a day with five good bats produces a five-leg
 # card and a thin one produces two.
 #
-# Raising the bar past 0.72 does NOT buy better picks. It buys worse ones.
-# Replayed over the 36 days to 2026-09-14:
+# 0.70 is 0.72 transposed onto a new scale, not a loosening. vs_hand_avg is
+# now regressed toward league mean by its own sample size before it reaches
+# the model (pricing.VS_HAND_REGRESSION_PA), which compresses the top of the
+# board — the same batter who read 0.75 reads about 0.70 — and the model was
+# refit on the regressed feature. A bar left at 0.72 would admit 0.65 legs a
+# day and the two-leg floor would carry almost every card.
 #
-#     bar    days   median legs   leg hit rate   sweep
-#     0.68    35        10           67.8%       17.6%
-#     0.70    34         7           67.6%       25.8%
-#     0.72    33         3           66.7%       44.8%   <- here
-#     0.74    27         2           48.7%       33.3%
-#     0.76    22         1           54.5%       38.5%
+# What the move bought, over the 275 graded live legs that exposed the old
+# model's overconfidence:
 #
-# Leg quality is flat at about 67% all the way up to 0.72 and then falls off a
-# cliff. That is not noise in the tail, it is the model's calibration: it is
-# honest in the bulk (0.675-0.725 predicts 69-71% and delivers 67-71%) and
-# overconfident above it — 0.775-0.800 predicts 81.1% and delivers 56.2%. The
-# names it is surest about are the ones it is worst about.
+#     bar (scale)    over the bar/day   model says   actual
+#     0.72 (old)            2.68            75.2%      64.6%
+#     0.70 (new)            2.11            71.5%      73.1%
 #
-# Below 0.72 the bar stops binding: the card runs to seven and ten legs, leg
-# quality is unchanged, and sweep collapses because sweep multiplies. So 0.72
-# is where the card is as long as it can be without either admitting legs that
-# are no better or reaching into the range where the model breaks down.
+# Honest where the old bar was six points light, and calibrated either side —
+# 0.66, 0.68, 0.70 all read within about a point of actual, so the level is
+# not what picks between them.
 #
-# The deeper caveat, which this bar does not fix and should not be read as
-# fixing: over 243 graded picks model_p has an AUC of 0.507 and correlates
-# -0.026 with getting a hit. It cannot rank the board. Picking the top two by
-# probability (65.0%) does not beat two drawn at random off the same board
-# (66.2%). The bar works as a LENGTH control and as a guard against the
-# overconfident tail, not because 0.73 is a better bet than 0.71 — it isn't.
-# Making it a better bet means giving the model something it does not have;
-# see IDEA.md for the two features most likely to do that.
-
-MIN_MODEL_P: float = 0.72
+# What picks between them is the card, scored over 35 live days at archived
+# prices, and it is the one place a longer card was allowed to argue for
+# itself:
+#
+#     bar    legs on the card   leg hit   sweep   median price   ROI
+#     0.66         4.5            69.8%     14%       4.70x      -37%
+#     0.68         3.8            71.2%     23%       3.52x      -18%
+#     0.70         2.6            71.1%     43%       2.15x       +3%
+#     0.72         2.0            68.6%     46%       1.94x      -10%
+#
+# (The two counts differ because the card's two-leg floor puts legs on it that
+# the bar did not admit — at 0.72 the floor supplies both of them.)
+#
+# Leg quality is flat from 0.66 to 0.70 and the sweep is doing all the work,
+# which is the arithmetic rather than a finding: sweep multiplies, so a fourth
+# leg at 71% costs 29% of the ticket and has to be priced better than 71% to
+# be worth adding. Below 0.70 they are not.
+#
+# 0.70 is also the last bar that does anything at all. At 0.72 and above the
+# two-leg floor carries every card — the rows are identical — so the choice is
+# really between "a bar that can admit a third leg on a good day" and "always
+# take the top two". That is a structural reason to stop here rather than a
+# fitted one, which matters because the ROI column above is 35 days with
+# roughly 60% price coverage and cannot carry much weight on its own. Treat
+# 0.70 as provisional and let it prove itself forward.
+#
+# The overconfident tail this bar used to guard against is gone, because the
+# regression removed its cause rather than fencing it off. Live, above the old
+# 0.75 the model claimed 79.0% and delivered 55.6%; the failure was entirely
+# thin career splits, which the regression now prices honestly instead of
+# excluding. So the bar's remaining job is length alone, which is why it is
+# free to sit lower than the number it replaced.
+#
+# What changed about the deeper caveat. The old model could not rank the live
+# board at all — AUC 0.490 over these same legs, correlating -0.049 with
+# getting a hit, so the top two were no better than two drawn at random. The
+# refit reads 0.586 and +0.146 on the same rows. That is real ranking power
+# where there was none, but hold it loosely: the coefficients are out of
+# sample and the regression constant is derived from talent spread rather than
+# fitted to any outcome, yet the decision to regress at all was taken because
+# of these legs. Treat 0.586 as encouraging, not as established, until a
+# further month of live picks has graded.
+MIN_MODEL_P: float = 0.70
 
 # NO LONGER USED BY DEFAULT. Kept because the reasoning is worth having, and
 # because `min_edge_pts` still offers a price floor on request. This constant

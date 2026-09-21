@@ -977,3 +977,103 @@ term correlates +0.011 with a hit, and the batter half is better served by the
 career number than the recent one. The screen was built that way once and
 retired for measuring worse over 129 days; this is the third route back to it
 that the data has turned down.
+
+## The live board broke the model, and the backtest could not have said so (Sept 2026)
+
+Prompted by a flat refusal to keep betting the card: 9-19 over 28 settled
+parlays, and the suspicion that the screen had been better before prices and
+EV arrived. The screen had not. Something else had.
+
+### The card record, first, because it is smaller than it looks
+
+28 settled cards, flat 1u: **-1.44u, -5.1% ROI**. Winners averaged +82 and
+losers +285. Against the model's own forecast (12.67 expected sweeps) the
+9 actual sits at P(<=9) = 0.11 — the bottom edge of the 80% band, not outside
+it. Most of what makes 9-19 *feel* catastrophic is that a 2.43-leg parlay at
+the screen's unchanged 66.5% leg rate sweeps 0.665^2.43 ~ 39%, or 11.0 of 28.
+The bet got structurally harder; the picks did not get worse.
+
+They demonstrably did not get worse. The rules swapped on 2026-08-18; live
+picks either side hit 65.6% (24 days, old rules) and 66.8% (32 days, new),
+Fisher p = 0.90. The `batter_simple` shadow's top-2 swept 65.4% against the
+board's 50.0%, which reads badly until it is paired: 6 discordant days to 2,
+McNemar p = 0.29.
+
+### What was actually wrong
+
+`model_p` was overconfident live and had no ranking power at all — **AUC 0.490
+over 275 graded legs, correlating -0.049 with getting a hit**. Claimed 71.9%,
+delivered 66.2% (z = -2.12), and worse the higher it went: above 0.75 it
+claimed 79.0% and delivered 55.6%.
+
+The entire error sits on one population.
+
+| `vs_hand_pa` | n | model says | actual | gap | z |
+|---|---|---|---|---|---|
+| under 400 | 115 | 73.6% | 58.3% | **-15.3** | -3.75 |
+| 400+ | 160 | 70.7% | 71.9% | +1.2 | +0.33 |
+
+On a thick split the model was already honest. Holds in both date halves
+(-19.9 / -12.3 thin, +4.8 / -2.1 thick), and it is a plateau rather than an
+edge — gaps of -0.4, -0.3, +1.2, -0.2, +0.2 for gates of 200 through 600 PA.
+
+### Why 129 days of backtest could not see it
+
+Median `vs_hand_pa` at the betting bar: **backtest 837, live 81.** Historical
+boards are built from box scores, so every row is a man who was in the lineup;
+the live board is the active roster, call-ups included. 57% of live bet rows
+have under 100 PA behind their career split against 25% in the backtest.
+
+This is the same observation that `33ab4cd` wrote down — *"the population that
+produces this cannot appear in the sample the model was fitted and checked
+on"* — and then `418309a` reverted `MIN_VS_HAND_PA` because it cost 0.0012 AUC
+**on the backtest**. The instinct was right and the test set could not answer
+it. 20 PA was also far too low a threshold: the damage runs out to ~400.
+
+### The fix: regression, not a gate
+
+`vs_hand_avg` is now regressed toward league mean by its own sample size,
+k = 395 PA, derived from the spread of talent among the 293 batters with 800+
+PA against a hand (observed sd .0245, sampling sd .0110, true-talent sd .0218;
+k = p(1-p)/sd_true^2). **No outcome is used to fit it.** That it lands inside
+the 200-400 plateau the live results show is a check on the constant, not its
+source. The model was refit on the regressed column — the coefficient rises
+5.96 -> 7.07, answering the lost spread — and `MIN_MODEL_P` moved 0.72 -> 0.70
+onto the compressed scale.
+
+Live, on 275 legs the refit never saw:
+
+| | all legs | thin (<400 PA) | thick (400+) |
+|---|---|---|---|
+| before | -5.7 (z -2.12) | -15.3 | +1.2 |
+| after | **-1.6** (z -0.56) | -6.4 | +1.9 |
+
+and ranking power goes from **AUC 0.490 to 0.586**, correlation -0.049 to
++0.146. On 2026-09-18 the old top two were Spencer Jones (51 PA, quoted 84.3%)
+and Brett Bateman (100 PA, 76.7%); both lost. The new top two are Keaschall
+(535 PA) and Chourio (482 PA); both won.
+
+### What it cost, and what is not yet known
+
+Held-out backtest AUC falls 0.5767 -> 0.5668. That is the trade being made
+deliberately: the loss is measured on a population that structurally excludes
+the failure, the gain on the population that gets bet.
+
+The bar at 0.70 is **provisional**. Scored over 35 live days at archived
+prices the card reads 4.5 legs/-37% at 0.66, 3.8/-18% at 0.68, 2.6/+3% at
+0.70, 2.0/-10% at 0.72 — but that is 35 days at ~60% price coverage and
+nothing should be built on it. The structural half of the argument is better:
+at 0.72 and above the two-leg floor carries every card, so 0.70 is simply the
+last bar that can admit a third leg.
+
+Leg count was deliberately **not** capped. Sweep multiplies, so a leg at 71%
+costs 29% of the ticket and has to be priced better than 71% to earn its
+place; that is a price test, not a confidence test, and `model_p * decimal > 1`
+is the exact form of it. It was removed as a selection rule for good reason
+when the probability feeding it was 15 points wrong on 42% of admitted legs.
+With an honest probability it is worth revisiting — once there is enough
+matched price history to measure it rather than estimate it.
+
+Finally, hold the AUC 0.586 loosely. The coefficients are out of sample and
+the constant is unfitted, but the decision to regress at all was taken because
+of these 275 legs. A further month of graded live picks settles it.

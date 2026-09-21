@@ -48,19 +48,25 @@ BASE_RATE = 0.771
 # against the hand carries roughly ten times the weight of the starter's recent
 # H/9 — which is the screen's whole original premise, and is close to how the
 # market itself weights them.
+#
+# vs_hand_avg here is the REGRESSED column, not the raw split: these were refit
+# after VS_HAND_REGRESSION_PA went in, which is why its coefficient reads 7.07
+# against the 5.96 of the raw-feature fit. The regression halves the feature's
+# spread (sd .0331 -> .0172) and the fit answers with a larger coefficient;
+# pasting one set onto the other scale would be a silent mis-calibration.
 _COEF = {
-    "intercept": -1.087595,
-    "vs_hand_avg": 5.962546,
-    "recent_ab": 0.011948,
-    "p_season_baa": 0.115625,
-    "p_l3_k9": -0.018677,
-    "p_sharp": -0.079013,
+    "intercept": -1.424086,
+    "vs_hand_avg": 7.066928,
+    "recent_ab": 0.014135,
+    "p_season_baa": 0.118244,
+    "p_l3_k9": -0.018421,
+    "p_sharp": -0.081510,
 }
 
 # Training medians, for imputing a missing feature. Using live medians instead
 # would let a slate's own composition shift the model.
 _MEDIANS = {
-    "vs_hand_avg": 0.2510,
+    "vs_hand_avg": 0.2520,
     "recent_ab": 17.0000,
     "p_season_baa": 0.2360,
     "p_l3_k9": 8.3100,
@@ -154,7 +160,7 @@ def model_probability(rec) -> float:
         except (TypeError, ValueError):
             rec = {}
 
-    rec = _clip_features(rec)
+    rec = _prepare_features(rec)
 
     z = _COEF["intercept"]
     for f in _FEATURES:
@@ -173,7 +179,7 @@ def model_probability(rec) -> float:
 # The model must not extrapolate past the data it was fitted on.
 #
 # vs_hand_avg is the batter's CAREER average against the hand, and it carries
-# the largest coefficient in the model at +6.03. In 30,774 training rows it
+# the largest coefficient in the model at +7.07. In 30,774 training rows it
 # never exceeds .667, and only 5 rows clear .500 — the 99.9th percentile is
 # .402. So a value of .972 is not an extreme observation, it is a value the
 # fit has never seen, and the logistic happily extends a straight line into it:
@@ -188,37 +194,101 @@ def model_probability(rec) -> float:
 #     uncapped                     0.5756     0.66033          0
 #     clip at .450                 0.5756     0.66023          7
 #
-# What this deliberately does NOT do is discount a hot bat for having few plate
-# appearances behind it. That was tried first and it was wrong. A thin split
-# predicts as well as a thick one, and by this sample better:
+# This block used to end by arguing that a thin split must NOT be discounted
+# for its sample size — thin splits predicted as well as thick ones, and by
+# the backtest better (20-40 PA: .350+ hit 84.8% against 41.9% for sub-.250).
+# Live results reversed it: see VS_HAND_REGRESSION_PA below, which now does
+# the discounting that table said was unnecessary. The table was not wrong
+# about the backtest. The backtest was the wrong population to ask, because
+# box-score boards contain almost none of the thin-split call-ups the live
+# roster board puts at the top.
 #
-#     vs_hand_pa    hot (>=.350)   cold (<.250)     gap
-#       0-20 PA        64.7%          41.7%       +23.0  (n=17, p=0.11)
-#      20-40 PA        84.8%          41.9%       +42.9  (p<0.001)
-#     40-100 PA        78.3%          49.5%       +28.8  (p=0.009)
-#       300+ PA        72.0%          55.3%       +16.7  (p=1.2e-21)
-#
-# Blanking splits under 20 PA cost 0.0012 AUC and would have cut a .400 bat in
-# 30 PA from 79.6% to 61.3%, throwing away a real signal to fix a scaling bug.
-# A limited sample does not make a hot bat less hot; it only means the model
-# should not be asked about a number it has never seen.
+# The cap survives that change with a narrower job. Regression already takes a
+# three-PA .972 to league average, so the cap no longer catches small samples
+# at all; what is left for it is a genuine long-sampled extreme, where a .667
+# career split on 1,500 PA still regresses to .583 and out of the fitted
+# range. It binds on 7 rows in 30,774 and costs nothing measurable.
 VS_HAND_AVG_CAP: float = 0.450
 
 
-def _clip_features(rec: dict) -> dict:
-    """Hold features inside the range the model was fitted over.
+# How hard to regress a career vs-hand average toward the league mean, and
+# where that number comes from.
+#
+# vs_hand_avg entered the model raw, and the live board punished it. Over 275
+# graded live legs the model claimed 71.9% and delivered 66.2%, and the whole
+# gap sat on one population:
+#
+#     vs_hand_pa      n     model says   actual     gap
+#     under 400      115       73.6%      58.3%   -15.3   (z = -3.75)
+#     400+           160       70.7%      71.9%    +1.2   (z = +0.33)
+#
+# On a thick split the model was already honest. The error is entirely a
+# small-sample effect: a .400 average on 30 PA is mostly sampling noise, and a
+# +5.96 coefficient reads it as talent.
+#
+# This could not be seen in the backtest, and that is structural rather than
+# bad luck. Historical boards are built from box scores, so they are made of
+# men who were in the lineup — median vs_hand_pa at the betting bar is 837.
+# The live board is the active roster, call-ups included, and its median at
+# the same bar is 81. The population that produces the failure is almost
+# absent from the sample the model was fitted and checked on, which is why
+# MIN_VS_HAND_PA (20) measured as costing 0.0012 AUC and was reverted: the
+# test set could not contain the rows it was meant to protect against.
+#
+# The constant is not fitted to any outcome. It is the regression-to-the-mean
+# constant for the statistic itself, k = p(1-p)/var(true talent), measured on
+# the 293 batters with 800+ PA against a hand:
+#
+#     observed sd .0245  -  sampling sd .0110  ->  true-talent sd .0218
+#     k = .252 x .748 / .0218^2 = 395 PA
+#
+# That it lands inside the 200-400 plateau the live results show is a check,
+# not a fit — the live gaps run -0.4, -0.3, +1.2, -0.2, +0.2 for gates of 200
+# through 600 PA, so there is no edge to tune and nothing to overfit to.
+#
+#     a .400 split on  30 PA shrinks to .262
+#     a .400 split on 100 PA shrinks to .282
+#     a .400 split on 800 PA shrinks to .351
+VS_HAND_REGRESSION_PA: float = 395.0
+VS_HAND_LEAGUE_AVG: float = 0.252
 
-    Returns a copy when anything is clipped, so a caller's row is never
-    mutated by having been priced.
+
+def shrink_vs_hand(avg: float, pa: Optional[float]) -> float:
+    """Regress a vs-hand average toward league mean by its own sample size.
+
+    ``pa`` missing or zero returns the league mean: a split with nothing
+    behind it carries no information about the batter, which is a stronger
+    and simpler statement than imputing a median and hoping.
+    """
+    try:
+        pa = float(pa) if pa is not None else 0.0
+    except (TypeError, ValueError):
+        pa = 0.0
+    if pa != pa or pa <= 0:
+        return VS_HAND_LEAGUE_AVG
+    k = VS_HAND_REGRESSION_PA
+    return (pa * avg + k * VS_HAND_LEAGUE_AVG) / (pa + k)
+
+
+def _prepare_features(rec: dict) -> dict:
+    """Regress vs_hand_avg by its sample, then hold it inside the fitted range.
+
+    Returns a copy when anything changes, so a caller's row is never mutated
+    by having been priced. The cap runs after the shrink and now binds only on
+    a genuine outlier with a long record behind it — a .667 career split on
+    1,500 PA still shrinks to .583 — rather than on every three-PA call-up.
     """
     v = rec.get("vs_hand_avg")
     try:
         v = float(v) if v is not None else None
     except (TypeError, ValueError):
         return rec
-    if v is None or v != v or v <= VS_HAND_AVG_CAP:
+    if v is None or v != v:
         return rec
-    return {**rec, "vs_hand_avg": VS_HAND_AVG_CAP}
+    v = min(shrink_vs_hand(v, rec.get("vs_hand_pa")), VS_HAND_AVG_CAP)
+    if v == rec.get("vs_hand_avg"):
+        return rec
+    return {**rec, "vs_hand_avg": v}
 
 
 def devig_probability(american: int, overround: float = 1.0) -> float:

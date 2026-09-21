@@ -141,6 +141,20 @@ def load(outdir: Path) -> pd.DataFrame:
     df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
     d = df[df["result"].isin(["WIN", "LOSS"])].copy()
     d["y"] = d["result"].eq("WIN").astype(int)
+
+    # Fit the feature the way the board will compute it. vs_hand_avg is
+    # regressed toward league mean by its own sample size before it reaches
+    # the model (see pricing.VS_HAND_REGRESSION_PA), so fitting the raw column
+    # would hand production a coefficient calibrated to a different variable —
+    # the shrunk column has visibly less spread, and the fit has to be allowed
+    # to answer that with a larger coefficient.
+    pa = pd.to_numeric(d["vs_hand_pa"], errors="coerce").fillna(0.0).clip(lower=0)
+    raw = pd.to_numeric(d["vs_hand_avg"], errors="coerce")
+    k, lg = pricing.VS_HAND_REGRESSION_PA, pricing.VS_HAND_LEAGUE_AVG
+    d["vs_hand_avg"] = ((pa * raw.fillna(lg) + k * lg) / (pa + k)).clip(
+        upper=pricing.VS_HAND_AVG_CAP).where(raw.notna())
+    print(f"vs_hand_avg regressed toward {lg:.3f} at k={k:.0f} PA: "
+          f"sd {raw.std():.4f} -> {d['vs_hand_avg'].std():.4f}")
     return d
 
 
