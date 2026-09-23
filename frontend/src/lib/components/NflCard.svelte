@@ -1,49 +1,49 @@
 <script lang="ts">
-  /** The week's card — the two legs we'd actually bet — and the wider
-   *  suggestion list underneath it.
+  /** The week's card, the wider suggestion list, and the injury read.
    *
-   *  The split matters and is worth showing rather than hiding: the card is
-   *  two legs because a parlay dies on any miss, but two legs a week is far
-   *  too little to learn from, so the suggestions are what gets recorded and
-   *  scored. Someone reading this page should be able to see both.
+   *  Tables, not prose. Every "why" that used to sit in a paragraph is now a
+   *  title attribute on the column or chip it explains — the reasoning has not
+   *  been deleted, it has been moved off the page and into hover.
    */
-  import { fmtOdds, fmtPct, fmtEv, evClass, MARKET_LABEL, fmtKickoff } from '$lib/nflScreen';
+  import { fmtOdds, fmtPct, fmtEv, evClass, MARKET_LABEL, fmtKickoff, shortEvent } from '$lib/nflScreen';
   import type { NflScreen, NflProp } from '$lib/types';
 
   export let data: NflScreen;
 
   let showAll = false;
-  let showOut = false;
+  let showAllVacancies = false;
   $: card = data.card?.legs ?? [];
   $: summary = data.card?.summary;
   $: suggestions = data.suggestions ?? [];
   $: rest = suggestions.filter((s) => !card.some((c) => c.key === s.key && c.market === s.market));
-  $: shown = showAll ? rest : rest.slice(0, 8);
+  $: shown = showAll ? rest : rest.slice(0, 10);
   $: conflicted = suggestions.filter((s) => s.role_conflict).length;
+  $: promoted = suggestions.filter((s) => s.vacated_share).length;
   $: avail = data.availability;
   $: withheld = [...(avail?.withheld_unavailable ?? []),
                  ...(avail?.withheld_vacated_under ?? [])];
-  $: promoted = suggestions.filter((s) => s.vacated_share).length;
+  $: vacancies = avail?.vacancies ?? [];
+  $: shownVacancies = showAllVacancies ? vacancies : vacancies.slice(0, 8);
 
-  /** The depth chart's own words for a rank, which is how the market talks
-   *  about it. RB1 says more than "rank 1". */
+  /** The depth chart's own words for a rank — RB1 says more than "rank 1". */
   function depthLabel(r: NflProp): string | null {
     if (r.depth_rank == null || !r.position) return null;
     return `${r.position}${r.depth_rank}`;
   }
 
   function roleTitle(r: NflProp): string {
-    const base = `We rank ${r.player} differently from the market against his own teammate ${r.role_conflict_with}. That is a disagreement about who plays, which the projection cannot see — it reads last season's usage. Tracked, not filtered.`;
-    if (r.role_conflict_verdict === 'market')
-      return `${base}\n\nThe depth chart sides with the market here, so our number is most likely the stale one.`;
-    if (r.role_conflict_verdict === 'model')
-      return `${base}\n\nThe depth chart sides with us here.`;
-    return `${base}\n\nThe depth chart has no view either way.`;
+    const verdict = r.role_conflict_verdict === 'market'
+      ? 'Depth chart sides with the market — our number is likely the stale one.'
+      : r.role_conflict_verdict === 'model'
+        ? 'Depth chart sides with us.'
+        : 'Depth chart has no view.';
+    return `Ranked against teammate ${r.role_conflict_with} the opposite way to the market — a disagreement about role, not production. ${verdict}`;
   }
 
   function inheritedTitle(r: NflProp): string {
     const who = (r.vacated_by ?? []).join(', ');
-    return `${who} ${(r.vacated_by?.length ?? 0) > 1 ? 'are' : 'is'} out, leaving ${Math.round(100 * (r.vacated_share ?? 0))}% of this position group's recent production to the men who remain. Our projection is a season-long rate for the committee that no longer exists, so it reads low — which is why the under is refused on rows like this.`;
+    const pct = Math.round(100 * (r.vacated_share ?? 0));
+    return `${who} out — ${pct}% of this position group's recent production is now shared among the men who remain. The projection still describes the old committee, so an UNDER here is refused.`;
   }
 
   let copied = false;
@@ -61,14 +61,10 @@
     }
   }
 
-  function sideClass(side: string | null): string {
+  function sideClass(side: string | null | undefined): string {
     return side === 'UNDER'
       ? 'bg-amber-600/20 text-amber-300 border-amber-600/30'
       : 'bg-emerald-600/20 text-emerald-300 border-emerald-600/30';
-  }
-
-  function leg(r: NflProp): string {
-    return `${r.player} ${r.side?.toLowerCase()} ${r.line} ${MARKET_LABEL[r.market]?.toLowerCase() ?? r.market}`;
   }
 </script>
 
@@ -77,9 +73,6 @@
     <div class="px-5 py-4 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
       <h2 class="text-sm font-semibold text-emerald-300 uppercase tracking-wider">
         Week {data.week} Card
-        <span class="ml-2 normal-case font-normal text-xs text-slate-500">
-          the {card.length} best disagreements, one per game
-        </span>
       </h2>
       {#if summary?.american != null}
         <span class="text-xs text-slate-400 tabular-nums">
@@ -90,76 +83,81 @@
           {#if summary.kelly_quarter}
             · <span
                 class="text-slate-300"
-                title="Quarter-Kelly, and it deserves less trust here than on the baseball card — these probabilities have never been scored on a settled NFL week."
+                title="Quarter-Kelly, already divided. These probabilities have never been scored on a settled NFL week."
               >stake {(100 * summary.kelly_quarter).toFixed(1)}%</span>
           {/if}
         </span>
       {/if}
     </div>
 
-    <div class="divide-y divide-border/50">
-      {#each card as r (r.market + r.key)}
-        <div class="px-5 py-2.5 flex items-center justify-between gap-4 text-sm flex-wrap">
-          <div class="min-w-0">
-            <span class="inline-block px-2 py-0.5 mr-2 text-xs rounded border {sideClass(r.side)}">
-              {r.side}
-            </span>
-            <span class="text-slate-200 font-medium">{r.player}</span>
-            <span class="text-slate-500 text-xs"> {r.position ?? ''} {r.team ?? ''}</span>
-            {#if depthLabel(r)}
-              <span
-                class="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-surface-700 text-slate-400 border border-border tabular-nums"
-                title="Position rank on the depth chart published {avail?.depth_as_of ?? 'this week'}."
-              >{depthLabel(r)}</span>
-            {/if}
-            {#if r.avail === 'QUESTIONABLE'}
-              <span
-                class="ml-1.5 px-1.5 py-0.5 rounded text-[10px] bg-yellow-600/20 text-yellow-300 border border-yellow-600/30"
-                title="Questionable — {r.avail_reason}. Most questionable players play and the market has priced the chance he does not, so this is shown rather than refused."
-              >Q</span>
-            {/if}
-            {#if r.vacated_share}
-              <span
-                class="ml-1.5 px-1.5 py-0.5 rounded text-[10px] bg-sky-600/20 text-sky-300 border border-sky-600/30"
-                title={inheritedTitle(r)}
-              >inherited {Math.round(100 * r.vacated_share)}%</span>
-            {/if}
-            {#if r.role_conflict}
-              <span
-                class="ml-1.5 px-1.5 py-0.5 rounded text-[10px] bg-amber-600/20 text-amber-300 border border-amber-600/30"
-                title={roleTitle(r)}
-              >role?{r.role_conflict_verdict === 'market' ? ' ✗' : r.role_conflict_verdict === 'model' ? ' ✓' : ''}</span>
-            {/if}
-            <span class="text-slate-400 text-xs">
-              · {r.line} {MARKET_LABEL[r.market]?.toLowerCase() ?? r.market}
-            </span>
-            <span class="block text-xs text-slate-600">{r.event} · {fmtKickoff(r.kickoff)}</span>
-          </div>
-          <div class="flex items-center gap-4 tabular-nums text-xs shrink-0">
-            <span class="text-slate-500">proj {r.adjusted}</span>
-            <span class="text-emerald-300 font-semibold">{fmtPct(r.model_p)}</span>
-            <span class="text-slate-400">{fmtOdds(r.odds)}</span>
-            <span class={evClass(r.ev)}>{r.edge_pts != null ? `${r.edge_pts >= 0 ? '+' : ''}${r.edge_pts.toFixed(1)}` : '—'}</span>
-          </div>
-        </div>
-      {/each}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-border text-xs font-medium text-slate-400 uppercase tracking-wider">
+            <th class="text-left px-4 py-2.5">Bet</th>
+            <th class="text-left px-4 py-2.5">Player</th>
+            <th class="text-left px-4 py-2.5">Market</th>
+            <th class="text-right px-4 py-2.5">Line</th>
+            <th class="text-right px-4 py-2.5" title="The projection restated on the market's scale.">Proj</th>
+            <th class="text-right px-4 py-2.5">Model</th>
+            <th class="text-right px-4 py-2.5">Price</th>
+            <th class="text-right px-4 py-2.5" title="Model probability minus the devigged market probability, in points.">Edge</th>
+            <th class="text-left px-4 py-2.5">Game</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each card as r (r.market + r.key)}
+            <tr class="border-b border-border/50">
+              <td class="px-4 py-2.5">
+                <span class="inline-block px-2 py-0.5 text-xs rounded border {sideClass(r.side)}">{r.side}</span>
+              </td>
+              <td class="px-4 py-2.5 whitespace-nowrap">
+                <span class="text-slate-200 font-medium">{r.player}</span>
+                <span class="text-xs text-slate-500"> {r.team ?? ''}</span>
+                {#if depthLabel(r)}
+                  <span
+                    class="ml-1.5 px-1 py-0.5 rounded text-[10px] bg-surface-700 text-slate-400 border border-border tabular-nums"
+                    title="Depth chart rank, published {avail?.depth_as_of ?? 'this week'}."
+                  >{depthLabel(r)}</span>
+                {/if}
+                {#if r.avail === 'QUESTIONABLE'}
+                  <span
+                    class="ml-1 px-1 py-0.5 rounded text-[10px] bg-yellow-600/20 text-yellow-300 border border-yellow-600/30"
+                    title="Questionable — {r.avail_reason}."
+                  >Q</span>
+                {/if}
+                {#if r.vacated_share}
+                  <span
+                    class="ml-1 px-1 py-0.5 rounded text-[10px] bg-sky-600/20 text-sky-300 border border-sky-600/30 tabular-nums"
+                    title={inheritedTitle(r)}
+                  >+{Math.round(100 * r.vacated_share)}%</span>
+                {/if}
+                {#if r.role_conflict}
+                  <span
+                    class="ml-1 px-1 py-0.5 rounded text-[10px] bg-amber-600/20 text-amber-300 border border-amber-600/30"
+                    title={roleTitle(r)}
+                  >role?{r.role_conflict_verdict === 'market' ? ' ✗' : r.role_conflict_verdict === 'model' ? ' ✓' : ''}</span>
+                {/if}
+              </td>
+              <td class="px-4 py-2.5 text-slate-400">{MARKET_LABEL[r.market] ?? r.market}</td>
+              <td class="px-4 py-2.5 text-right tabular-nums text-slate-200">{r.line}</td>
+              <td class="px-4 py-2.5 text-right tabular-nums text-slate-400">{r.adjusted}</td>
+              <td class="px-4 py-2.5 text-right tabular-nums text-emerald-300 font-semibold">{fmtPct(r.model_p)}</td>
+              <td class="px-4 py-2.5 text-right tabular-nums text-slate-300">{fmtOdds(r.odds)}</td>
+              <td class="px-4 py-2.5 text-right tabular-nums {evClass(r.ev)}">
+                {r.edge_pts != null ? `${r.edge_pts >= 0 ? '+' : ''}${r.edge_pts.toFixed(1)}` : '—'}
+              </td>
+              <td class="px-4 py-2.5 text-slate-500 text-xs whitespace-nowrap" title={r.event ?? ''}>
+                {shortEvent(r.event)}
+                <span class="block text-slate-600">{fmtKickoff(r.kickoff)}</span>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
     </div>
 
-    {#if card.some((r) => r.role_conflict)}
-      <!-- The known systematic error, named on the card itself rather than
-           buried in a doc. It is on roughly half the board this week. -->
-      <div class="px-5 py-3 border-t border-border bg-amber-950/20 text-xs text-amber-200/90">
-        A leg here is marked <span class="font-semibold">role?</span> — we rank that player
-        the opposite way to the market against his own teammate. The projection reads last
-        season's usage and has no view of snap share, so when a role changed in the offseason
-        it describes the wrong player. Kept on the card and tracked so the record can settle
-        whether it costs anything. A <span class="font-semibold">✗</span> means the depth
-        chart sides with the market and our number is the stale one; a
-        <span class="font-semibold">✓</span> means it sides with us.
-      </div>
-    {/if}
-
-    <div class="px-5 py-4 border-t border-border flex items-center gap-3 flex-wrap">
+    <div class="px-5 py-3 border-t border-border flex items-center gap-3 flex-wrap">
       {#if data.card?.betslip_url}
         <a
           href={data.card.betslip_url}
@@ -172,9 +170,7 @@
           on:click={copyBetslip}
         >{copied ? 'Copied' : 'Copy link'}</button>
       {/if}
-      <span class="text-xs text-slate-500">
-        Lines move all week and FanDuel pulls each market at kickoff — re-check before placing.
-      </span>
+      <span class="text-xs text-slate-500">Re-check before placing — lines move and FanDuel pulls each market at kickoff.</span>
     </div>
   </section>
 {/if}
@@ -182,14 +178,12 @@
 {#if suggestions.length}
   <section class="card p-0 overflow-hidden">
     <div class="px-5 py-4 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
-      <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-        Suggestions
-        <span class="ml-2 normal-case font-normal text-xs text-slate-500">
-          recorded and scored — this is what the track record is built from
-        </span>
-      </h2>
+      <h2
+        class="text-sm font-semibold text-slate-300 uppercase tracking-wider"
+        title="Every row past the threshold with enough edge to record. Wider than the card — this is what the track record is built from."
+      >Suggestions</h2>
       <span class="text-xs text-slate-500 tabular-nums">
-        {suggestions.length} this week
+        {suggestions.length}
         {#if conflicted}
           · <span class="text-amber-400/90" title="Rows where we rank a player the opposite way to the market against his own teammate.">{conflicted} role?</span>
         {/if}
@@ -205,54 +199,74 @@
     </div>
 
     {#if rest.length === 0}
-      <div class="px-5 py-4 text-sm text-slate-500">
-        Everything suggested this week is on the card.
-      </div>
+      <div class="px-5 py-4 text-sm text-slate-500">Everything suggested this week is on the card.</div>
     {:else}
-      <div class="divide-y divide-border/50">
-        {#each shown as r (r.market + r.key)}
-          <div class="px-5 py-2 flex items-center justify-between gap-4 text-sm flex-wrap">
-            <div class="min-w-0">
-              <span class="inline-block px-1.5 py-0.5 mr-2 text-[10px] rounded border {sideClass(r.side)}">
-                {r.side}
-              </span>
-              <span class="text-slate-300">{leg(r)}</span>
-              <span class="text-slate-600 text-xs"> · {r.team ?? ''}</span>
-              {#if depthLabel(r)}
-                <span
-                  class="ml-1.5 px-1 py-0.5 rounded text-[10px] bg-surface-700 text-slate-400 border border-border tabular-nums"
-                  title="Position rank on the depth chart published {avail?.depth_as_of ?? 'this week'}."
-                >{depthLabel(r)}</span>
-              {/if}
-              {#if r.avail === 'QUESTIONABLE'}
-                <span
-                  class="ml-1.5 px-1 py-0.5 rounded text-[10px] bg-yellow-600/20 text-yellow-300 border border-yellow-600/30"
-                  title="Questionable — {r.avail_reason}."
-                >Q</span>
-              {/if}
-              {#if r.vacated_share}
-                <span
-                  class="ml-1.5 px-1 py-0.5 rounded text-[10px] bg-sky-600/20 text-sky-300 border border-sky-600/30"
-                  title={inheritedTitle(r)}
-                >inherited {Math.round(100 * r.vacated_share)}%</span>
-              {/if}
-              {#if r.role_conflict}
-                <span
-                  class="ml-1.5 px-1 py-0.5 rounded text-[10px] bg-amber-600/20 text-amber-300 border border-amber-600/30"
-                  title={roleTitle(r)}
-                >role?{r.role_conflict_verdict === 'market' ? ' ✗' : r.role_conflict_verdict === 'model' ? ' ✓' : ''}</span>
-              {/if}
-            </div>
-            <div class="flex items-center gap-4 tabular-nums text-xs shrink-0">
-              <span class="text-slate-500">proj {r.adjusted}</span>
-              <span class="text-slate-300">{fmtPct(r.model_p)}</span>
-              <span class="text-slate-500">{fmtOdds(r.odds)}</span>
-              <span class={evClass(r.ev)}>{r.edge_pts != null ? `${r.edge_pts >= 0 ? '+' : ''}${r.edge_pts.toFixed(1)}` : '—'}</span>
-            </div>
-          </div>
-        {/each}
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-border text-xs font-medium text-slate-400 uppercase tracking-wider">
+              <th class="text-left px-4 py-2.5">Bet</th>
+              <th class="text-left px-4 py-2.5">Player</th>
+              <th class="text-left px-4 py-2.5">Market</th>
+              <th class="text-right px-4 py-2.5">Line</th>
+              <th class="text-right px-4 py-2.5" title="The projection restated on the market's scale.">Proj</th>
+              <th class="text-right px-4 py-2.5">Model</th>
+              <th class="text-right px-4 py-2.5">Price</th>
+              <th class="text-right px-4 py-2.5" title="Model probability minus the devigged market probability, in points.">Edge</th>
+              <th class="text-left px-4 py-2.5">Game</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each shown as r (r.market + r.key)}
+              <tr class="border-b border-border/50 hover:bg-surface-600/30">
+                <td class="px-4 py-2">
+                  <span class="inline-block px-1.5 py-0.5 text-[10px] rounded border {sideClass(r.side)}">{r.side}</span>
+                </td>
+                <td class="px-4 py-2 whitespace-nowrap">
+                  <span class="text-slate-200">{r.player}</span>
+                  <span class="text-xs text-slate-600"> {r.team ?? ''}</span>
+                  {#if depthLabel(r)}
+                    <span
+                      class="ml-1.5 px-1 py-0.5 rounded text-[10px] bg-surface-700 text-slate-400 border border-border tabular-nums"
+                      title="Depth chart rank, published {avail?.depth_as_of ?? 'this week'}."
+                    >{depthLabel(r)}</span>
+                  {/if}
+                  {#if r.avail === 'QUESTIONABLE'}
+                    <span
+                      class="ml-1 px-1 py-0.5 rounded text-[10px] bg-yellow-600/20 text-yellow-300 border border-yellow-600/30"
+                      title="Questionable — {r.avail_reason}."
+                    >Q</span>
+                  {/if}
+                  {#if r.vacated_share}
+                    <span
+                      class="ml-1 px-1 py-0.5 rounded text-[10px] bg-sky-600/20 text-sky-300 border border-sky-600/30 tabular-nums"
+                      title={inheritedTitle(r)}
+                    >+{Math.round(100 * r.vacated_share)}%</span>
+                  {/if}
+                  {#if r.role_conflict}
+                    <span
+                      class="ml-1 px-1 py-0.5 rounded text-[10px] bg-amber-600/20 text-amber-300 border border-amber-600/30"
+                      title={roleTitle(r)}
+                    >role?{r.role_conflict_verdict === 'market' ? ' ✗' : r.role_conflict_verdict === 'model' ? ' ✓' : ''}</span>
+                  {/if}
+                </td>
+                <td class="px-4 py-2 text-slate-400">{MARKET_LABEL[r.market] ?? r.market}</td>
+                <td class="px-4 py-2 text-right tabular-nums text-slate-200">{r.line}</td>
+                <td class="px-4 py-2 text-right tabular-nums text-slate-400">{r.adjusted}</td>
+                <td class="px-4 py-2 text-right tabular-nums text-slate-300">{fmtPct(r.model_p)}</td>
+                <td class="px-4 py-2 text-right tabular-nums text-slate-400">{fmtOdds(r.odds)}</td>
+                <td class="px-4 py-2 text-right tabular-nums {evClass(r.ev)}">
+                  {r.edge_pts != null ? `${r.edge_pts >= 0 ? '+' : ''}${r.edge_pts.toFixed(1)}` : '—'}
+                </td>
+                <td class="px-4 py-2 text-slate-600 text-xs whitespace-nowrap" title={r.event ?? ''}>
+                  {shortEvent(r.event)}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       </div>
-      {#if rest.length > 8}
+      {#if rest.length > 10}
         <button
           class="w-full px-5 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-surface-600/40 border-t border-border"
           on:click={() => (showAll = !showAll)}
@@ -263,26 +277,17 @@
 {/if}
 
 {#if avail}
-  <!-- The injury read, on the page rather than in a log.
-       Two different things live here and they are stacked in the order that
-       matters. What was taken *off* the card comes first — a guard nobody can
-       see is a guard nobody revisits, and these are picks that would have been
-       made yesterday. The vacancies underneath are the reason: they are where
-       the projection is about to be wrong, whether or not a line is posted on
-       it yet. -->
   <section class="card p-0 overflow-hidden">
     <div class="px-5 py-4 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
-      <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-        Injury report
-        <span class="ml-2 normal-case font-normal text-xs text-slate-500">
-          roster designations, the official report, and the depth chart — re-read on every build
-        </span>
-      </h2>
+      <h2
+        class="text-sm font-semibold text-slate-300 uppercase tracking-wider"
+        title="Roster designations, the official injury report and the depth chart, re-read on every build. A player who is out never reaches the card; an UNDER on a player whose position group lost a third of its work is refused."
+      >Injury report</h2>
       <span class="text-xs text-slate-500 tabular-nums">
         {avail.counts?.OUT ?? 0} out
         {#if avail.counts?.QUESTIONABLE}· {avail.counts.QUESTIONABLE} questionable{/if}
         {#if avail.depth_as_of}
-          · <span title="When the depth chart this board used was published. It is republished about twice a day.">chart {avail.depth_as_of.slice(5, 16).replace('T', ' ')}</span>
+          · <span title="When the depth chart this board used was published.">chart {avail.depth_as_of.slice(5, 16).replace('T', ' ')}</span>
         {/if}
         {#if avail.errors?.length}
           · <span class="text-red-400" title={avail.errors.join('; ')}>feed error</span>
@@ -291,71 +296,87 @@
     </div>
 
     {#if withheld.length}
-      <div class="px-5 py-3 border-b border-border/60">
-        <div class="text-xs text-slate-400 mb-2">
-          Kept off the card this week:
-        </div>
-        <div class="space-y-1">
-          {#each withheld as r}
-            <div class="text-xs text-slate-300 flex items-baseline gap-2 flex-wrap">
-              <span class="px-1 py-0.5 rounded text-[10px] border {r.avail
-                ? 'bg-red-600/20 text-red-300 border-red-600/30'
-                : 'bg-sky-600/20 text-sky-300 border-sky-600/30'}">
-                {r.avail ?? 'inherited role'}
-              </span>
-              <span class="text-slate-200">{r.player}</span>
-              <span class="text-slate-500">
-                {r.side?.toLowerCase()} {r.line} {MARKET_LABEL[r.market ?? '']?.toLowerCase() ?? r.market}
-                · {r.team}
-              </span>
-              <span class="text-slate-600">
-                {#if r.avail_reason}
-                  {r.avail_reason}
-                {:else if r.vacated_by}
-                  {r.vacated_by.join(', ')} out — {Math.round(100 * (r.vacated_share ?? 0))}% of the group's work is now his
-                {/if}
-              </span>
-            </div>
-          {/each}
-        </div>
+      <div class="overflow-x-auto border-b border-border">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-border/60 text-xs font-medium text-slate-400 uppercase tracking-wider">
+              <th class="text-left px-4 py-2" title="Rows that cleared every other bar and were dropped by an availability guard.">Withheld</th>
+              <th class="text-left px-4 py-2">Player</th>
+              <th class="text-left px-4 py-2">Bet</th>
+              <th class="text-right px-4 py-2">Edge</th>
+              <th class="text-left px-4 py-2">Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each withheld as r}
+              <tr class="border-b border-border/40">
+                <td class="px-4 py-2">
+                  <span class="px-1.5 py-0.5 rounded text-[10px] border {r.avail
+                    ? 'bg-red-600/20 text-red-300 border-red-600/30'
+                    : 'bg-sky-600/20 text-sky-300 border-sky-600/30'}">
+                    {r.avail ?? 'INHERITED'}
+                  </span>
+                </td>
+                <td class="px-4 py-2 text-slate-200 whitespace-nowrap">
+                  {r.player}<span class="text-xs text-slate-600"> {r.team ?? ''}</span>
+                </td>
+                <td class="px-4 py-2 text-slate-400 whitespace-nowrap">
+                  {r.side?.toLowerCase()} {r.line} {MARKET_LABEL[r.market ?? '']?.toLowerCase() ?? r.market}
+                </td>
+                <td class="px-4 py-2 text-right tabular-nums text-slate-400">
+                  {r.edge_pts != null ? `+${r.edge_pts.toFixed(1)}` : '—'}
+                </td>
+                <td class="px-4 py-2 text-slate-500 text-xs">
+                  {#if r.avail_reason}{r.avail_reason}
+                  {:else if r.vacated_by}{r.vacated_by.join(', ')} out · {Math.round(100 * (r.vacated_share ?? 0))}%{/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       </div>
     {/if}
 
-    {#if avail.vacancies?.length}
-      <div class="px-5 py-3">
-        <div class="text-xs text-slate-400 mb-2">
-          Position groups that have lost work. The men who remain are being priced in a
-          role our projection has never seen them hold — an
-          <span class="text-amber-300">under</span> on one of them is refused above
-          {Math.round(100 * avail.vacated_share_blocks_under)}%.
-        </div>
-        <div class="space-y-1">
-          {#each (showOut ? avail.vacancies : avail.vacancies.slice(0, 6)) as v}
-            <div class="text-xs flex items-baseline gap-2 flex-wrap">
-              <span class="tabular-nums w-10 shrink-0 {v.share >= avail.vacated_share_blocks_under ? 'text-sky-300 font-semibold' : 'text-slate-500'}">
-                {Math.round(100 * v.share)}%
-              </span>
-              <span class="text-slate-200 w-16 shrink-0">{v.team} {v.position}</span>
-              <span class="text-slate-500 w-32 shrink-0">
-                {MARKET_LABEL[v.component]?.toLowerCase() ?? v.component.replace('_', ' ')}
-              </span>
-              <span class="text-slate-400">
-                {v.players.map((p) => `${p.player} (${p.reason})`).join(', ')}
-              </span>
-            </div>
-          {/each}
-        </div>
-        {#if avail.vacancies.length > 6}
-          <button
-            class="mt-2 text-xs text-slate-400 hover:text-slate-200"
-            on:click={() => (showOut = !showOut)}
-          >{showOut ? 'Show fewer' : `Show all ${avail.vacancies.length}`}</button>
-        {/if}
+    {#if vacancies.length}
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-border/60 text-xs font-medium text-slate-400 uppercase tracking-wider">
+              <th
+                class="text-right px-4 py-2"
+                title="Share of the group's recent per-game production belonging to players who are out. An UNDER is refused above {Math.round(100 * (avail.vacated_share_blocks_under ?? 0))}%."
+              >Vacated</th>
+              <th class="text-left px-4 py-2">Group</th>
+              <th class="text-left px-4 py-2">Market</th>
+              <th class="text-left px-4 py-2">Out</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each shownVacancies as v}
+              <tr class="border-b border-border/40">
+                <td class="px-4 py-2 text-right tabular-nums {v.share >= (avail.vacated_share_blocks_under ?? 1) ? 'text-sky-300 font-semibold' : 'text-slate-500'}">
+                  {Math.round(100 * v.share)}%
+                </td>
+                <td class="px-4 py-2 text-slate-200 whitespace-nowrap">{v.team} {v.position}</td>
+                <td class="px-4 py-2 text-slate-400 whitespace-nowrap">
+                  {MARKET_LABEL[v.component] ?? v.component.replace(/_/g, ' ')}
+                </td>
+                <td class="px-4 py-2 text-slate-400 text-xs">
+                  {v.players.map((p) => `${p.player} (${p.reason})`).join(', ')}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       </div>
+      {#if vacancies.length > 8}
+        <button
+          class="w-full px-5 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-surface-600/40 border-t border-border"
+          on:click={() => (showAllVacancies = !showAllVacancies)}
+        >{showAllVacancies ? 'Show fewer' : `Show all ${vacancies.length}`}</button>
+      {/if}
     {:else if !withheld.length}
-      <div class="px-5 py-4 text-sm text-slate-500">
-        Nobody's absence has moved a position group enough to matter this week.
-      </div>
+      <div class="px-5 py-4 text-sm text-slate-500">No absence has moved a position group this week.</div>
     {/if}
   </section>
 {/if}

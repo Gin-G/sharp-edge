@@ -4,7 +4,7 @@
   import {
     NFL_CACHE_KEY, load as loadScreen, initialState,
     fmtOdds, fmtPct, fmtSigned, fmtEv, evClass, MARKET_LABEL, fmtKickoff,
-    MARKET_GROUP, GROUP_ORDER, GROUP_BLURB,
+    shortEvent, MARKET_GROUP, GROUP_ORDER, GROUP_BLURB,
   } from '$lib/nflScreen';
   import type { NflScreen, NflProp } from '$lib/types';
   import NflCard from '$lib/components/NflCard.svelte';
@@ -121,18 +121,12 @@
   {/if}
 
   {#if data?.preseason}
-    <!-- The honest health warning on week 1. These projections were computed
-         in August off last season and rookie priors; they have never seen a
-         snap of this season, and they disagree with the market by a lot more
-         than they will in October. -->
-    <div class="card border-amber-800/50 bg-amber-950/20 text-sm text-amber-200/90">
-      <span class="font-semibold">Preseason projections.</span>
-      Week {data.week} is built from priors computed before the season — no
-      in-season usage behind them. The disagreement with the market is shrunk
-      hard as a result ({data.prob_fits?.receiving_yards?.shrink ?? '—'} of it is
-      kept), and the model probabilities below should be read as a ranking, not
-      as a price. They earn their credibility once settled weeks exist to
-      measure them against.
+    <div
+      class="card border-amber-800/50 bg-amber-950/20 text-xs text-amber-200/90 py-2"
+      title="Week 1 projections are priors computed in August with no in-season usage behind them. The disagreement with the market is shrunk hard as a result, and the model probabilities should be read as a ranking rather than as a price."
+    >
+      Preseason projections · shrink {data.prob_fits?.receiving_yards?.shrink ?? '—'} ·
+      read the model column as a ranking, not a price
     </div>
   {/if}
 
@@ -160,7 +154,7 @@
         <input type="checkbox" bind:checked={onlySignals} class="accent-indigo-500" />
         Only rows past the threshold
       </label>
-      <label class="flex items-center gap-2 text-slate-300">
+      <label class="flex items-center gap-2 text-slate-300" title={data.passing_yards_caveat}>
         <input type="checkbox" bind:checked={includeUnbettable} class="accent-indigo-500" />
         Include passing yards
       </label>
@@ -179,29 +173,15 @@
     </div>
 
     {#if data.held_prior_only?.length}
-      <!-- Rows that cleared the threshold on a projection with no player
-           information behind it. Shown rather than dropped: a long list here
-           is a signal about the upstream table, not about the players. -->
-      <div class="card border-amber-800/50 bg-amber-950/20 text-sm text-amber-200/90">
-        <span class="font-semibold">
-          {data.held_prior_only.length} row{data.held_prior_only.length === 1 ? '' : 's'} held back.
-        </span>
-        These cleared the threshold, but their projection is a positional prior
-        — draft capital through a curve — with no read on the player in it, so
-        the gap measures the prior's distance from the market rather than
-        anything about the player:
+      <div
+        class="card border-amber-800/50 bg-amber-950/20 text-xs text-amber-200/90 py-2"
+        title="These cleared the threshold on a positional prior — draft capital through a curve — with no read on the player in it, so the gap measures the prior's distance from the market. Established players appearing here mean the projections table upstream is stale or failed to match their history."
+      >
+        {data.held_prior_only.length} held back (prior only):
         <span class="text-amber-200">
-          {data.held_prior_only.slice(0, 6).map((r) => r.player).join(', ')}{data
-            .held_prior_only.length > 6 ? '…' : ''}
-        </span>.
-        Established players appearing here mean the projections table upstream
-        is stale or failed to match their history.
-      </div>
-    {/if}
-
-    {#if includeUnbettable}
-      <div class="card border-amber-800/40 bg-amber-950/10 text-xs text-amber-200/80">
-        {data.passing_yards_caveat}
+          {data.held_prior_only.slice(0, 8).map((r) => r.player).join(', ')}{data
+            .held_prior_only.length > 8 ? '…' : ''}
+        </span>
       </div>
     {/if}
 
@@ -236,10 +216,9 @@
     {#each groups as g (g.name)}
     <section class="card overflow-hidden p-0">
       <div class="px-5 py-4 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
-        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider" title={g.blurb}>
           {g.name} <span class="text-slate-600 normal-case font-normal">· {g.rows.length}</span>
         </h2>
-        <span class="text-xs text-slate-500">{g.blurb}</span>
       </div>
 
       {#if g.rows.length === 0}
@@ -251,61 +230,57 @@
           <table class="w-full text-sm">
             <thead>
               <tr class="border-b border-border text-xs font-medium text-slate-400 uppercase tracking-wider">
-                <th class="text-left px-4 py-3">Bet</th>
-                <th class="text-left px-4 py-3">Player</th>
-                <th class="text-left px-4 py-3">Market</th>
-                <th class="text-right px-4 py-3">Line</th>
-                <th class="text-right px-4 py-3" title="The projection as published, before rescaling.">Proj</th>
-                <th class="text-right px-4 py-3" title="The projection restated on the market's scale.">Adj</th>
-                <th class="text-right px-4 py-3" title="Projection minus line, as published. Biased toward UNDER on good players.">Raw gap</th>
-                <th class="text-right px-4 py-3" title="The gap after rescaling — what the signal is measured on.">Gap</th>
-                <th class="text-right px-4 py-3">Price</th>
-                <th class="text-right px-4 py-3">Model</th>
-                <th class="text-right px-4 py-3">Edge</th>
-                <th class="text-right px-4 py-3">EV/$1</th>
-                <th class="text-left px-4 py-3">Game</th>
+                <th class="text-left px-3 py-3">Bet</th>
+                <th class="text-left px-3 py-3">Player</th>
+                <th class="text-left px-3 py-3">Market</th>
+                <th class="text-right px-3 py-3">Line</th>
+                <th class="text-right px-3 py-3" title="The projection as published, before rescaling.">Proj</th>
+                <th class="text-right px-3 py-3" title="The projection restated on the market's scale.">Adj</th>
+                <th class="text-right px-3 py-3 whitespace-nowrap" title="Projection minus line, as published. Biased toward UNDER on good players.">Raw</th>
+                <th class="text-right px-3 py-3" title="The gap after rescaling — what the signal is measured on.">Gap</th>
+                <th class="text-right px-3 py-3">Price</th>
+                <th class="text-right px-3 py-3">Model</th>
+                <th class="text-right px-3 py-3">Edge</th>
+                <th class="text-right px-3 py-3">EV/$1</th>
+                <th class="text-left px-3 py-3">Game</th>
               </tr>
             </thead>
             <tbody>
               {#each g.rows as r (r.market + r.key + r.line)}
                 <tr class="border-b border-border/50 hover:bg-surface-600/30 {r.bettable ? '' : 'opacity-60'}">
-                  <td class="px-4 py-2.5">
+                  <td class="px-3 py-2.5">
                     <span class="inline-block px-2 py-0.5 text-xs rounded border {sideClass(r.signal || r.side || '')}">
                       {r.signal || r.side || '—'}
                     </span>
                   </td>
-                  <td class="px-4 py-2.5 text-slate-200 font-medium">
+                  <td class="px-3 py-2.5 text-slate-200 font-medium whitespace-nowrap">
                     {r.player}
                     <span class="text-xs text-slate-500">{r.position ?? ''} {r.team ?? ''}</span>
                   </td>
-                  <td class="px-4 py-2.5 text-slate-400">{MARKET_LABEL[r.market] ?? r.market}</td>
-                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-200">{r.line}</td>
-                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-500">{r.projection}</td>
-                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-300">{r.adjusted}</td>
-                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-600">{fmtSigned(r.raw_gap)}</td>
-                  <td class="px-4 py-2.5 text-right tabular-nums font-medium
+                  <td class="px-3 py-2.5 text-slate-400 whitespace-nowrap">{MARKET_LABEL[r.market] ?? r.market}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums text-slate-200">{r.line}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums text-slate-500">{r.projection}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums text-slate-300">{r.adjusted}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums text-slate-600">{fmtSigned(r.raw_gap)}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums font-medium
                              {r.residual > 0 ? 'text-emerald-400' : 'text-amber-400'}">
                     {fmtSigned(r.residual)}
                   </td>
-                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-300">
-                    {fmtOdds(r.odds)}
-                    <span class="block text-xs text-slate-600">
-                      {fmtOdds(r.over_odds)}/{fmtOdds(r.under_odds)}
-                    </span>
-                  </td>
-                  <td class="px-4 py-2.5 text-right tabular-nums text-slate-200">
-                    {fmtPct(r.model_p)}
-                    <span class="block text-xs text-slate-600" title="Before anchoring to the market">
-                      raw {fmtPct(r.model_p_raw)}
-                    </span>
-                  </td>
-                  <td class="px-4 py-2.5 text-right tabular-nums {evClass(r.ev)}">
+                  <td
+                    class="px-3 py-2.5 text-right tabular-nums text-slate-300"
+                    title="Over {fmtOdds(r.over_odds)} / under {fmtOdds(r.under_odds)}"
+                  >{fmtOdds(r.odds)}</td>
+                  <td
+                    class="px-3 py-2.5 text-right tabular-nums text-slate-200"
+                    title="{fmtPct(r.model_p_raw)} before anchoring to the market"
+                  >{fmtPct(r.model_p)}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums {evClass(r.ev)}">
                     {r.edge_pts != null ? fmtSigned(r.edge_pts) : '—'}
                   </td>
-                  <td class="px-4 py-2.5 text-right tabular-nums {evClass(r.ev)}">{fmtEv(r.ev)}</td>
-                  <td class="px-4 py-2.5 text-slate-500 text-xs">
-                    {r.event ?? '—'}
-                    <span class="block text-slate-600">{fmtKickoff(r.kickoff)}</span>
+                  <td class="px-3 py-2.5 text-right tabular-nums {evClass(r.ev)}">{fmtEv(r.ev)}</td>
+                  <td class="px-3 py-2.5 text-slate-500 text-xs whitespace-nowrap" title={r.event ?? ''}>
+                    {shortEvent(r.event)}
+                    <span class="text-slate-600"> · {fmtKickoff(r.kickoff)}</span>
                   </td>
                 </tr>
               {/each}
@@ -324,57 +299,50 @@
 
     <!-- How much work the rescaling is doing -->
     <section class="card p-0 overflow-hidden">
-      <div class="px-5 py-4 border-b border-border">
-        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-          Rescaling
-        </h2>
-        <p class="text-xs text-slate-500 mt-1">
-          The projections regress toward the mean and the lines don't, so the raw
-          gap reads that shrinkage as signal — it wants the under on nearly every
-          star. Each market is refit weekly against its own board; a slope of 1.0
-          would mean no correction was needed.
-        </p>
+      <div class="px-5 py-4 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
+        <h2
+          class="text-sm font-semibold text-slate-300 uppercase tracking-wider"
+          title="The projections regress toward the mean and the lines don't, so the raw gap reads that shrinkage as signal — it wants the under on nearly every star. Each market is refit weekly against its own board; a slope of 1.0 would mean no correction was needed."
+        >Rescaling</h2>
+        <span class="text-xs text-slate-500 tabular-nums">
+          <span title="Rows where the raw rule and the rescaled one pick the same side.">{bothAgree} agree</span>
+          · <span title="Rows the raw rule fires on and the rescaled one rejects — the shrinkage artefacts.">{rawOnly} raw only</span>
+          {#if data.unmatched.length}
+            · <span title="Priced players with no projection to join: {data.unmatched.slice(0, 8).join(', ')}">{data.unmatched.length} unmatched</span>
+          {/if}
+        </span>
       </div>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead>
             <tr class="border-b border-border text-xs font-medium text-slate-400 uppercase tracking-wider">
-              <th class="text-left px-4 py-3">Market</th>
-              <th class="text-right px-4 py-3">Slope</th>
-              <th class="text-right px-4 py-3">Intercept</th>
-              <th class="text-right px-4 py-3">Players fit</th>
-              <th class="text-right px-4 py-3" title="Log-odds shift applied to centre the model on the market">Anchor</th>
-              <th class="text-right px-4 py-3" title="Fraction of the disagreement kept after anchoring">Shrink</th>
+              <th class="text-left px-3 py-3">Market</th>
+              <th class="text-right px-3 py-3">Slope</th>
+              <th class="text-right px-3 py-3">Intercept</th>
+              <th class="text-right px-3 py-3">Players fit</th>
+              <th class="text-right px-3 py-3" title="Log-odds shift applied to centre the model on the market">Anchor</th>
+              <th class="text-right px-3 py-3" title="Fraction of the disagreement kept after anchoring">Shrink</th>
             </tr>
           </thead>
           <tbody>
             {#each Object.entries(data.fits) as [m, f]}
               <tr class="border-b border-border/50">
-                <td class="px-4 py-2.5 text-slate-300">{MARKET_LABEL[m] ?? m}</td>
-                <td class="px-4 py-2.5 text-right tabular-nums {f.slope != null && Math.abs(f.slope - 1) > 0.15 ? 'text-amber-400' : 'text-slate-300'}">
+                <td class="px-3 py-2.5 text-slate-300">{MARKET_LABEL[m] ?? m}</td>
+                <td class="px-3 py-2.5 text-right tabular-nums {f.slope != null && Math.abs(f.slope - 1) > 0.15 ? 'text-amber-400' : 'text-slate-300'}">
                   {f.slope ?? '—'}
                 </td>
-                <td class="px-4 py-2.5 text-right tabular-nums text-slate-400">{f.intercept ?? '—'}</td>
-                <td class="px-4 py-2.5 text-right tabular-nums text-slate-500">{f.n}</td>
-                <td class="px-4 py-2.5 text-right tabular-nums text-slate-400">
+                <td class="px-3 py-2.5 text-right tabular-nums text-slate-400">{f.intercept ?? '—'}</td>
+                <td class="px-3 py-2.5 text-right tabular-nums text-slate-500">{f.n}</td>
+                <td class="px-3 py-2.5 text-right tabular-nums text-slate-400">
                   {data.prob_fits?.[m]?.offset ?? '—'}
                 </td>
-                <td class="px-4 py-2.5 text-right tabular-nums text-slate-400">
+                <td class="px-3 py-2.5 text-right tabular-nums text-slate-400">
                   {data.prob_fits?.[m]?.shrink ?? '—'}
                 </td>
               </tr>
             {/each}
           </tbody>
         </table>
-      </div>
-      <div class="px-5 py-3 border-t border-border text-xs text-slate-500">
-        On this board the raw rule and the rescaled one agree on {bothAgree} rows
-        and the raw rule fires on {rawOnly} more that the rescaled one rejects.
-        Those {rawOnly} are the shrinkage artefacts.
-        {#if data.unmatched.length}
-          · {data.unmatched.length} priced player{data.unmatched.length === 1 ? '' : 's'}
-          had no projection to join: {data.unmatched.slice(0, 5).join(', ')}
-        {/if}
       </div>
     </section>
   {/if}

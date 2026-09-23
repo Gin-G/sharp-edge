@@ -136,6 +136,17 @@ export const GROUP_BLURB: Record<string, string> = {
   Passing: 'Quarterback yardage — runs 4-5 points overconfident, off the card',
 };
 
+/** "Atlanta Falcons @ Green Bay Packers" -> "Falcons @ Packers".
+ *
+ *  The full names are three lines wide in a table cell and the nickname alone
+ *  is unambiguous across the league. */
+export function shortEvent(event: string | null | undefined): string {
+  if (!event) return '—';
+  const parts = event.split(' @ ');
+  if (parts.length !== 2) return event;
+  return parts.map((t) => t.trim().split(' ').pop() ?? t).join(' @ ');
+}
+
 /** Kickoff as a short local weekday + time. */
 export function fmtKickoff(iso: string | null): string {
   if (!iso) return '—';

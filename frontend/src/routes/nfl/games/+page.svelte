@@ -51,7 +51,8 @@
 <div class="space-y-6">
   <div class="flex items-center justify-between flex-wrap gap-3">
     <p class="text-sm text-slate-400">
-      {#if data}Week {data.week}, {data.season} — {/if}moneyline, spread and total
+      {#if data}Week {data.week}, {data.season} —{/if}
+      moneyline, spread and total
     </p>
     <button
       class="px-3 py-1.5 rounded-lg text-sm font-medium bg-surface-700 text-slate-300 hover:bg-surface-600 disabled:opacity-50"
@@ -64,25 +65,12 @@
     <div class="card border-red-800 bg-red-950/30 text-red-300 text-sm">{error}</div>
   {/if}
 
-  <!-- No model here, and that is a finding rather than an omission. -->
-  <div class="card border-slate-700 bg-surface-800/60 text-sm text-slate-300 space-y-2">
-    <p>
-      <span class="font-semibold text-slate-200">No moneyline picks — the closing line is already right.</span>
-      Measured on 2,884 regular-season games from 2015 to 2025, using nflverse's
-      real closing prices, the devigged line is calibrated at every level: it
-      says 64.8% and the home team wins 61.7%, it says 74.9% and they win 75.8%,
-      it says 84.7% and they win 86.9%. Those gaps are noise, not a pattern.
-    </p>
-    <p class="text-slate-400">
-      Every naive strategy loses roughly the vig — always home
-      <span class="tabular-nums">−5.01%</span>, always away
-      <span class="tabular-nums">−2.41%</span>, always favourite
-      <span class="tabular-nums">−2.90%</span>, always underdog
-      <span class="tabular-nums">−4.52%</span> — at a median overround of 2.7%.
-      Beating that needs a model genuinely better than the market's, and nothing
-      here is. The prices are listed as context for the prop board; they are not
-      a bet list.
-    </p>
+  <div
+    class="card border-slate-700 bg-surface-800/60 text-xs text-slate-400 py-2"
+    title="Measured on 2,884 regular-season games from 2015-2025 against nflverse closing prices, the devigged line is calibrated at every level (says 64.8%, wins 61.7%; says 74.9%, wins 75.8%; says 84.7%, wins 86.9%). Every naive strategy loses roughly the vig: always home -5.01%, always away -2.41%, always favourite -2.90%, always underdog -4.52%, at a median overround of 2.7%."
+  >
+    Prices only — no model. The closing line is already calibrated, so these are
+    context for the prop board rather than a bet list.
   </div>
 
   {#if loading && !data}
