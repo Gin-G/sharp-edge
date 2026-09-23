@@ -84,6 +84,26 @@
         // The season's open question — see screen.flag_role_conflicts.
         { title: 'By role conflict', rows: (data.by_role_conflict ?? []).map((r) => ({
             label: r.role_conflict ? 'We disagree on role' : 'Agrees with the market', ...r })) },
+        // ...and whether the depth chart, a third source, settles it. This is
+        // the split that says if reading the chart was worth anything.
+        { title: 'By depth chart', rows: (data.by_role_verdict ?? []).map((r) => ({
+            label: r.verdict === 'market' ? 'Chart backs the market'
+              : r.verdict === 'model' ? 'Chart backs us'
+              : 'Chart has no view', ...r })) },
+        // Picks on a player whose group lost work to an injury. card.py refuses
+        // the unders in the 'major' band, so the overs are what this learns
+        // from — see VACATED_SHARE_BLOCKS_UNDER.
+        { title: 'By inherited role', rows: (data.by_vacated ?? []).map((r) => ({
+            label: r.vacated === 'major' ? 'Inherited a third or more'
+              : r.vacated === 'minor' ? 'Inherited something'
+              : 'Group intact', ...r })) },
+        // Only questionable survives the card guard, so this asks one thing:
+        // does backing through a questionable tag cost more than the market
+        // has already priced?
+        { title: 'By injury status', rows: (data.by_availability ?? []).map((r) => ({
+            label: r.avail === 'ACTIVE' ? 'No designation'
+              : r.avail === 'unknown' ? 'Not on the feeds'
+              : r.avail.toLowerCase().replace(/^./, (c) => c.toUpperCase()), ...r })) },
       ]
     : [];
 </script>

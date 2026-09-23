@@ -97,6 +97,13 @@ def _metrics(row: dict) -> str:
     keep = ("model_p_raw", "fair_p", "implied_p", "over_odds", "under_odds",
             "raw_gap", "threshold", "prediction_type", "exp_games", "position",
             "kickoff", "sgm", "role_conflict", "role_conflict_with",
+            "role_conflict_verdict",
+            # What the availability feeds said at the moment of the pick. These
+            # cannot be reconstructed afterwards — nflverse overwrites a week's
+            # roster and injury rows in place, so by the time a pick settles the
+            # feed says what was true on Sunday and not what was true when the
+            # bet was recorded. See nfl/availability.py.
+            "avail", "avail_reason", "depth_rank", "vacated_share",
             "matchup_factor", "success_rate_factor", "usage_projection")
     return json.dumps({k: row.get(k) for k in keep if row.get(k) is not None})
 
@@ -740,6 +747,43 @@ async def track_record(season: Optional[int] = None) -> dict:
                 key=lambda kv: kv[0],
             )
         ],
+        # Whether the depth chart picked the winner of a role conflict. The
+        # flag above says we disagreed with the market about who plays; this
+        # says who a third source sided with, and whether that was worth
+        # knowing. See screen._depth_verdict.
+        "by_role_verdict": [
+            {"verdict": k, **_bucket(v)}
+            for k, v in sorted(
+                _split([r for r in rows if _metric(r, "role_conflict")],
+                       lambda r: _metric(r, "role_conflict_verdict") or "unknown"
+                       ).items(),
+                key=lambda kv: str(kv[0]),
+            )
+        ],
+        # Picks made on a player whose position group had lost work to an
+        # injury. ``card.VACATED_SHARE_BLOCKS_UNDER`` refuses the unders above
+        # a third on the argument that the projection is stale-low there; this
+        # is the split that says whether the argument holds, and it needs the
+        # overs — which are not refused — to say anything at all.
+        "by_vacated": [
+            {"vacated": k, **_bucket(v)}
+            for k, v in sorted(
+                _split(rows, lambda r: _vacated_bucket(
+                    _metric(r, "vacated_share"))).items(),
+                key=lambda kv: str(kv[0]),
+            )
+        ],
+        # Picks recorded on a player carrying an injury designation. Only
+        # questionable survives the card guard, so this is really asking one
+        # question: does the market price a questionable tag correctly, or does
+        # backing through one cost us?
+        "by_availability": [
+            {"avail": k, **_bucket(v)}
+            for k, v in sorted(
+                _split(rows, lambda r: _metric(r, "avail") or "unknown").items(),
+                key=lambda kv: str(kv[0]),
+            )
+        ],
         "by_week": sorted(
             ({"week": k, **_bucket(v)} for k, v in
              _by_week(rows).items()), key=lambda d: d["week"], reverse=True,
@@ -751,6 +795,25 @@ async def track_record(season: Optional[int] = None) -> dict:
         },
         "picks": rows[:400],
     }
+
+
+def _vacated_bucket(share) -> str:
+    """Coarse buckets, because the sample will never support fine ones.
+
+    Eighteen weeks of a dozen suggestions is a couple of hundred picks in a
+    season, and only a handful carry a vacancy at all. Three buckets is already
+    optimistic; splitting on the exact share would produce cells of one.
+    """
+    if share is None:
+        return "none"
+    try:
+        v = float(share)
+    except (TypeError, ValueError):
+        return "none"
+    if v <= 0:
+        return "none"
+    from .card import VACATED_SHARE_BLOCKS_UNDER
+    return "major" if v >= VACATED_SHARE_BLOCKS_UNDER else "minor"
 
 
 def _split(rows: list[dict], key) -> dict:

@@ -35,8 +35,9 @@ from typing import Optional
 import httpx
 
 from ..fanduel.odds import american_to_implied
-from . import (card as card_mod, gamemodel, matchup as nfl_matchup, model,
-               odds as nfl_odds, projections as nfl_proj, usage as nfl_usage)
+from . import (availability as nfl_avail, card as card_mod, gamemodel,
+               matchup as nfl_matchup, model, odds as nfl_odds,
+               projections as nfl_proj, usage as nfl_usage)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,10 @@ class NFLBoard:
     game_model: list[dict] = field(default_factory=list)
     fits: dict = field(default_factory=dict)
     prob_fits: dict = field(default_factory=dict)
+    #: Who is out this week, and which position groups lost work because of it.
+    #: See nfl/availability.py — this is the only view of role in the system.
+    availability: dict = field(default_factory=dict)
+    vacancies: list = field(default_factory=list)
     preseason: bool = False
     odds_age: Optional[int] = None
     odds_error: Optional[str] = None
@@ -168,11 +173,34 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
         logger.warning("[nfl] usage projections unavailable: %s", e)
         te_usage = {}
 
+    # Who is playing. Fetched here rather than inside the loop because every
+    # market needs it and it is three parquet reads; guarded like the rest,
+    # because a board that refuses to build is worse than one that cannot see
+    # an absence.
+    try:
+        avail = await asyncio.to_thread(
+            nfl_avail.week_board, season, week, force)
+        usage_base = await asyncio.to_thread(
+            nfl_avail.usage_baseline, season, week, force)
+    except Exception as e:
+        logger.warning("[nfl] availability unavailable: %s", e)
+        avail, usage_base = nfl_avail.Board(season, week), {}
+    vacancy_by_component = {
+        c: nfl_avail.vacancies(avail, c, usage_base)
+        for c in {v[0] for v in _MARKET_INPUTS.values()}
+    }
+
     got = await nfl_odds.cached_board(wk.window(), state=state, force=force)
     fd = got["board"]
 
     board = NFLBoard(season=season, week=week, preseason=proj.preseason,
                      odds_age=got["age_seconds"], odds_error=got["error"],
+                     availability=avail.summary(),
+                     vacancies=sorted(
+                         (v.as_dict()
+                          for vs in vacancy_by_component.values()
+                          for v in vs.values()),
+                         key=lambda d: -d["share"]),
                      built_at=time.time())
     if fd is None:
         return board
@@ -205,6 +233,30 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
     # How much of any disagreement with the market to keep. Set once for the
     # whole board: it is a statement about the projections, not about a market.
     shrink = (model.SHRINK_PRESEASON if proj.preseason else model.SHRINK_INSEASON)
+
+    def _availability_fields(p: dict, component: str) -> dict:
+        """What the row knows about who is playing.
+
+        Two separate facts and they are kept separate on purpose. ``avail`` is
+        about this player; ``vacated_share`` is about the men beside him, and
+        it is the one that makes the projection wrong — a player whose group
+        has lost 44% of its carries is being priced in a role our number has
+        never seen him hold.
+        """
+        who = avail.get(p.get("player_id"), p.get("key"))
+        vac = vacancy_by_component.get(component, {}).get(
+            (p.get("team"), p.get("position")))
+        # A player cannot inherit from himself. Without this an out player
+        # whose group's vacancy is entirely his own reads as promoted.
+        if vac is not None and who is not None and not who.playable:
+            vac = None
+        return {
+            "avail": who.status if who else None,
+            "avail_reason": who.reason if who else None,
+            "depth_rank": who.depth_rank if who else None,
+            "vacated_share": round(vac.share, 3) if vac else None,
+            "vacated_by": [v["player"] for v in vac.players] if vac else None,
+        }
 
     matched: set[str] = set()
     for market in model.MARKETS:
@@ -325,6 +377,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 "over_selection_id": ln.over_selection,
                 "under_selection_id": ln.under_selection,
                 "sgm": ln.sgm,
+                **_availability_fields(p, component),
                 **priced,
             })
 
@@ -388,6 +441,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             "team": p.get("team"), "event": q["event"],
             "fd_event_id": q["fd_event_id"], "kickoff": q["kickoff"],
             "projected_tds": round(td_rate, 3) if td_rate else None,
+            **_availability_fields(p, "rushing_yards"),
             "fd_market_id": q["fd_market_id"],
             "fd_selection_id": q["fd_selection_id"],
             "sgm": q["sgm"],
@@ -428,6 +482,22 @@ def flag_role_conflicts(props: list[dict]) -> int:
     like anything else, and the track record splits on the flag — so after a
     few weeks the question is answered with results instead of reasoning.
 
+    **The depth chart now adjudicates them.** Until availability was wired in,
+    the flag could say two players disagreed and nothing more: which of us was
+    right about the role was unknowable from inside the board. ``depth_rank``
+    settles it for the cases where the two orderings differ, and
+    ``role_conflict_verdict`` records the answer — ``"market"`` when the chart
+    ranks the book's favoured player ahead, ``"model"`` when it ranks ours
+    ahead, ``None`` when the chart has no view.
+
+    On the week-3 board that split 22 "model" to 8 "market", which is worth
+    writing down because it is the opposite of what the module docstring above
+    assumes: the chart mostly agrees with us, and the market is paying for
+    something the depth chart does not see either. It is recorded rather than
+    acted on — whether either verdict predicts anything is a question for the
+    track record, and answering it is exactly why the flag was never a
+    filter.
+
     Returns the number of rows flagged.
     """
     from collections import defaultdict
@@ -437,6 +507,7 @@ def flag_role_conflicts(props: list[dict]) -> int:
     for r in props:
         r.setdefault("role_conflict", False)
         r.setdefault("role_conflict_with", None)
+        r.setdefault("role_conflict_verdict", None)
         if r.get("team") and r.get("adjusted") is not None:
             groups[(r["team"], r["market"])].append(r)
 
@@ -448,12 +519,26 @@ def flag_role_conflicts(props: list[dict]) -> int:
                 continue
             # The market's more-favoured player projects below his own teammate.
             if hi["adjusted"] < lo["adjusted"]:
+                verdict = _depth_verdict(hi, lo)
                 for row, other in ((hi, lo), (lo, hi)):
                     if not row["role_conflict"]:
                         flagged += 1
                     row["role_conflict"] = True
                     row["role_conflict_with"] = other["player"]
+                    # First verdict wins. A player can conflict with several
+                    # teammates and overwriting would leave whichever pair the
+                    # iteration happened to reach last.
+                    if row["role_conflict_verdict"] is None:
+                        row["role_conflict_verdict"] = verdict
     return flagged
+
+
+def _depth_verdict(market_favoured: dict, model_favoured: dict):
+    """Which side of a role conflict the depth chart takes, if either."""
+    hi, lo = market_favoured.get("depth_rank"), model_favoured.get("depth_rank")
+    if hi is None or lo is None or hi == lo:
+        return None
+    return "market" if hi < lo else "model"
 
 
 def _signal(residual: float, threshold: float) -> str:
@@ -560,6 +645,7 @@ def as_payload(board: NFLBoard) -> dict:
     signals = [r for r in board.props if r["signal"] and r["bettable"]]
     suggested = card_mod.suggestions(board.props)
     the_card = card_mod.build(board.props)
+    withheld = card_mod.withheld(board.props)
     # Rows that would have fired but for the prior-only guard. Worth reporting
     # rather than silently dropping: a large number here means the projections
     # table upstream is stale or mis-joining names.
@@ -576,6 +662,27 @@ def as_payload(board: NFLBoard) -> dict:
         # two legs; the suggestions are what the track record is built from.
         "suggestions": suggested,
         "role_conflicts": sum(1 for r in suggested if r.get("role_conflict")),
+        # What the availability feeds took off the board, reported rather than
+        # silently applied — a guard nobody can see is a guard nobody revisits.
+        "availability": {
+            **board.availability,
+            "vacancies": board.vacancies,
+            "rows_out": sum(1 for r in board.props
+                            if r.get("avail") not in (None, "ACTIVE")),
+            "withheld_unavailable": [
+                {k: r.get(k) for k in ("player", "team", "market", "line",
+                                       "side", "edge_pts", "avail",
+                                       "avail_reason")}
+                for r in withheld["unavailable"]
+            ],
+            "withheld_vacated_under": [
+                {k: r.get(k) for k in ("player", "team", "market", "line",
+                                       "side", "edge_pts", "vacated_share",
+                                       "vacated_by")}
+                for r in withheld["vacated_under"]
+            ],
+            "vacated_share_blocks_under": card_mod.VACATED_SHARE_BLOCKS_UNDER,
+        },
         "card": {
             "legs": the_card,
             "summary": card_mod.summarise(the_card),

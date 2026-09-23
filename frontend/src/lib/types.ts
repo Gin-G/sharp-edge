@@ -308,6 +308,24 @@ export interface NflProp {
    *  than filtered so the record can test whether it actually loses. */
   role_conflict?: boolean;
   role_conflict_with?: string | null;
+  /** Which side of that disagreement the depth chart takes. 'market' means
+   *  our number is most likely the stale one; null means the chart has no
+   *  view. Recorded, not acted on. */
+  role_conflict_verdict?: 'market' | 'model' | null;
+
+  /** Whether this man is playing, from the roster designation and the injury
+   *  report. OUT and DOUBTFUL never reach the card; QUESTIONABLE does.
+   *  See nfl/availability.py. */
+  avail?: 'ACTIVE' | 'QUESTIONABLE' | 'DOUBTFUL' | 'OUT' | null;
+  avail_reason?: string | null;
+  /** Position rank on the latest published depth chart. */
+  depth_rank?: number | null;
+  /** The share of this player's position group's recent production that
+   *  belongs to men who are out — i.e. how much work he just inherited, and
+   *  how stale the projection is as a result. */
+  vacated_share?: number | null;
+  vacated_by?: string[] | null;
+
   prediction_type: string | null;
   exp_games: number | null;
 
@@ -425,6 +443,17 @@ export interface NflTrackRecord {
   by_side: ({ side: string } & NflTrackBucket)[];
   by_week: ({ week: number } & NflTrackBucket)[];
   by_role_conflict: ({ role_conflict: boolean } & NflTrackBucket)[];
+  /** Of the role conflicts, which side the depth chart took — and whether
+   *  knowing that was worth anything. */
+  by_role_verdict?: ({ verdict: string } & NflTrackBucket)[];
+  /** Picks on a player whose position group had lost work to an injury.
+   *  'major' is the band where card.py refuses the under, so the overs are
+   *  what this split has to learn from. */
+  by_vacated?: ({ vacated: string } & NflTrackBucket)[];
+  /** Picks carrying an injury designation. Only QUESTIONABLE survives the
+   *  card guard, so this is really asking whether backing through a
+   *  questionable tag costs us anything the market has not already priced. */
+  by_availability?: ({ avail: string } & NflTrackBucket)[];
   cards: {
     played: number;
     won: number;
@@ -450,6 +479,24 @@ export interface NflTrackRecord {
   }[];
 }
 
+/** One position group's loss: who is out, and how much of the group's recent
+ *  production went with them. */
+export interface NflVacancy {
+  team: string;
+  position: string;
+  component: string;
+  share: number;
+  players: Array<{ player: string; status: string; reason: string | null;
+                   baseline: number }>;
+}
+
+/** A row that would have been suggested but for an availability guard. The
+ *  two lists have different reasons and so fill in different halves of this —
+ *  one type rather than two so they can be rendered together. */
+export type NflWithheld = Partial<Pick<NflProp, 'player' | 'team' | 'market' |
+  'line' | 'side' | 'edge_pts' | 'avail' | 'avail_reason' | 'vacated_share' |
+  'vacated_by'>>;
+
 export interface NflScreen {
   season: number;
   week: number;
@@ -466,6 +513,22 @@ export interface NflScreen {
    *  set the track record is built from. */
   suggestions: NflProp[];
   role_conflicts: number;
+  /** Who is out this week, what their absence vacated, and what that took off
+   *  the board. Reported rather than silently applied. */
+  availability?: {
+    season: number;
+    week: number;
+    players: number;
+    counts: Record<string, number>;
+    depth_as_of: string | null;
+    injury_report_rows: number;
+    errors: string[];
+    rows_out: number;
+    vacancies: NflVacancy[];
+    withheld_unavailable: NflWithheld[];
+    withheld_vacated_under: NflWithheld[];
+    vacated_share_blocks_under: number;
+  };
   card: {
     legs: NflProp[];
     summary: NflCardSummary;

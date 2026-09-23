@@ -7,6 +7,8 @@ and a pricing model rather than a data pipeline.
 
   projections  NFL-API client; undoes the availability discount baked into the
                stored component projections
+  availability who is out this week and whose role grew because of it — the
+               only view of injuries, inactives and depth chart in the system
   odds         FanDuel's public NFL board — two-sided prop lines, alt ladders,
                anytime-TD prices, game markets
   model        projection -> probability -> edge, and the market rescaling that
@@ -16,6 +18,6 @@ and a pricing model rather than a data pipeline.
   tracking     freeze the week before kickoff, settle it after, score it
 """
 
-from . import (card, matchup, model, names, odds, projections, screen,  # noqa: F401
-               usage,
+from . import (availability, card, matchup, model, names, odds,  # noqa: F401
+               projections, screen, usage,
                tracking)

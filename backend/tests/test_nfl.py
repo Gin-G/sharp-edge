@@ -1411,3 +1411,266 @@ async def test_game_record_reports_against_the_market(tmp_path):
         assert abs(3.0 - 4) < abs(7.0 - 4)
     finally:
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Availability: who is playing, and whose role grew because someone is not
+# ---------------------------------------------------------------------------
+
+from sharp_edge.nfl import availability as avail  # noqa: E402
+
+
+def _player(key, **kw):
+    base = {"key": key, "player_id": key.replace(" ", "-"), "player": key.title(),
+            "team": "MIN", "position": "RB"}
+    base.update(kw)
+    return avail.Player(**base)
+
+
+def _board(*players):
+    b = avail.Board(season=2026, week=3)
+    for p in players:
+        b.by_id[p.player_id] = p
+        b.by_key[p.key] = p
+    return b
+
+
+@pytest.mark.parametrize("roster,abbr,expected,why", [
+    ("RES", "R01", avail.OUT, "injured reserve is not a forecast"),
+    ("CUT", "W03", avail.OUT, "not on the roster"),
+    ("INA", "A01", avail.OUT, "the settled inactive list"),
+    # The decisive one: status still reads ACT and the player is out anyway.
+    # No player carrying this designation recorded a stat on any settled week.
+    ("ACT", "I01", avail.OUT, "designated inactive for the upcoming game"),
+    ("ACT", "A01", avail.ACTIVE, "nothing wrong with him"),
+    ("DEV", "P01", avail.ACTIVE, "practice squad can be elevated"),
+])
+def test_roster_designation_decides_availability(roster, abbr, expected, why):
+    status, _ = avail._verdict(roster, abbr, None, None, None)
+    assert status == expected, why
+
+
+@pytest.mark.parametrize("report,expected", [
+    ("Out", avail.OUT),
+    ("Doubtful", avail.DOUBTFUL),
+    ("Questionable", avail.QUESTIONABLE),
+    (None, avail.ACTIVE),
+])
+def test_injury_report_status_maps_to_a_verdict(report, expected):
+    status, _ = avail._verdict("ACT", "A01", report, None, "Hamstring")
+    assert status == expected
+
+
+def test_a_roster_designation_outranks_a_stale_injury_report():
+    """The report is a forecast of a week; the designation is a fact about it.
+
+    Read the other way round, a "Questionable" tag left over from Wednesday
+    would override a Friday placement on injured reserve.
+    """
+    status, reason = avail._verdict("RES", "R01", "Questionable", None, "Knee")
+    assert status == avail.OUT and reason == "reserve/injured"
+
+
+def test_no_practice_is_the_softest_signal_there_is():
+    """Most of them play. It exists so a Tuesday board, built before a single
+    club has filed a report, is not simply blind."""
+    status, reason = avail._verdict(
+        "ACT", "A01", None, "Did Not Participate In Practice", "Ankle")
+    assert status == avail.QUESTIONABLE
+    assert "Ankle" in reason
+
+
+def test_doubtful_is_grouped_with_out_not_with_questionable():
+    assert avail.QUESTIONABLE in avail.PLAYABLE
+    assert avail.DOUBTFUL not in avail.PLAYABLE
+    assert avail.OUT not in avail.PLAYABLE
+
+
+def test_vacated_share_is_measured_on_the_men_who_are_gone():
+    """Minnesota's backfield, week 3: Mason to injured reserve takes 44% of the
+    rushing with him and Aaron Jones inherits it."""
+    board = _board(
+        _player("aaron jones", depth_rank=1),
+        _player("jordan mason", status=avail.OUT, reason="reserve/injured",
+                depth_rank=4),
+        _player("deejay dallas", depth_rank=2),
+    )
+    baseline = {
+        "aaron-jones": {"rushing_yards": 72.5, "team": "MIN", "position": "RB"},
+        "jordan-mason": {"rushing_yards": 59.0, "team": "MIN", "position": "RB"},
+        "deejay-dallas": {"rushing_yards": 4.0, "team": "MIN", "position": "RB"},
+    }
+    got = avail.vacancies(board, "rushing_yards", baseline)
+    vac = got[("MIN", "RB")]
+    assert round(vac.share, 2) == 0.44
+    assert [p["player"] for p in vac.players] == ["Jordan Mason"]
+
+
+def test_a_vacancy_the_projection_could_never_see():
+    """The engine drops a player the moment he lands on injured reserve.
+
+    So a share computed over the *projection set* reports a backfield that lost
+    nothing — which is precisely the failure this module exists to prevent, and
+    why the baseline is realised usage.
+    """
+    board = _board(
+        _player("aaron jones"),
+        _player("jordan mason", status=avail.OUT, reason="reserve/injured"),
+    )
+    # What the projections hold: Mason already gone.
+    assert avail.vacancies(board, "rushing_yards", {
+        "aaron-jones": {"rushing_yards": 31.4, "team": "MIN", "position": "RB"},
+    }) == {}
+    # What actually happened on the field, which still remembers him.
+    assert ("MIN", "RB") in avail.vacancies(board, "rushing_yards", {
+        "aaron-jones": {"rushing_yards": 72.5, "team": "MIN", "position": "RB"},
+        "jordan-mason": {"rushing_yards": 59.0, "team": "MIN", "position": "RB"},
+    })
+
+
+def test_a_group_that_does_not_own_the_market_reports_nothing():
+    """Without the relevance floor the largest vacancy on the board is a
+    receiving corps losing 94% of its projected *rushing* — four yards between
+    three men."""
+    board = _board(
+        _player("puka nacua", position="WR", team="LA", status=avail.OUT,
+                reason="inactive"),
+        _player("davante adams", position="WR", team="LA"),
+        _player("kyren williams", position="RB", team="LA"),
+    )
+    baseline = {
+        "puka-nacua": {"rushing_yards": 3.9, "team": "LA", "position": "WR"},
+        "davante-adams": {"rushing_yards": 0.3, "team": "LA", "position": "WR"},
+        "kyren-williams": {"rushing_yards": 95.0, "team": "LA", "position": "RB"},
+    }
+    assert ("LA", "WR") not in avail.vacancies(board, "rushing_yards", baseline)
+
+
+def test_a_vacancy_is_attributed_to_the_players_current_team():
+    """Weeks 1 and 2 run on last season's usage, so without this every board
+    credits a vacancy to whichever club the player has just left."""
+    board = _board(_player("a back", team="NO", status=avail.OUT,
+                           reason="reserve/injured"),
+                   _player("b back", team="NO"))
+    baseline = {
+        # The stats say Jacksonville; the roster says New Orleans, and the
+        # roster is describing the week being bet.
+        "a-back": {"rushing_yards": 60.0, "team": "JAX", "position": "RB"},
+        "b-back": {"rushing_yards": 40.0, "team": "JAX", "position": "RB"},
+    }
+    got = avail.vacancies(board, "rushing_yards", baseline)
+    assert ("NO", "RB") in got and ("JAX", "RB") not in got
+
+
+def test_the_id_index_beats_the_name_index():
+    p = _player("josh jones", team="SEA")
+    board = _board(p)
+    assert board.get(player_id="josh-jones").team == "SEA"
+    assert board.get(key="josh jones").team == "SEA"
+    assert board.get(player_id="nobody", key="nobody") is None
+
+
+# ---------------------------------------------------------------------------
+# What availability changes about the card
+# ---------------------------------------------------------------------------
+
+def test_a_player_who_is_out_is_never_suggested():
+    """Zay Flowers carried a posted 71.5 receiving line on the week-3 board
+    while designated inactive. A prop on a man who is not playing is void at
+    best, and a void is not a prediction."""
+    for status in (avail.OUT, avail.DOUBTFUL):
+        assert card_mod.suggestions([_prop(avail=status)]) == [], status
+    assert len(card_mod.suggestions([_prop(avail=avail.QUESTIONABLE)])) == 1
+    # Feeds down, or a player on none of them: information lost, not the card.
+    assert len(card_mod.suggestions([_prop(avail=None)])) == 1
+
+
+def test_an_under_on_an_inherited_role_is_refused():
+    """The Aaron Jones case. Mason to injured reserve takes 44% of Minnesota's
+    rushing, the market reprices Jones as the lead back within hours, and the
+    projection still describes the committee — so the residual points down by
+    construction and the under is our own stale number talking."""
+    under = _prop(side="UNDER", signal="UNDER", line=55.5, adjusted=31.0,
+                  edge_pts=15.0, market="rushing_yards", vacated_share=0.44)
+    assert card_mod.suggestions([under]) == []
+    # The over on the same row is not refused: nothing about a vacated role
+    # argues the man who inherited it will fall short.
+    over = dict(under, side="OVER", signal="OVER", adjusted=70.0)
+    assert len(card_mod.suggestions([over])) == 1
+    # And a minor vacancy leaves the under alone.
+    assert len(card_mod.suggestions([dict(under, vacated_share=0.12)])) == 1
+
+
+def test_the_depth_chart_adjudicates_a_role_conflict():
+    """Until availability was wired in the flag could say two players disagreed
+    and nothing more. Which of us was right was unknowable from inside the
+    board."""
+    def rows(hi_rank, lo_rank):
+        return [
+            # The market's favoured player — bigger line, smaller projection.
+            {"team": "JAX", "market": "rushing_yards", "player": "Tuten",
+             "line": 50.5, "adjusted": 16.9, "depth_rank": hi_rank},
+            {"team": "JAX", "market": "rushing_yards", "player": "Bigsby",
+             "line": 33.5, "adjusted": 51.4, "depth_rank": lo_rank},
+        ]
+    r = rows(1, 2)
+    assert screen.flag_role_conflicts(r) == 2
+    assert all(x["role_conflict"] for x in r)
+    assert {x["role_conflict_verdict"] for x in r} == {"market"}
+
+    r = rows(2, 1)
+    screen.flag_role_conflicts(r)
+    assert {x["role_conflict_verdict"] for x in r} == {"model"}
+
+    # No chart, no verdict — and the flag still fires, because the disagreement
+    # is real whether or not a third source can settle it.
+    r = rows(None, None)
+    assert screen.flag_role_conflicts(r) == 2
+    assert {x["role_conflict_verdict"] for x in r} == {None}
+
+
+def test_an_out_player_does_not_inherit_from_himself():
+    """A player whose group's entire vacancy is his own absence has not been
+    promoted, and must not read as though he has."""
+    board = _board(_player("a back", status=avail.OUT, reason="inactive"),
+                   _player("b back"))
+    baseline = {"a-back": {"rushing_yards": 60.0, "team": "MIN", "position": "RB"},
+                "b-back": {"rushing_yards": 40.0, "team": "MIN", "position": "RB"}}
+    got = avail.vacancies(board, "rushing_yards", baseline)
+    assert got[("MIN", "RB")].share == 0.6
+    # The screen's per-row attachment is what drops it for the absent man; see
+    # screen._availability_fields. Asserted through the card, which is where it
+    # would do damage: he is refused for being out, not suggested for a role he
+    # cannot fill.
+    assert card_mod.suggestions([_prop(avail=avail.OUT, vacated_share=0.6)]) == []
+
+
+def test_withheld_reports_only_what_the_guards_actually_cost():
+    """An out player with a posted line and a half-point edge was never going
+    to be bet. Listing him would make the guard look like it was doing work it
+    was not — and the whole point of reporting these is that they are the picks
+    that would have been made yesterday."""
+    would_have_bet = _prop(avail=avail.OUT, edge_pts=9.0)
+    never_qualified = _prop(key="scrub", avail=avail.OUT, edge_pts=0.6)
+    inherited = _prop(key="jones", side="UNDER", signal="UNDER",
+                      market="rushing_yards", line=55.5, adjusted=31.0,
+                      edge_pts=15.0, vacated_share=0.44)
+    got = card_mod.withheld([would_have_bet, never_qualified, inherited])
+    assert [r["key"] for r in got["unavailable"]] == ["a receiver"]
+    assert [r["key"] for r in got["vacated_under"]] == ["jones"]
+    # And neither reaches the tracked set.
+    keys = {r["key"] for r in card_mod.suggestions(
+        [would_have_bet, never_qualified, inherited])}
+    assert keys == set()
+
+
+def test_the_two_guards_are_reported_separately():
+    """A man who is out and whose group lost work is one row, not two — he is
+    refused for being out, and cannot also be said to have inherited a role he
+    will not be there to fill."""
+    row = _prop(avail=avail.OUT, side="UNDER", signal="UNDER", edge_pts=15.0,
+                market="rushing_yards", line=55.5, adjusted=31.0,
+                vacated_share=0.44)
+    got = card_mod.withheld([row])
+    assert len(got["unavailable"]) == 1
+    assert got["vacated_under"] == []

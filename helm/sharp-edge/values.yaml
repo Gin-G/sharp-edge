@@ -109,6 +109,18 @@ cnpg:
 # Daily NFL settlement — resolves recorded suggestions against nflverse
 # actuals, and refreshes the board so the upcoming week stays recorded even if
 # nobody opens the page. See templates/nfl-settle-cronjob.yaml.
+# The injury read — rebuilds the week's board so a designation to injured
+# reserve, a game-day inactive or a fresh depth chart reaches the card within
+# hours rather than the next morning. See templates/nfl-refresh-cronjob.yaml.
+nflRefresh:
+  enabled: true
+  # Every four hours. The depth chart republishes about twice a day and the
+  # official injury report arrives team by team through the week, so the
+  # cadence is set by the feeds rather than by the games. The availability
+  # fetch caches for two hours behind this, so nothing here is wasted.
+  schedule: "0 */4 * * *"
+  image: curlimages/curl:8.11.1
+
 nflSettle:
   enabled: true
   # 13:00 UTC daily. nflverse publishes a day or two after the games and the

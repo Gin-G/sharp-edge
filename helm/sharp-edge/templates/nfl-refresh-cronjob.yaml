@@ -1,0 +1,66 @@
+{{- if .Values.nflRefresh.enabled }}
+# The injury read.
+#
+# Separate from nfl-settle, which runs once a day because nflverse publishes
+# results once a day. Availability does not work like that: the official injury
+# report is filed **team by team through the week** — on a Tuesday it holds two
+# clubs and by Friday all thirty-two — the depth chart is republished about
+# twice a day, and a designation to injured reserve lands whenever it lands.
+# A once-daily board is a board that can be twenty-three hours behind the fact
+# that a starter is out.
+#
+# So this rebuilds the board on a cadence matched to the feeds rather than to
+# the results. It hits the same endpoint a reader would, with force=true, which
+# re-reads the three nflverse feeds (their own cache is two hours) and rewrites
+# the week's suggestions through the usual pre-kickoff guard — picks whose game
+# has started are never revised. See nfl/availability.py and
+# tracking._has_kicked_off.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Values.app.name }}-nfl-refresh
+  namespace: {{ .Values.app.namespace | default .Release.Namespace }}
+  labels:
+    app: {{ .Values.app.name }}-nfl-refresh
+spec:
+  schedule: {{ .Values.nflRefresh.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app: {{ .Values.app.name }}-nfl-refresh
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: refresh
+              image: {{ .Values.nflRefresh.image }}
+              command:
+                - /bin/sh
+                - -c
+                # The board builds in the background, so the first call returns
+                # immediately with a warming status and the second reads the
+                # result — worth doing so the job log says what the refresh
+                # actually found rather than only that it was asked for.
+                #
+                # Every line at one indentation: YAML's folded style keeps the
+                # newline on any line indented further than the first, which
+                # leaves the shell trying to run a bare `-w` as a command.
+                - >-
+                  set -e;
+                  BASE="http://{{ .Values.app.name }}-backend:{{ .Values.backend.port }}";
+                  curl -sS -m 30 "$BASE/nfl/screen?force=true" -o /dev/null -w 'refresh requested: %{http_code}\n' || true;
+                  sleep 90;
+                  curl -sS -m 120 "$BASE/nfl/screen" | tr ',' '\n' | grep -E '"(rows_out|OUT|DOUBTFUL|QUESTIONABLE|depth_as_of|injury_report_rows)"' | head -8
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 64Mi
+{{- end }}

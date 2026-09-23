@@ -33,6 +33,8 @@ from __future__ import annotations
 from typing import Iterable, Optional
 from urllib.parse import quote
 
+from . import availability
+
 # Same host and reasoning as bundle.BETSLIP_BASE — the account host opens the
 # FanDuel app directly on a phone, where the state subdomain lands on the
 # mobile website and makes you press through a second time.
@@ -101,6 +103,31 @@ MIN_LINE = {
 # the tail rather than the body — but the tail is where every role failure was.
 MAX_PROJECTION_RATIO = 2.0
 
+# How much of a position group's recent production has to belong to players who
+# are out before an UNDER on the men who remain is refused.
+#
+# **This is the one rule here that is about a fact rather than a judgement.**
+# Everything above guards against the projection being blind to role. This
+# guards against a role we can actually see having changed: when a group has
+# lost a third of its carries or targets to injured reserve, the market reprices
+# the men left behind within hours and our projection — a season-long rate for
+# the committee that no longer exists — does not. The residual is then stale by
+# construction and it points one way, down, because the projection describes a
+# smaller share than the player now has. That is an UNDER on a man whose role
+# just grew.
+#
+# Minnesota in week 3 is the case: Jordan Mason to reserve/injured takes 44% of
+# the backfield's rushing with him, Aaron Jones is the RB1, and the projection
+# still has him at 31 yards after he ran for 72 a game beside Mason.
+#
+# One third, and the number is a judgement rather than a measurement — nothing
+# here has been scored on a settled week yet. It is deliberately above the
+# reporting floor in ``availability.MIN_VACATED_SHARE`` (0.08), which is set to
+# show a vacancy rather than to act on one. The board records the share on
+# every row and the track record splits on it, so this is the first constant to
+# revisit against results.
+VACATED_SHARE_BLOCKS_UNDER = 0.33
+
 
 def _plausible(row: dict) -> bool:
     """Are the model and the market pricing the same player-week?
@@ -117,6 +144,39 @@ def _plausible(row: dict) -> bool:
     return True
 
 
+def _inherited_role(row: dict) -> bool:
+    """Is this an UNDER on a man whose position group just lost work?
+
+    Kept apart from ``_plausible`` rather than folded into it because the two
+    are different claims. ``_plausible`` says the projection is blind to role
+    and the bet should be refused in both directions. This says role has
+    visibly changed in one direction, and refuses one side. See
+    VACATED_SHARE_BLOCKS_UNDER.
+    """
+    if row.get("side") != "UNDER":
+        return False
+    share = row.get("vacated_share")
+    return share is not None and share >= VACATED_SHARE_BLOCKS_UNDER
+
+
+def _available(row: dict) -> bool:
+    """Is this man playing?
+
+    Not a modelling question and not a close one. A prop on a player who is on
+    injured reserve or listed inactive is void at best, and the model has no
+    opinion worth acting on about a player it thinks is taking a full share of
+    a game he will not be in.
+
+    Doubtful counts as out; questionable does not. See
+    ``availability.PLAYABLE`` for why those two are split rather than grouped.
+    A row with no availability at all — the feeds failed, or the player is not
+    on any of them — is allowed through, so a broken fetch costs information
+    rather than the whole card.
+    """
+    status = row.get("avail")
+    return status is None or status in availability.PLAYABLE
+
+
 def _edge_bar(row: dict) -> float:
     return UNDER_MIN_EDGE_PTS if row.get("side") == "UNDER" else MIN_EDGE_PTS
 
@@ -128,19 +188,51 @@ def suggestions(props: Iterable[dict]) -> list[dict]:
     on the order of a dozen of these, which is enough to say something about
     the model after a month; a two-leg card alone would take a season to
     produce the same number of settled outcomes.
+
+    Wider, but not blind: a player who is out is dropped here rather than
+    recorded and voided later, because a void is not a prediction and a set
+    full of them tells the track record nothing.
     """
-    out = [
-        r for r in props
-        if r.get("bettable")
-        and r.get("signal")
-        and not r.get("prior_only")
-        and r.get("side")
-        and r.get("edge_pts") is not None
-        and r["edge_pts"] >= _edge_bar(r)
-        and _plausible(r)
-    ]
+    out = [r for r in props
+           if _qualified(r) and _available(r) and not _inherited_role(r)]
     out.sort(key=lambda r: -(r.get("edge_pts") or 0))
     return out
+
+
+def _qualified(row: dict) -> bool:
+    """Everything a row must clear *except* the two availability guards.
+
+    Split out so ``withheld`` can say what those two guards actually cost,
+    rather than listing every out player who happened to carry a posted line.
+    """
+    return bool(
+        row.get("bettable")
+        and row.get("signal")
+        and not row.get("prior_only")
+        and row.get("side")
+        and row.get("edge_pts") is not None
+        and row["edge_pts"] >= _edge_bar(row)
+        and _plausible(row)
+    )
+
+
+def withheld(props: Iterable[dict]) -> dict:
+    """The rows the availability guards took, and why.
+
+    Reported on the page rather than only applied: a guard nobody can see is a
+    guard nobody revisits, and one of these two is a judgement call with no
+    settled result behind it yet.
+
+    Only rows that would otherwise have been suggested. An out player with a
+    posted line and a half-point edge was never going to be bet, and listing
+    him would make the guard look like it was doing work it was not.
+    """
+    rows = [r for r in props if _qualified(r)]
+    return {
+        "unavailable": [r for r in rows if not _available(r)],
+        "vacated_under": [r for r in rows
+                          if _available(r) and _inherited_role(r)],
+    }
 
 
 def build(props: Iterable[dict], max_legs: int = MAX_LEGS) -> list[dict]:
