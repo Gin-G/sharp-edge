@@ -91,6 +91,43 @@ export interface BatterRow {
   edge_pts: number | null;
   kelly: number | null;
   breakeven_odds: number;
+  // Every other book's price for the same leg, via the aggregator. Absent
+  // when no Odds API key is configured — the FanDuel columns above are
+  // unaffected either way.
+  books?: Record<string, BookQuote>;
+  best_book?: string | null;
+  best_odds?: number | null;
+  best_ev?: number | null;
+}
+
+/** One book's quote for a leg.
+ *
+ *  `devig_p` is the book's own fair probability with its margin removed —
+ *  measurable here, unlike a one-sided FanDuel runner, because the aggregator
+ *  returns both sides. `overround` of 1.06 means it is holding six points. */
+export interface BookQuote {
+  odds: number;
+  line: number | null;
+  devig_p: number | null;
+  overround: number | null;
+  ev?: number;
+  edge_pts?: number;
+}
+
+/** A sportsbook and which of the four capabilities it actually has.
+ *
+ *  DraftKings has odds but not login/sync: its own API is unreachable behind
+ *  Akamai, so prices arrive through the aggregator while the account side
+ *  waits on a browser capture. */
+export interface BookInfo {
+  key: string;
+  name: string;
+  supports_login: boolean;
+  supports_sync: boolean;
+  supports_odds: boolean;
+  unsupported_reason: string;
+  authenticated: boolean;
+  expired: boolean;
 }
 
 export interface HotBatRow {
@@ -114,6 +151,21 @@ export interface BatterScreen {
     age_seconds: number | null;
     error: string | null;
     count: number;
+  };
+  // The multi-book board. `quota` carries the aggregator's remaining credit
+  // balance, which is the binding constraint on how often prices refresh.
+  books?: {
+    error: string | null;
+    age_seconds: number | null;
+    books: string[];
+    quota: {
+      quota_remaining?: number | null;
+      quota_used?: number | null;
+      events_fetched?: number;
+      events_total?: number;
+      partial?: boolean;
+      quota_exhausted?: boolean;
+    };
   };
   bundle?: {
     // The card is served from the frozen record once one exists, and those
@@ -461,6 +513,10 @@ export interface NflTrackRecord {
       season: number; week: number; leg_count: number; american: number | null;
       decimal_odds: number | null; model_p: number | null;
       result: string | null; legs_won: number | null; legs_settled: number | null;
+      /** An addToBetslip link for the parlay as recorded. Null once the week
+       *  has graded — FanDuel pulls every market at kickoff — and null for
+       *  cards frozen before the leg rows carried FanDuel ids. */
+      betslip_url?: string | null;
       /** The frozen legs, with each leg's settled result joined on by the
        *  backend — the snapshot itself is written before kickoff and has no
        *  result of its own. */

@@ -159,6 +159,28 @@ def _pick_row(r: dict, season: int, week: int, source: str) -> dict:
     }
 
 
+def _leg_row(r: dict, season: int, week: int, source: str) -> dict:
+    """A frozen card leg: the pick row plus the ids the betslip link needs.
+
+    Kept separate from ``_pick_row`` because the two go to different places.
+    A pick is a row in a table with fixed columns; a card's legs are a JSON
+    blob, so they can carry the three FanDuel ids without a migration — and
+    they have to, because **the card that gets bet is the frozen one**. The
+    live board rebuilds its card on every request and can quietly pick a
+    different pair as lines move, so a link built only from the live board is
+    a link to a parlay that is not the one on record.
+
+    Old cards frozen before this existed have no ids and simply get no link.
+    """
+    return {
+        **_pick_row(r, season, week, source),
+        "fd_event_id": r.get("fd_event_id"),
+        "fd_market_id": r.get("fd_market_id"),
+        "over_selection_id": r.get("over_selection_id"),
+        "under_selection_id": r.get("under_selection_id"),
+    }
+
+
 async def freeze_week(payload: dict, source: str = "live") -> dict:
     """Persist this week's suggestions and freeze the card.
 
@@ -196,14 +218,60 @@ async def freeze_week(payload: dict, source: str = "live") -> dict:
         summary = card_mod.summarise(the_card)
         frozen = await db.insert_nfl_card({
             "season": season, "week": week,
-            "legs": json.dumps([_pick_row(r, season, week, source) for r in the_card]),
+            "legs": json.dumps([_leg_row(r, season, week, source) for r in the_card]),
             "leg_count": summary["legs"],
             "american": summary["american"],
             "decimal_odds": summary["decimal"],
             "model_p": summary["model_p"],
         })
+    repaired = await _repair_card_ids(season, week, payload.get("props") or [])
     return {"suggestions": len(picks), "written": written,
-            "card_legs": len(the_card), "card_frozen": frozen}
+            "card_legs": len(the_card), "card_frozen": frozen,
+            "card_ids_repaired": repaired}
+
+
+async def _repair_card_ids(season: int, week: int, props: list) -> int:
+    """Fill FanDuel ids onto a card frozen before the legs carried them.
+
+    Without this the fix only reaches cards frozen from here on, and the week
+    already in flight — the one you would actually want to open on the book —
+    stays linkless forever, because ``insert_nfl_card`` is a no-op once a week
+    has a card.
+
+    **Only the three id fields, and only where they are absent.** Player, line,
+    side, price and every model number on a frozen leg are the record of what
+    was predicted and must not move; the ids are not a prediction, they are how
+    to find the market again. Matching is on (player_key, market), so a leg
+    whose market is no longer posted simply keeps no ids and gets no link.
+
+    Returns the number of legs repaired.
+    """
+    db = _require_db()
+    card = await db.get_nfl_card(season, week)
+    if not card or card.get("result"):
+        return 0
+    legs = card.get("legs") or []
+    missing = [l for l in legs if not l.get("fd_market_id")]
+    if not legs or not missing:
+        return 0
+
+    by_key = {(r.get("key"), r.get("market")): r for r in props}
+    repaired = 0
+    for leg in missing:
+        src = by_key.get((leg.get("player_key"), leg.get("market")))
+        if not src or not src.get("fd_market_id"):
+            continue
+        leg["fd_event_id"] = src.get("fd_event_id")
+        leg["fd_market_id"] = src.get("fd_market_id")
+        leg["over_selection_id"] = src.get("over_selection_id")
+        leg["under_selection_id"] = src.get("under_selection_id")
+        repaired += 1
+
+    if repaired and await db.update_nfl_card_legs(season, week, json.dumps(legs)):
+        logger.info("[nfl-track] %s wk%s: filled FanDuel ids on %d frozen leg(s)",
+                    season, week, repaired)
+        return repaired
+    return 0
 
 
 async def _snapshot_board(payload: dict) -> None:
@@ -728,6 +796,16 @@ async def track_record(season: Optional[int] = None) -> dict:
                 # result can disagree when the line moved after the freeze.
                 leg["result"] = ("VOID" if q.get("result") == "VOID"
                                  else _leg_result(leg, q.get("actual")))
+
+    # A link back to FanDuel for the parlay actually on record, not the one the
+    # live board would rebuild now. Only while it is still unsettled: FanDuel
+    # pulls every market at kickoff, so a link on a graded week is a dead link
+    # dressed up as a button.
+    for c in cards:
+        c["betslip_url"] = (
+            None if c.get("result")
+            else card_mod.betslip_url(c.get("legs") or [])
+        )
 
     graded_cards = [c for c in cards if c.get("result")]
     return {

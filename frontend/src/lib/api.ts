@@ -1,4 +1,4 @@
-import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord, ParlayRecord, NflScreen, NflTrackRecord } from './types';
+import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord, ParlayRecord, NflScreen, NflTrackRecord, BookInfo, BookQuote } from './types';
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || 'http://localhost:8000';
 
@@ -147,8 +147,8 @@ export function verifyChatKey(apiKey: string): Promise<{ status: string }> {
 
 // --- Auth ---
 
-export function getAuthStatus(): Promise<AuthStatus> {
-  return req<AuthStatus>('/auth/status');
+export function getAuthStatus(book = 'fanduel'): Promise<AuthStatus> {
+  return req<AuthStatus>(`/auth/${book}/status`);
 }
 
 /** expiry_assumed: the countdown is a 1h default because FanDuel's token
@@ -161,31 +161,66 @@ export interface SessionInfo {
   can_refresh?: boolean;
 }
 
+/** Which books exist, what each can do, and whether you're signed in.
+ *
+ *  The settings panel is built from this rather than hard-coding FanDuel, so
+ *  a book whose login isn't wired up yet renders as an honest "not available"
+ *  instead of a form that can't work. */
+export function getBooks(): Promise<{ books: BookInfo[]; default: string }> {
+  return req('/books');
+}
+
 export function login(
   email: string,
   password: string,
+  book = 'fanduel',
 ): Promise<SessionInfo & { status: 'ok' | 'mfa_required'; message?: string }> {
-  return req('/auth/login', {
+  return req(`/auth/${book}/login`, {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   });
 }
 
-export function submitMfaCode(code: string): Promise<SessionInfo> {
-  return req('/auth/mfa', {
+export function submitMfaCode(code: string, book = 'fanduel'): Promise<SessionInfo> {
+  return req(`/auth/${book}/mfa`, {
     method: 'POST',
     body: JSON.stringify({ code }),
   });
 }
 
-export function logout(): Promise<{ status: string }> {
-  return req('/auth/logout', { method: 'POST' });
+export function logout(book = 'fanduel'): Promise<{ status: string }> {
+  return req(`/auth/${book}/logout`, { method: 'POST' });
 }
 
 // --- Sync ---
 
-export function syncBets(): Promise<{ status: string; bets_synced: number }> {
-  return req('/bets/sync', { method: 'POST' });
+export function syncBets(
+  book = 'fanduel',
+): Promise<{ status: string; book: string; bets_synced: number }> {
+  return req(`/bets/sync?book=${encodeURIComponent(book)}`, { method: 'POST' });
+}
+
+// --- Multi-book odds ---
+
+/** Every book's price for a sport's props, through the aggregator.
+ *
+ *  This is the only route to DraftKings prices: its own board answers 403 at
+ *  Akamai's edge, so nothing can read it directly. `force` skips the cache
+ *  but not the quota floor. */
+export function getOddsBooks(
+  sport: 'mlb' | 'nfl' = 'mlb',
+  force = false,
+): Promise<{
+  sport: string;
+  books: string[];
+  slate: Record<string, Record<string, Record<string, BookQuote & { player: string }>>>;
+  age_seconds: number | null;
+  error: string | null;
+  quota: { quota_remaining?: number | null; events_fetched?: number; events_total?: number };
+}> {
+  const p = new URLSearchParams({ sport });
+  if (force) p.set('force', 'true');
+  return req(`/odds/books?${p.toString()}`);
 }
 
 export function importCsv(csvPath: string): Promise<{ status: string; bets_imported: number }> {

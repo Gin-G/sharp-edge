@@ -10,6 +10,23 @@ import aiosqlite
 from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_PICK_COLUMNS,
                    NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
 
+def _card_row(row) -> dict:
+    """Normalise an ``nfl_cards`` row: ``legs`` back to a list.
+
+    SQLite stores it as TEXT and hands it back as a string, while the Postgres
+    backend decodes its JSONB in ``_card_row`` there. Without this the two
+    backends disagree about the type of a field every caller iterates, and the
+    failure is not a type error anywhere useful — ``for leg in legs`` walks the
+    *characters* of the JSON and dies on ``leg["player_key"]``, so settlement
+    and the track record's leg join both break on a dev database and neither
+    does in production.
+    """
+    d = dict(row)
+    if isinstance(d.get("legs"), str):
+        d["legs"] = json.loads(d["legs"])
+    return d
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bets (
     user_id TEXT NOT NULL,
@@ -563,7 +580,7 @@ class SQLiteDatabase(BetDatabase):
             (season, week),
         )
         r = await cursor.fetchone()
-        return dict(r) if r else None
+        return _card_row(r) if r else None
 
     async def list_nfl_cards(self, season=None, limit: int = 100) -> list[dict]:
         sql = f"SELECT {NFL_CARD_COLUMNS} FROM nfl_cards"
@@ -574,7 +591,7 @@ class SQLiteDatabase(BetDatabase):
         sql += " ORDER BY season DESC, week DESC LIMIT ?"
         args.append(limit)
         cursor = await self._db.execute(sql, args)
-        return [dict(r) for r in await cursor.fetchall()]
+        return [_card_row(r) for r in await cursor.fetchall()]
 
     async def settle_nfl_card(self, season, week, result, legs_won, legs_settled) -> None:
         await self._db.execute(
@@ -584,6 +601,16 @@ class SQLiteDatabase(BetDatabase):
             (result, legs_won, legs_settled, season, week),
         )
         await self._db.commit()
+
+    async def update_nfl_card_legs(self, season: int, week: int,
+                                   legs: str) -> bool:
+        cursor = await self._db.execute(
+            "UPDATE nfl_cards SET legs = ? "
+            "WHERE season = ? AND week = ? AND result IS NULL",
+            (legs, season, week),
+        )
+        await self._db.commit()
+        return bool(cursor.rowcount)
 
     async def insert_parlay(self, row: dict) -> bool:
         cursor = await self._db.execute(

@@ -427,3 +427,75 @@ def enrich_records(records: list[dict], odds: dict) -> list[dict]:
             r.setdefault("fd_event_id", None)
         r.update(price_pick(r, american))
     return records
+
+
+def attach_book_prices(
+    records: list[dict],
+    slate: dict,
+    market: str = "hits",
+    name_field: str = "batter",
+) -> list[dict]:
+    """Attach every book's price for one market, and name the best of them.
+
+    This is the payoff from sourcing prices through an aggregator rather than
+    one book's own board, and it matters more here than it would elsewhere.
+    This module opens by explaining that the retired screen hit 64.8% at a
+    median price of -260 — a break-even of 72% — so it was never a good bet
+    that needed a better price, it was a bet the market had already marked up.
+    Price is the whole difference between a screen that is right and a screen
+    that makes money, and the same leg does not cost the same everywhere.
+
+    A row keeps whatever ``enrich_records`` gave it. This only adds:
+
+        books       {book: {odds, line, devig_p, ev, edge_pts}}
+        best_book   the book paying most for this leg
+        best_odds   that price
+        best_ev     EV at that price, against the model's own probability
+
+    ``best`` is chosen on decimal price, not on EV. The two agree whenever the
+    model probability is the same across books — which it is, because it is the
+    model's number and not the market's — so ranking on price says the identical
+    thing while staying meaningful on a row the model could not score.
+
+    Nothing here is a bet-slip link: an aggregator quote carries a price, not
+    the book's internal market and selection handles. ``bundle.betslip_url``
+    stays FanDuel-only for that reason.
+    """
+    from ._data import _norm
+
+    for r in records:
+        name = r.get(name_field)
+        key = _norm(name) if name else None
+        p = r.get("model_p")
+
+        priced: dict[str, dict] = {}
+        for book, markets in slate.items():
+            if book == "_meta":
+                continue
+            entry = (markets.get(market) or {}).get(key) if key else None
+            if not entry or entry.get("over") is None:
+                continue
+            american = entry["over"]
+            quote = {
+                "odds": american,
+                "line": entry.get("line"),
+                # The book's own fair number once its margin is removed —
+                # a two-sided quote makes this measurable rather than assumed.
+                "devig_p": entry.get("p_over"),
+                "overround": entry.get("overround"),
+            }
+            if p is not None:
+                quote["ev"] = round(expected_value(p, american), 4)
+                quote["edge_pts"] = round(
+                    100 * (p - american_to_implied(american)), 1
+                )
+            priced[book] = quote
+
+        r["books"] = priced
+        if priced:
+            best = max(priced.items(), key=lambda kv: american_to_decimal(kv[1]["odds"]))
+            r["best_book"], r["best_odds"] = best[0], best[1]["odds"]
+            r["best_ev"] = best[1].get("ev")
+        else:
+            r["best_book"] = r["best_odds"] = r["best_ev"] = None
+    return records

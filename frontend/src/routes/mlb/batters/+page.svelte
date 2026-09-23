@@ -63,6 +63,28 @@
     return v > 0 ? `+${v}` : `${v}`;
   }
 
+  const BOOK_LABEL: Record<string, string> = {
+    draftkings: 'DK',
+    fanduel: 'FD',
+    betmgm: 'MGM',
+    caesars: 'CZR',
+  };
+
+  /** Does the best book actually pay more than FanDuel for this leg?
+   *
+   *  Compared on American odds via a common scale — +120 and -110 can't be
+   *  compared as numbers, since the sign flips the meaning. Only a genuine
+   *  improvement is highlighted; matching FanDuel is not news. */
+  function beatsFd(r: { fd_odds?: number | null; best_odds?: number | null }): boolean {
+    if (r.best_odds === null || r.best_odds === undefined) return false;
+    if (r.fd_odds === null || r.fd_odds === undefined) return true;
+    return toDecimal(r.best_odds) > toDecimal(r.fd_odds) + 1e-9;
+  }
+
+  function toDecimal(american: number): number {
+    return 1 + (american < 0 ? 100 / -american : american / 100);
+  }
+
   // Whether tapping the bet-slip link will hand off to the FanDuel app rather
   // than open a browser tab. Detected from the pointer type rather than a
   // user-agent string: it's what actually distinguishes the case we care
@@ -306,6 +328,17 @@
                 : 'live'}
             {/if}
           {/if}
+          {#if data.books && data.books.books.length > 0}
+            · {data.books.books.length} books
+            {#if data.books.quota?.quota_remaining != null}
+              <span
+                class={data.books.quota.quota_remaining < 100 ? 'text-amber-500/80' : 'text-slate-600'}
+                title="Odds API credits left this month. Player props cost one credit per market per game, so the board refreshes on a slow cache."
+              >({data.books.quota.quota_remaining} credits)</span>
+            {/if}
+          {:else if data.books?.error}
+            · <span class="text-slate-600" title={data.books.error}>1 book</span>
+          {/if}
         </span>
       </div>
       {#if data.picks.length === 0}
@@ -328,6 +361,7 @@
                 <th class="text-right px-4 py-3">SP L3 BAA</th>
                 <th class="text-center px-4 py-3">SP Form</th>
                 <th class="text-right px-4 py-3">FD</th>
+                <th class="text-right px-4 py-3">Best</th>
                 <th class="text-right px-4 py-3">Model</th>
                 <th class="text-right px-4 py-3">Edge</th>
                 <th class="text-right px-4 py-3">EV/$1</th>
@@ -362,6 +396,21 @@
                     {:else}
                       <span class="text-slate-600">no line</span>
                       <span class="block text-xs text-slate-600">need {fmtOdds(r.breakeven_odds)}</span>
+                    {/if}
+                  </td>
+                  <!-- Best price across every book the aggregator returned.
+                       Highlighted only when it actually beats FanDuel, since
+                       that is the only case worth acting on. -->
+                  <td class="px-4 py-2.5 text-right tabular-nums">
+                    {#if r.best_odds !== null && r.best_odds !== undefined}
+                      <span class={beatsFd(r) ? 'text-emerald-300 font-semibold' : 'text-slate-300'}>
+                        {fmtOdds(r.best_odds)}
+                      </span>
+                      <span class="block text-xs {beatsFd(r) ? 'text-emerald-500/70' : 'text-slate-500'}">
+                        {BOOK_LABEL[r.best_book ?? ''] ?? r.best_book}
+                      </span>
+                    {:else}
+                      <span class="text-slate-600">—</span>
                     {/if}
                   </td>
                   <td class="px-4 py-2.5 text-right tabular-nums text-slate-300">{fmtPct(r.model_p)}</td>

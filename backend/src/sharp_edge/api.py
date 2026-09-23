@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
+from . import books
 from .config import settings
 from .db import create_database, BetDatabase
 from .fanduel.auth import (
@@ -20,54 +21,75 @@ from .fanduel.auth import (
     FanDuelBotBlocked,
     FanDuelMFARequired,
 )
-from .fanduel.client import FanDuelClient
 from .analysis import score_bet, generate_insights
 from .chat import chat as chat_with_claude, verify_key, DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
 
-# Per-user FanDuel auth, keyed by session uid. Replaces the old singleton so
-# different visitors can each log in to their own FanDuel account. The in-
-# memory map is a cache over the DB-persisted session (sync_state), so a pod
-# restart rehydrates the session (and its refresh token) instead of forcing
-# a fresh login.
+# Per-user book sessions, keyed by (book, session uid). Was a FanDuel-only map
+# until DraftKings arrived; the book in the key is the only thing that changed,
+# and FanDuel's persisted rows keep their historical sync_state key so nobody
+# is logged out by the generalisation. The in-memory map is a cache over the
+# DB-persisted session, so a pod restart rehydrates it (and its refresh token)
+# instead of forcing a fresh login.
 _db: Optional[BetDatabase] = None
-_fd_auth: dict[str, FanDuelAuth] = {}
-_FD_SESSION_KEY = "fanduel_session"
+_auth: dict[tuple[str, str], object] = {}
 
 
-async def _persist_fd_auth(uid: str, auth: FanDuelAuth) -> None:
-    """Save a user's FanDuel session (token + refresh token, no password)."""
+async def _persist_auth(book: str, uid: str, auth) -> None:
+    """Save a user's session for one book (token + refresh token, no password)."""
     import json
     try:
-        await _db.set_sync_state(uid, _FD_SESSION_KEY, json.dumps(auth.to_state()))
+        await _db.set_sync_state(
+            uid, books.session_key(book), json.dumps(auth.to_state())
+        )
     except Exception as e:
-        logger.warning("failed to persist FanDuel session: %s", e)
+        logger.warning("failed to persist %s session: %s", book, e)
 
 
-async def _load_fd_auth(uid: str) -> Optional[FanDuelAuth]:
-    """Return the user's FanDuel auth, rehydrating from the DB if the in-
-    memory cache was lost to a restart."""
-    auth = _fd_auth.get(uid)
+async def _load_auth(book: str, uid: str):
+    """Return the user's auth for one book, rehydrating from the DB if the
+    in-memory cache was lost to a restart."""
+    auth = _auth.get((book, uid))
     if auth is not None:
         return auth
+    entry = books.get_book(book)
+    if entry.state_factory is None:
+        return None
     import json
     try:
-        raw = await _db.get_sync_state(uid, _FD_SESSION_KEY)
+        raw = await _db.get_sync_state(uid, books.session_key(book))
     except Exception:
         raw = None
     if not raw:
         return None
     try:
-        auth = FanDuelAuth.from_state(
-            json.loads(raw), basic_auth=settings.fanduel_basic_auth
-        )
-        auth.state = auth.state or settings.fanduel_state
+        auth = entry.state_factory(json.loads(raw))
     except Exception as e:
-        logger.warning("failed to rehydrate FanDuel session: %s", e)
+        logger.warning("failed to rehydrate %s session: %s", book, e)
         return None
-    _fd_auth[uid] = auth
+    _auth[(book, uid)] = auth
     return auth
+
+
+def _require_book(key: str, need: str = "login") -> books.Book:
+    """Resolve a book, refusing clearly when it can't do what was asked.
+
+    A capability the book doesn't have is a 501 naming the reason, not a 500
+    from somewhere deep in a request that was never going to work.
+    """
+    try:
+        entry = books.get_book(key)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    supported = entry.supports_login if need == "login" else entry.supports_sync
+    if not supported:
+        raise HTTPException(
+            501,
+            entry.unsupported_reason
+            or f"{entry.name} does not support {need} yet.",
+        )
+    return entry
 
 
 @asynccontextmanager
@@ -189,25 +211,48 @@ def _session_payload(auth: FanDuelAuth) -> dict:
     }
 
 
-@app.post("/auth/login")
-async def login(req: LoginRequest, uid: str = Depends(get_uid)):
-    # Reuse the stored installation id when there is one: FanDuel keys device
-    # verification to it, so a new id means a new MFA code every login.
-    prior = await _load_fd_auth(uid)
-    auth = FanDuelAuth(
-        req.email, req.password,
-        basic_auth=settings.fanduel_basic_auth,
-        state=settings.fanduel_state,
-        installation_id=prior.installation_id if prior else None,
-    )
+@app.get("/books")
+async def list_books(uid: str = Depends(get_uid)):
+    """Every book the app knows, what it can do, and whether you're logged in.
+
+    The frontend builds its settings panel off this rather than hard-coding
+    FanDuel, so a book whose login isn't wired up yet renders as an honest
+    "not available" instead of a form that can't work.
+    """
+    out = []
+    for key, entry in books.BOOKS.items():
+        auth = await _load_auth(key, uid) if entry.supports_login else None
+        out.append({
+            "key": key,
+            "name": entry.name,
+            "supports_login": entry.supports_login,
+            "supports_sync": entry.supports_sync,
+            # Prices can arrive through the aggregator even when the book's
+            # own API is unreachable, which is exactly the DraftKings case.
+            "supports_odds": entry.odds_api_key is not None,
+            "unsupported_reason": entry.unsupported_reason,
+            "authenticated": bool(auth and auth.token),
+            "expired": bool(auth and auth.token and auth.is_expired),
+        })
+    return {"books": out, "default": books.DEFAULT_BOOK}
+
+
+@app.post("/auth/{book}/login")
+async def login_book(book: str, req: LoginRequest, uid: str = Depends(get_uid)):
+    entry = _require_book(book)
+    # Reuse the stored session when there is one: FanDuel keys device
+    # verification to an installation id, so a new id means a new MFA code
+    # every login. Any book with the same notion gets the same treatment.
+    prior = await _load_auth(book, uid)
+    auth = entry.auth_factory(req.email, req.password, prior)
     try:
         await auth.login()
-        _fd_auth[uid] = auth
-        await _persist_fd_auth(uid, auth)
+        _auth[(book, uid)] = auth
+        await _persist_auth(book, uid, auth)
         return _session_payload(auth)
     except FanDuelMFARequired as e:
-        # Keep the credentials so /auth/mfa can finish the login.
-        _fd_auth[uid] = auth
+        # Keep the credentials so the mfa route can finish the login.
+        _auth[(book, uid)] = auth
         return {"status": "mfa_required", "message": str(e)}
     except FanDuelBotBlocked as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -219,15 +264,16 @@ class MFARequest(BaseModel):
     code: str
 
 
-@app.post("/auth/mfa")
-async def submit_mfa(req: MFARequest, uid: str = Depends(get_uid)):
-    """Finish a login that FanDuel held for new-device verification."""
-    auth = _fd_auth.get(uid)
+@app.post("/auth/{book}/mfa")
+async def submit_mfa_book(book: str, req: MFARequest, uid: str = Depends(get_uid)):
+    """Finish a login the book held for new-device verification."""
+    _require_book(book)
+    auth = _auth.get((book, uid))
     if not auth or not auth.mfa_pending:
-        raise HTTPException(400, "No pending login — start with /auth/login")
+        raise HTTPException(400, f"No pending login — start with /auth/{book}/login")
     try:
         await auth.submit_mfa_code(req.code)
-        await _persist_fd_auth(uid, auth)
+        await _persist_auth(book, uid, auth)
         return _session_payload(auth)
     except FanDuelBotBlocked as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -235,20 +281,13 @@ async def submit_mfa(req: MFARequest, uid: str = Depends(get_uid)):
         raise HTTPException(status_code=401, detail=str(e))
 
 
-@app.post("/auth/token")
-async def set_manual_token(req: ManualTokenRequest, uid: str = Depends(get_uid)):
-    """Set a manually-captured JWT from browser DevTools."""
-    auth = _fd_auth.get(uid)
-    if not auth:
-        auth = FanDuelAuth("", "")
-        _fd_auth[uid] = auth
-    auth.set_manual_token(req.token)
-    return _session_payload(auth)
-
-
-@app.get("/auth/status")
-async def auth_status(uid: str = Depends(get_uid)):
-    auth = await _load_fd_auth(uid)
+@app.get("/auth/{book}/status")
+async def auth_status_book(book: str, uid: str = Depends(get_uid)):
+    try:
+        books.get_book(book)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    auth = await _load_auth(book, uid)
     if not auth or not auth.token:
         return {"authenticated": False}
     return {
@@ -267,16 +306,63 @@ async def auth_status(uid: str = Depends(get_uid)):
     }
 
 
-@app.post("/auth/logout")
-async def logout(request: Request, uid: str = Depends(get_uid)):
-    """Clear FanDuel auth for this session and rotate the session id."""
-    _fd_auth.pop(uid, None)
+@app.post("/auth/{book}/logout")
+async def logout_book(book: str, request: Request, uid: str = Depends(get_uid)):
+    """Clear one book's auth. The session cookie is only rotated when the last
+    book is logged out — dropping it while another book is still signed in
+    would strand that session's other credentials."""
     try:
-        await _db.set_sync_state(uid, _FD_SESSION_KEY, "")
+        books.get_book(book)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    _auth.pop((book, uid), None)
+    try:
+        await _db.set_sync_state(uid, books.session_key(book), "")
     except Exception:
         pass
-    request.session.clear()
+    if not any(k[1] == uid for k in _auth):
+        request.session.clear()
     return {"status": "ok"}
+
+
+# ------------------------------------------------------------------
+# FanDuel's original un-namespaced routes.
+#
+# Kept as delegations rather than redirects: they are what the shipped
+# frontend calls, and a 307 on a POST is the kind of thing that works in
+# every client except the one you forgot about.
+# ------------------------------------------------------------------
+
+@app.post("/auth/login")
+async def login(req: LoginRequest, uid: str = Depends(get_uid)):
+    return await login_book(books.DEFAULT_BOOK, req, uid)
+
+
+@app.post("/auth/mfa")
+async def submit_mfa(req: MFARequest, uid: str = Depends(get_uid)):
+    return await submit_mfa_book(books.DEFAULT_BOOK, req, uid)
+
+
+@app.get("/auth/status")
+async def auth_status(uid: str = Depends(get_uid)):
+    return await auth_status_book(books.DEFAULT_BOOK, uid)
+
+
+@app.post("/auth/logout")
+async def logout(request: Request, uid: str = Depends(get_uid)):
+    return await logout_book(books.DEFAULT_BOOK, request, uid)
+
+
+@app.post("/auth/token")
+async def set_manual_token(req: ManualTokenRequest, uid: str = Depends(get_uid)):
+    """Set a manually-captured JWT from browser DevTools. FanDuel only — it is
+    the fallback for when bot protection blocks a real login."""
+    auth = _auth.get((books.DEFAULT_BOOK, uid))
+    if not auth:
+        auth = FanDuelAuth("", "")
+        _auth[(books.DEFAULT_BOOK, uid)] = auth
+    auth.set_manual_token(req.token)
+    return _session_payload(auth)
 
 
 # ------------------------------------------------------------------
@@ -285,30 +371,36 @@ async def logout(request: Request, uid: str = Depends(get_uid)):
 
 @app.post("/bets/sync")
 async def sync_bets(
-    uid: str = Depends(get_uid), db: BetDatabase = Depends(get_db)
+    book: str = books.DEFAULT_BOOK,
+    uid: str = Depends(get_uid),
+    db: BetDatabase = Depends(get_db),
 ):
-    auth = await _load_fd_auth(uid)
+    """Pull settled bet history from one book into the local store.
+
+    Defaults to FanDuel so the existing frontend call keeps working unchanged.
+    """
+    entry = _require_book(book, need="sync")
+    auth = await _load_auth(book, uid)
     if not auth or not auth.token:
-        raise HTTPException(400, "Not authenticated with FanDuel")
+        raise HTTPException(400, f"Not authenticated with {entry.name}")
 
     try:
         token = await auth.ensure_token()
     except Exception as e:
         raise HTTPException(401, str(e))
     # Persist any renewed token/refresh token so the next restart reuses it.
-    await _persist_fd_auth(uid, auth)
-    fd = FanDuelClient(auth_token=token, state=settings.fanduel_state, auth=auth)
+    await _persist_auth(book, uid, auth)
+    client = entry.client_factory(token, auth)
     try:
-        raw_bets = await fd.fetch_all_settled_bets()
+        raw_bets = await client.fetch_all_settled_bets()
         count = 0
         for raw in raw_bets:
-            norm = fd.normalize_bet(raw)
-            await db.upsert_bet(uid, norm)
+            await db.upsert_bet(uid, client.normalize_bet(raw))
             count += 1
-        return {"status": "ok", "bets_synced": count}
+        return {"status": "ok", "book": book, "bets_synced": count}
     finally:
-        await _persist_fd_auth(uid, auth)  # client may have refreshed on a 401
-        await fd.close()
+        await _persist_auth(book, uid, auth)  # client may have refreshed on a 401
+        await client.close()
 
 
 class ImportCSVRequest(BaseModel):
@@ -502,6 +594,34 @@ async def batter_screen():
         logger.warning("odds enrichment failed: %s", e)
         odds_meta["error"] = str(e)
 
+    # Every other book's price for the same leg, through the aggregator.
+    #
+    # Additive by design: FanDuel above still sets fd_odds and the ids the
+    # bet-slip link is built from, and this only attaches a `books` map and
+    # names the best price. So a missing or unconfigured key costs the
+    # comparison and nothing else — the board prices exactly as it did before.
+    books_meta = {"error": None, "age_seconds": None, "books": [], "quota": {}}
+    try:
+        from . import pricing as _pricing
+        from .oddsapi import cache as _oddscache
+        from .oddsapi.props import books_in
+
+        if _oddscache.configured():
+            got = await _oddscache.cached_slate("mlb")
+            _pricing.attach_book_prices(picks, got["slate"], market="hits")
+            _pricing.attach_book_prices(today, got["slate"], market="hits")
+            books_meta = {
+                "error": got["error"],
+                "age_seconds": got["age_seconds"],
+                "books": books_in(got["slate"]),
+                "quota": got["quota"],
+            }
+        else:
+            books_meta["error"] = "no Odds API key configured"
+    except Exception as e:
+        logger.warning("multi-book pricing failed: %s", e)
+        books_meta["error"] = str(e)
+
     # The day's bundle: the two most likely to record a hit, one leg per
     # game, plus every other leg that pays for the risk it adds — and a link
     # that loads it straight into the bet slip. The first two are chosen on
@@ -563,6 +683,7 @@ async def batter_screen():
         "as_of": status["cached_date"],
         "stale": bool(status.get("stale")),
         "odds": odds_meta,
+        "books": books_meta,
         "bundle": {
             "legs": legs,
             "frozen_at": (frozen or {}).get("created_at"),
@@ -573,6 +694,44 @@ async def batter_screen():
             # so the next-best runners-up are only visible here.
             "near_misses": _bundle.near_misses(today, legs),
         },
+    }
+
+
+@app.get("/odds/books")
+async def odds_books(sport: str = "mlb", force: bool = False):
+    """The multi-book board for a sport, straight from the aggregator.
+
+    Exposed on its own as well as folded into the screens because it answers a
+    question the screens can't: what a market costs everywhere, including for
+    players the model didn't pick. ``force`` skips the cache TTL but not the
+    quota floor.
+    """
+    from .oddsapi import cache as _oddscache
+    from .oddsapi.props import books_in
+
+    # Sport first: a typo should be reported as a typo rather than disappear
+    # behind the missing-key message.
+    if sport not in _oddscache._FETCHERS:
+        raise HTTPException(
+            404,
+            f"unknown sport {sport!r} — known sports: "
+            f"{', '.join(sorted(_oddscache._FETCHERS))}",
+        )
+    if not _oddscache.configured():
+        raise HTTPException(
+            501,
+            "No Odds API key configured. Set ODDS_API_KEY to price DraftKings "
+            "and the other books — DraftKings' own board is unreachable "
+            "(Akamai blocks it), so this is the supported route to its prices.",
+        )
+    got = await _oddscache.cached_slate(sport, force=force)
+    return {
+        "sport": sport,
+        "books": books_in(got["slate"]),
+        "slate": {k: v for k, v in got["slate"].items() if k != "_meta"},
+        "age_seconds": got["age_seconds"],
+        "error": got["error"],
+        "quota": got["quota"],
     }
 
 

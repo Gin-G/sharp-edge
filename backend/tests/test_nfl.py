@@ -1674,3 +1674,155 @@ def test_the_two_guards_are_reported_separately():
     got = card_mod.withheld([row])
     assert len(got["unavailable"]) == 1
     assert got["vacated_under"] == []
+
+
+# ---------------------------------------------------------------------------
+# The betslip link for a recorded parlay
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_frozen_card_can_be_reopened_on_fanduel(tmp_path):
+    """The card that gets bet is the frozen one.
+
+    The live board rebuilds its card on every request and can pick a different
+    pair as lines move, so the only link that reliably points at the parlay on
+    record is one built from the frozen legs — which means those legs have to
+    carry the FanDuel ids. They did not, and the recorded parlays had no link
+    at all.
+    """
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    db = SQLiteDatabase(str(tmp_path / "b.db"))
+    await db.connect()
+    try:
+        nfl_tracking.configure(db)
+        legs = [
+            _prop(key="a", player="A", fd_market_id="708.1", over_selection_id=11,
+                  under_selection_id=12, side="UNDER", signal="UNDER",
+                  edge_pts=9.0, fd_event_id="e1", kickoff="2099-01-01T00:00:00Z"),
+            _prop(key="b", player="B", fd_market_id="708.2", over_selection_id=21,
+                  under_selection_id=22, side="OVER", signal="OVER",
+                  edge_pts=8.0, fd_event_id="e2", kickoff="2099-01-01T00:00:00Z"),
+        ]
+        got = await nfl_tracking.freeze_week(
+            {"season": 2026, "week": 3, "props": legs, "game_model": []})
+        assert got["card_frozen"] and got["card_legs"] == 2
+
+        card = await db.get_nfl_card(2026, 3)
+        # SQLite stores legs as TEXT; a raw string here means every caller that
+        # iterates them walks the JSON character by character instead.
+        assert isinstance(card["legs"], list), "legs must come back decoded"
+        assert card["legs"][0]["fd_market_id"] == "708.1"
+
+        url = card_mod.betslip_url(card["legs"])
+        # The side's own selection — sending the over's id for an under loads
+        # the opposite bet.
+        assert "marketId[0]=708.1" in url and "selectionId[0]=12" in url
+        assert "marketId[1]=708.2" in url and "selectionId[1]=21" in url
+
+        record = await nfl_tracking.track_record(2026)
+        assert record["cards"]["rows"][0]["betslip_url"] == url
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_graded_parlay_offers_no_link(tmp_path):
+    """FanDuel pulls every market at kickoff, so a link on a settled week is a
+    dead link dressed up as a button."""
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    db = SQLiteDatabase(str(tmp_path / "c.db"))
+    await db.connect()
+    try:
+        nfl_tracking.configure(db)
+        await db.insert_nfl_card({
+            "season": 2026, "week": 1, "leg_count": 1, "american": 120,
+            "decimal_odds": 2.2, "model_p": 0.5,
+            "legs": json.dumps([{"player_key": "a", "market": "receptions",
+                                 "line": 3.5, "side": "UNDER",
+                                 "fd_market_id": "708.1",
+                                 "under_selection_id": 12}]),
+        })
+        await db.settle_nfl_card(2026, 1, "LOSS", 0, 1)
+        record = await nfl_tracking.track_record(2026)
+        assert record["cards"]["rows"][0]["betslip_url"] is None
+    finally:
+        await db.close()
+
+
+def test_a_card_frozen_before_the_ids_existed_simply_has_no_link():
+    """Older rows carry no FanDuel ids. A half-built link is worse than none."""
+    assert card_mod.betslip_url([
+        {"player": "A", "side": "UNDER", "market": "receptions", "line": 3.5},
+    ]) is None
+
+
+@pytest.mark.asyncio
+async def test_a_card_already_frozen_gets_its_ids_filled_in(tmp_path):
+    """insert_nfl_card is a no-op once a week has a card, so without a repair
+    the week already in flight — the one you actually want to open on the book
+    — would stay linkless forever."""
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    db = SQLiteDatabase(str(tmp_path / "r.db"))
+    await db.connect()
+    try:
+        nfl_tracking.configure(db)
+        # A card frozen the old way: no FanDuel ids on the legs.
+        await db.insert_nfl_card({
+            "season": 2026, "week": 3, "leg_count": 1, "american": 120,
+            "decimal_odds": 2.2, "model_p": 0.5,
+            "legs": json.dumps([{
+                "season": 2026, "week": 3, "player_key": "a receiver",
+                "market": "receiving_yards", "player": "A Receiver",
+                "line": 45.5, "side": "UNDER", "fd_odds": -114,
+                "model_p": 0.58, "adjusted": 40.0,
+            }]),
+        })
+        props = [_prop(side="UNDER", signal="UNDER", edge_pts=9.0,
+                       adjusted=40.0, fd_market_id="708.9",
+                       over_selection_id=91, under_selection_id=92,
+                       kickoff="2099-01-01T00:00:00Z")]
+        got = await nfl_tracking.freeze_week(
+            {"season": 2026, "week": 3, "props": props, "game_model": []})
+        assert got["card_ids_repaired"] == 1
+
+        card = await db.get_nfl_card(2026, 3)
+        leg = card["legs"][0]
+        assert leg["fd_market_id"] == "708.9"
+        # Everything that is a prediction is untouched — only the ids moved.
+        assert leg["line"] == 45.5 and leg["side"] == "UNDER"
+        assert leg["fd_odds"] == -114 and leg["model_p"] == 0.58
+
+        record = await nfl_tracking.track_record(2026)
+        assert "selectionId[0]=92" in record["cards"]["rows"][0]["betslip_url"]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_settled_card_is_never_rewritten(tmp_path):
+    """The repair is the one sanctioned write to a frozen card. A graded week
+    is the record and must not move, ids or otherwise."""
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    db = SQLiteDatabase(str(tmp_path / "s.db"))
+    await db.connect()
+    try:
+        nfl_tracking.configure(db)
+        await db.insert_nfl_card({
+            "season": 2026, "week": 2, "leg_count": 1, "american": 120,
+            "decimal_odds": 2.2, "model_p": 0.5,
+            "legs": json.dumps([{"player_key": "a receiver",
+                                 "market": "receiving_yards",
+                                 "line": 45.5, "side": "UNDER"}]),
+        })
+        await db.settle_nfl_card(2026, 2, "LOSS", 0, 1)
+        props = [_prop(fd_market_id="708.9", under_selection_id=92)]
+        assert await nfl_tracking._repair_card_ids(2026, 2, props) == 0
+        # And the guard is in the WHERE clause too, not only in the caller.
+        assert await db.update_nfl_card_legs(2026, 2, json.dumps([])) is False
+        assert (await db.get_nfl_card(2026, 2))["legs"][0]["line"] == 45.5
+    finally:
+        await db.close()

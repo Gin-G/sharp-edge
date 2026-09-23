@@ -1,7 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getAuthStatus, login, submitMfaCode, syncBets, importCsv } from '$lib/api';
-  import type { AuthStatus } from '$lib/types';
+  import { getAuthStatus, getBooks, login, submitMfaCode, syncBets, importCsv } from '$lib/api';
+  import type { AuthStatus, BookInfo } from '$lib/types';
+
+  // --- Books ---
+  // The panel is built from the registry rather than hard-coding FanDuel, so
+  // a book whose login isn't wired up yet renders as an honest "not
+  // available" instead of a form that cannot work.
+  let bookList: BookInfo[] = [];
+  let book = 'fanduel';
+  $: activeBook = bookList.find((b) => b.key === book);
 
   // --- Auth state ---
   let authStatus: AuthStatus = { authenticated: false };
@@ -28,7 +36,10 @@
 
   onMount(async () => {
     try {
-      authStatus = await getAuthStatus();
+      const res = await getBooks();
+      bookList = res.books;
+      book = res.default;
+      authStatus = await getAuthStatus(book);
     } catch {
       /* backend may not be running */
     } finally {
@@ -36,13 +47,34 @@
     }
   });
 
+  /** Switching books swaps the whole panel's state — a message about one
+   *  book's session is misleading once another is selected. */
+  async function selectBook(key: string) {
+    if (key === book) return;
+    book = key;
+    loginMsg = loginErr = syncMsg = syncErr = '';
+    mfaRequired = false;
+    mfaCode = '';
+    loginPassword = '';
+    authStatus = { authenticated: false };
+    if (!activeBook?.supports_login) return;
+    authLoading = true;
+    try {
+      authStatus = await getAuthStatus(book);
+    } catch {
+      /* leave as unauthenticated */
+    } finally {
+      authLoading = false;
+    }
+  }
+
   async function handleLogin() {
     if (!loginEmail || !loginPassword) return;
     loginLoading = true;
     loginMsg = '';
     loginErr = '';
     try {
-      const res = await login(loginEmail, loginPassword);
+      const res = await login(loginEmail, loginPassword, book);
       if (res.status === 'mfa_required') {
         mfaRequired = true;
         loginMsg = res.message ?? 'FanDuel emailed a verification code — enter it below.';
@@ -89,7 +121,7 @@
     mfaLoading = true;
     loginErr = '';
     try {
-      const res = await submitMfaCode(mfaCode.trim());
+      const res = await submitMfaCode(mfaCode.trim(), book);
       loginMsg = sessionSummary(res);
       authStatus = { authenticated: true, expired: false };
       mfaRequired = false;
@@ -108,8 +140,8 @@
     syncMsg = '';
     syncErr = '';
     try {
-      const res = await syncBets();
-      syncMsg = `Synced ${res.bets_synced} bets from FanDuel`;
+      const res = await syncBets(book);
+      syncMsg = `Synced ${res.bets_synced} bets from ${activeBook?.name ?? book}`;
     } catch (e) {
       syncErr = e instanceof Error ? e.message : String(e);
     } finally {
@@ -138,14 +170,40 @@
 <div class="space-y-6 max-w-2xl">
   <div>
     <h1 class="text-xl font-bold text-white">Settings</h1>
-    <p class="text-sm text-slate-400 mt-0.5">FanDuel authentication and data sync</p>
+    <p class="text-sm text-slate-400 mt-0.5">Sportsbook authentication and data sync</p>
   </div>
 
-  <!-- FanDuel login -->
+  <!-- Book login -->
   <div class="card space-y-4">
+    {#if bookList.length > 1}
+      <div class="flex items-center gap-1 border-b border-border -mx-4 px-4 pb-0">
+        {#each bookList as b}
+          <button
+            class="px-3 py-1.5 text-sm font-medium border-b-2 -mb-px transition-colors
+                   {b.key === book
+                     ? 'border-emerald-400 text-emerald-300'
+                     : 'border-transparent text-slate-400 hover:text-slate-200'}"
+            on:click={() => selectBook(b.key)}
+          >
+            {b.name}
+            {#if b.authenticated && !b.expired}
+              <span class="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 align-middle"></span>
+            {:else if !b.supports_login}
+              <span class="ml-1.5 text-[10px] uppercase tracking-wide text-slate-500">odds only</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
+
     <div class="flex items-center justify-between gap-3">
-      <h2 class="text-sm font-semibold text-slate-200">FanDuel Login</h2>
-      {#if authLoading}
+      <h2 class="text-sm font-semibold text-slate-200">{activeBook?.name ?? 'FanDuel'} Login</h2>
+      {#if activeBook && !activeBook.supports_login}
+        <span class="inline-flex items-center gap-1.5 text-xs text-slate-400 font-medium">
+          <span class="w-2 h-2 rounded-full bg-slate-600"></span>
+          Not available yet
+        </span>
+      {:else if authLoading}
         <span class="inline-flex items-center gap-1.5 text-xs text-slate-400">
           <span class="w-2 h-2 rounded-full bg-slate-600 animate-pulse"></span>
           Checking…
@@ -168,9 +226,18 @@
       {/if}
     </div>
 
+    {#if activeBook && !activeBook.supports_login}
+      <p class="text-xs text-slate-500 leading-relaxed">{activeBook.unsupported_reason}</p>
+      {#if activeBook.supports_odds}
+        <p class="text-xs text-slate-500">
+          Its prices are already on the board — they come through the odds
+          aggregator rather than {activeBook.name} directly.
+        </p>
+      {/if}
+    {:else}
     <p class="text-xs text-slate-500">
-      Credentials are sent directly to FanDuel's session API and not stored.
-      A successful login pulls your settled bets straight away.
+      Credentials are sent directly to {activeBook?.name ?? 'FanDuel'}'s session API
+      and not stored. A successful login pulls your settled bets straight away.
     </p>
 
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -222,8 +289,8 @@
     {#if mfaRequired}
       <div class="pt-2 border-t border-border space-y-3">
         <p class="text-xs text-slate-500">
-          FanDuel sent a verification code to your account email (new device).
-          Once verified, future logins skip this step.
+          {activeBook?.name ?? 'FanDuel'} sent a verification code to your account
+          email (new device). Once verified, future logins skip this step.
         </p>
         <div class="flex items-center gap-3">
           <input
@@ -250,13 +317,14 @@
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
           </svg>
-          <span class="text-slate-400">Syncing bets from FanDuel…</span>
+          <span class="text-slate-400">Syncing bets from {activeBook?.name ?? 'FanDuel'}…</span>
         {:else if syncMsg}
           <span class="text-emerald-400">{syncMsg}</span>
         {:else}
           <span class="text-red-400">Sync failed — {syncErr}</span>
         {/if}
       </div>
+    {/if}
     {/if}
   </div>
 

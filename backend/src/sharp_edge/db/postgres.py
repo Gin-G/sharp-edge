@@ -673,6 +673,16 @@ class PostgresDatabase(BetDatabase):
                 result, legs_won, legs_settled, season, week,
             )
 
+    async def update_nfl_card_legs(self, season: int, week: int,
+                                   legs: str) -> bool:
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                "UPDATE nfl_cards SET legs = $1 "
+                "WHERE season = $2 AND week = $3 AND result IS NULL",
+                legs, season, week,
+            )
+        return int(status.rsplit(" ", 1)[-1]) > 0
+
     async def insert_parlay(self, row: dict) -> bool:
         from datetime import date as _date
         async with self._pool.acquire() as conn:

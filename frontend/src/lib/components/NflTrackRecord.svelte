@@ -36,6 +36,20 @@
     return v === null || v === undefined ? '—' : `${v.toFixed(1)}%`;
   }
 
+  // Which week's link was last copied, so the button can confirm it.
+  let copiedWeek: number | null = null;
+  let copyTimer: ReturnType<typeof setTimeout> | null = null;
+  async function copyBetslip(week: number, url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      copiedWeek = week;
+      if (copyTimer) clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => (copiedWeek = null), 2000);
+    } catch {
+      // Clipboard is permission-gated; the link is on the page to copy by hand.
+    }
+  }
+
   function roiClass(v: number | null): string {
     if (v === null || v === undefined) return 'text-slate-500';
     if (v > 0) return 'text-emerald-400';
@@ -238,6 +252,23 @@
                   </div>
                 {/each}
               </div>
+              {#if c.betslip_url}
+                <div class="flex items-center gap-2 px-4 py-2 border-t border-border/50 bg-surface-600/20">
+                  <a
+                    href={c.betslip_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="px-2.5 py-1 rounded-md text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-500"
+                  >Open in FanDuel</a>
+                  <button
+                    class="px-2.5 py-1 rounded-md text-xs font-medium bg-surface-700 text-slate-300 hover:bg-surface-600"
+                    on:click={() => copyBetslip(c.week, c.betslip_url ?? '')}
+                  >{copiedWeek === c.week ? 'Copied' : 'Copy link'}</button>
+                  <span class="text-[11px] text-slate-500">
+                    the parlay as recorded — lines may have moved since
+                  </span>
+                </div>
+              {/if}
             </div>
           {/each}
         </div>

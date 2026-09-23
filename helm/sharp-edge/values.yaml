@@ -70,6 +70,12 @@ backend:
     # /sessions call). It's a public value from their JS bundle — capture once
     # from DevTools on the login request, without the "Basic " prefix.
     FANDUEL_BASIC_AUTH: ""
+    # Which books the aggregator is asked for. This is the cheapest lever on
+    # quota: player props cost one credit per market per game, so every book
+    # dropped here is credits saved. The key itself is a secret and rides in
+    # existingSecret as ODDS_API_KEY (optional — no key just means the board
+    # shows FanDuel alone).
+    ODDS_API_BOOKS: "draftkings,fanduel,betmgm,caesars"
   # Persists pybaseball's on-disk Statcast cache across pod restarts so the
   # full 3-season scrape only ever runs once (not on every redeploy).
   pybaseballCache:

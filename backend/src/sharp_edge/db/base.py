@@ -275,6 +275,19 @@ class BetDatabase(ABC):
     ) -> None: ...
 
     @abstractmethod
+    async def update_nfl_card_legs(
+        self, season: int, week: int, legs: str
+    ) -> bool:
+        """Replace an unsettled card's frozen legs. Returns False if it settled.
+
+        The one sanctioned write to a frozen card, and it exists for exactly
+        one job: filling in FanDuel ids on cards frozen before the leg rows
+        carried them, so a parlay already on record can still be reopened on
+        the book. The WHERE clause refusing a settled row is what keeps it from
+        becoming a general-purpose rewrite — see nfl.tracking._repair_card_ids
+        for the caller, which changes nothing but the ids."""
+
+    @abstractmethod
     async def delete_picks(
         self, screen: str, pick_date: str, unresolved_only: bool = True
     ) -> int:
