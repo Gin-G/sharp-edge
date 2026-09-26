@@ -31,16 +31,15 @@ def test_fanduel_can_do_everything():
     assert fd.auth_factory and fd.state_factory and fd.client_factory
 
 
-def test_draftkings_declares_what_it_cannot_do_and_why():
-    """An absent capability is declared absent, so the API can answer 'not
-    supported here' instead of failing deep inside a request."""
+def test_draftkings_is_fully_wired():
+    """Login and sync go through a headless browser; odds come from the
+    aggregator, since DraftKings' own board is Akamai-blocked."""
     dk = books.get_book("draftkings")
-    assert not dk.supports_login
-    assert not dk.supports_sync
-    assert "capturing" in dk.unsupported_reason
-    # Prices are a separate capability and DraftKings does have them — just
-    # through the aggregator rather than its own board.
+    assert dk.supports_login and dk.supports_sync
+    assert dk.auth_factory and dk.state_factory and dk.client_factory
     assert dk.odds_api_key == "draftkings"
+    # Nothing left unsupported, so nothing left to explain.
+    assert dk.unsupported_reason == ""
 
 
 def test_fanduel_keeps_its_historical_session_key():
@@ -58,24 +57,17 @@ def test_books_endpoint_describes_each_book(client):
     assert body["default"] == "fanduel"
     by_key = {b["key"]: b for b in body["books"]}
 
-    assert by_key["fanduel"]["supports_login"] is True
-    assert by_key["draftkings"]["supports_login"] is False
-    # Odds are available at DraftKings even though login is not.
-    assert by_key["draftkings"]["supports_odds"] is True
-    assert by_key["draftkings"]["unsupported_reason"]
+    for key in ("fanduel", "draftkings"):
+        assert by_key[key]["supports_login"] is True
+        assert by_key[key]["supports_sync"] is True
+        assert by_key[key]["supports_odds"] is True
+        assert by_key[key]["unsupported_reason"] == ""
 
 
-def test_draftkings_login_refuses_with_501_not_a_crash(client):
-    r = client.post(
-        "/auth/draftkings/login", json={"email": "a@b.c", "password": "x"}
-    )
-    assert r.status_code == 501
-    assert "DRAFTKINGS_CAPTURE.md" in r.json()["detail"]
-
-
-def test_draftkings_sync_refuses_with_501(client):
+def test_draftkings_sync_without_a_session_is_a_400(client):
     r = client.post("/bets/sync?book=draftkings")
-    assert r.status_code == 501
+    assert r.status_code == 400
+    assert "DraftKings" in r.json()["detail"]
 
 
 def test_unknown_book_is_a_404(client):

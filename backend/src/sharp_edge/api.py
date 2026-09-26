@@ -16,11 +16,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from . import books
 from .config import settings
 from .db import create_database, BetDatabase
-from .fanduel.auth import (
-    FanDuelAuth,
-    FanDuelBotBlocked,
-    FanDuelMFARequired,
-)
+from .fanduel.auth import FanDuelAuth
 from .analysis import score_bet, generate_insights
 from .chat import chat as chat_with_claude, verify_key, DEFAULT_MODEL
 
@@ -145,6 +141,16 @@ async def lifespan(app: FastAPI):
         logger.warning("homers: prewarm failed to schedule: %s", e)
 
     yield
+
+    # Close any DraftKings browser contexts and the Chromium behind them. A
+    # login abandoned at the MFA prompt holds a context open, and the reaper
+    # only runs while the loop does — without this they leak past shutdown.
+    try:
+        from .draftkings import browser as dk_browser
+        await dk_browser.shutdown()
+    except Exception as e:
+        logger.debug("draftkings: browser shutdown skipped (%s)", e)
+
     await _db.close()
 
 
@@ -250,12 +256,15 @@ async def login_book(book: str, req: LoginRequest, uid: str = Depends(get_uid)):
         _auth[(book, uid)] = auth
         await _persist_auth(book, uid, auth)
         return _session_payload(auth)
-    except FanDuelMFARequired as e:
-        # Keep the credentials so the mfa route can finish the login.
+    except books.mfa_errors() as e:
+        # Keep the auth object: it holds the credentials FanDuel needs to
+        # finish, and the live browser context DraftKings is waiting in.
         _auth[(book, uid)] = auth
         return {"status": "mfa_required", "message": str(e)}
-    except FanDuelBotBlocked as e:
+    except books.blocked_errors() as e:
         raise HTTPException(status_code=502, detail=str(e))
+    except books.unavailable_errors() as e:
+        raise HTTPException(status_code=501, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
 
@@ -275,7 +284,7 @@ async def submit_mfa_book(book: str, req: MFARequest, uid: str = Depends(get_uid
         await auth.submit_mfa_code(req.code)
         await _persist_auth(book, uid, auth)
         return _session_payload(auth)
-    except FanDuelBotBlocked as e:
+    except books.blocked_errors() as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
@@ -398,6 +407,8 @@ async def sync_bets(
             await db.upsert_bet(uid, client.normalize_bet(raw))
             count += 1
         return {"status": "ok", "book": book, "bets_synced": count}
+    except books.unavailable_errors() as e:
+        raise HTTPException(status_code=501, detail=str(e))
     finally:
         await _persist_auth(book, uid, auth)  # client may have refreshed on a 401
         await client.close()

@@ -24,6 +24,13 @@ models = [
     "nfl_data_py>=0.3.0",
     "pandas>=1.5.3",
 ]
+browser = [
+    # DraftKings login and bet sync run through real Chromium: its auth
+    # endpoints are behind Akamai Bot Manager, which no HTTP client can
+    # satisfy. An extra rather than a core dep so a deployment that only
+    # uses FanDuel does not carry a 400MB browser.
+    "playwright>=1.47",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

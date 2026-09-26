@@ -71,6 +71,10 @@ spec:
             - name: ODDS_API_BOOKS
               value: {{ .Values.backend.env.ODDS_API_BOOKS | quote }}
             {{- end }}
+            {{- if .Values.backend.env.DRAFTKINGS_HEADLESS }}
+            - name: DRAFTKINGS_HEADLESS
+              value: {{ .Values.backend.env.DRAFTKINGS_HEADLESS | quote }}
+            {{- end }}
             - name: CORS_ORIGINS
               value: {{ printf "[\"https://%s\"]" .Values.frontend.fqdn | quote }}
             - name: HOST

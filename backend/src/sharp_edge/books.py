@@ -7,15 +7,15 @@ Every book surface splits into four capabilities that fail independently:
     odds      read prices
     betslip   build a link that loads a card into the slip
 
-FanDuel has all four. DraftKings, as things stand, has exactly one, and the
-reasons are worth recording next to the code rather than in a commit message:
+FanDuel has all four. DraftKings has three, and the reasons are worth
+recording next to the code rather than in a commit message:
 
-    login/sync  possible, but the request shapes are not captured yet. The
-                FanDuel modules were built from a real browser capture and say
-                so; the same is needed here. See DRAFTKINGS_CAPTURE.md. The
-                open question that shapes the whole adapter is whether a
-                DraftKings session is a bearer token (as FanDuel's is, which is
-                what FanDuelAuth's whole refresh design rests on) or a cookie.
+    login/sync  yes, but through a real browser rather than an HTTP client.
+                Its /v1/auth/* endpoints are behind Akamai Bot Manager, whose
+                _abck cookie only validates once the sensor JS has posted
+                telemetry — and Akamai rejects headless Chromium too, so the
+                browser runs headed under Xvfb. All measured; see DRAFTKINGS.md
+                for the table and draftkings/browser.py for the mechanism.
     odds        not from DraftKings. Its public board answers 403 from Akamai's
                 edge on every host and path tried, from a dev machine and a
                 datacenter egress alike. Prices come from the aggregator in
@@ -131,6 +131,37 @@ def _fanduel_client(token: str, auth=None):
     return FanDuelClient(auth_token=token, state=settings.fanduel_state, auth=auth)
 
 
+def _draftkings_auth(email: str, password: str, prior=None):
+    from .config import settings
+    from .draftkings.auth import DraftKingsAuth
+
+    return DraftKingsAuth(
+        email, password,
+        state=settings.draftkings_state,
+        # Reuse the prior session key so a re-login lands on the same browser
+        # context slot rather than orphaning one.
+        session_key=getattr(prior, "session_key", None),
+    )
+
+
+def _draftkings_from_state(state: dict):
+    from .draftkings.auth import DraftKingsAuth
+
+    return DraftKingsAuth.from_state(state)
+
+
+def _draftkings_client(token: str, auth=None):
+    from .draftkings.client import DraftKingsClient
+
+    # The token is a digest, not a credential — the session lives in the
+    # stored cookies, which is what the browser context needs.
+    return DraftKingsClient(
+        storage_state=getattr(auth, "storage_state", None),
+        auth=auth,
+        session_key=f"{getattr(auth, 'session_key', 'dk')}:sync",
+    )
+
+
 BOOKS: dict[str, Book] = {
     "fanduel": Book(
         key="fanduel",
@@ -143,22 +174,51 @@ BOOKS: dict[str, Book] = {
     "draftkings": Book(
         key="draftkings",
         name="DraftKings",
-        # Both left unset on purpose. Wiring a guessed request shape in here
-        # would produce a login that fails in a way no error message explains;
-        # an explicit 501 pointing at the capture doc is worth more.
-        auth_factory=None,
-        client_factory=None,
+        # Driven through a real headless browser, not an HTTP client. Not a
+        # stylistic choice: DraftKings' /v1/auth/* endpoints are behind Akamai
+        # Bot Manager, whose _abck cookie only validates after its sensor JS
+        # posts telemetry. Measured from a primed cookie jar with browser
+        # headers and the right Origin — still "Access Denied". The browser
+        # satisfies it by being one. See draftkings/browser.py.
+        auth_factory=_draftkings_auth,
+        state_factory=_draftkings_from_state,
+        client_factory=_draftkings_client,
         odds_api_key="draftkings",
-        unsupported_reason=(
-            "DraftKings login and bet sync are not wired up yet — the session "
-            "and bet-history request shapes still need capturing from a "
-            "browser. See DRAFTKINGS_CAPTURE.md. DraftKings odds are already "
-            "available via the multi-book board."
-        ),
     ),
 }
 
 DEFAULT_BOOK = "fanduel"
+
+
+# Each book raises its own exception types, and the routes have to treat them
+# alike: an MFA challenge is an MFA prompt whoever raised it. Resolved lazily
+# into tuples rather than unified behind a base class, because retro-fitting a
+# base onto FanDuel's working exceptions would churn code for no behaviour.
+
+
+def mfa_errors() -> tuple:
+    """Exceptions that mean "the book wants a verification code"."""
+    from .draftkings.auth import DraftKingsMFARequired
+    from .fanduel.auth import FanDuelMFARequired
+
+    return (FanDuelMFARequired, DraftKingsMFARequired)
+
+
+def blocked_errors() -> tuple:
+    """Exceptions that mean bot protection refused before credentials were
+    even considered — a 502, since the failure is not the user's."""
+    from .draftkings.auth import DraftKingsBotBlocked
+    from .fanduel.auth import FanDuelBotBlocked
+
+    return (FanDuelBotBlocked, DraftKingsBotBlocked)
+
+
+def unavailable_errors() -> tuple:
+    """Exceptions that mean this deployment can't do it — Playwright or its
+    Chromium missing from the image. A 501, not a failed login."""
+    from .draftkings.browser import PlaywrightUnavailable
+
+    return (PlaywrightUnavailable,)
 
 
 def get_book(key: str) -> Book:

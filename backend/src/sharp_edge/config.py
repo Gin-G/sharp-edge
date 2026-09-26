@@ -26,14 +26,35 @@ class Settings(BaseSettings):
 
     # DraftKings
     #
-    # No credential here yet, and the odds are deliberately not fetched from
-    # DraftKings at all: every host and path of its public board answers 403
-    # from Akamai's edge before reaching DraftKings, from a dev machine and a
-    # datacenter egress alike. Prices come through the aggregator below
-    # instead. Account login and bet sync still need DraftKings' own session
-    # API, whose request shapes are not yet captured — see DRAFTKINGS_CAPTURE.md
-    # and books.py.
+    # Odds are deliberately not fetched from DraftKings: every host and path of
+    # its public board answers 403 from Akamai's edge before reaching
+    # DraftKings, from a dev machine and a datacenter egress alike, so prices
+    # come through the aggregator below instead.
+    #
+    # Login and bet sync go through a real headless browser rather than an HTTP
+    # client, because DraftKings' /v1/auth/* endpoints sit behind Akamai Bot
+    # Manager: the _abck cookie only validates once Akamai's sensor JS has
+    # POSTed telemetry, which no HTTP client can produce. Measured — a primed
+    # cookie jar with browser headers and the correct Origin still comes back
+    # "Access Denied". See draftkings/browser.py.
+    #
+    # No credentials here: they are entered per-user in the UI and never
+    # persisted, exactly as FanDuel's are.
     draftkings_state: str = "CO"
+    # Headed, and not as a debugging convenience — Akamai rejects headless
+    # Chromium outright. Measured against the live login page:
+    #
+    #     headless-shell (Playwright default)   403 Access Denied
+    #     new headless mode (channel=chromium)  403 Access Denied
+    #     headed (channel=chromium)             200, form renders
+    #
+    # Headed needs a display, so the container runs the process under Xvfb.
+    # Setting this True will get you blocked, not merely unsupported.
+    draftkings_headless: bool = False
+    # Generous on purpose: this covers a real page load plus a React app
+    # settling over whatever the pod's egress looks like. A tight timeout here
+    # surfaces as "login failed" when the truth is "the page was still coming".
+    draftkings_timeout_ms: int = 45000
 
     # The Odds API — every book's price for a prop, through one licensed feed.
     #

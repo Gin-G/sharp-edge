@@ -76,6 +76,13 @@ backend:
     # existingSecret as ODDS_API_KEY (optional — no key just means the board
     # shows FanDuel alone).
     ODDS_API_BOOKS: "draftkings,fanduel,betmgm,caesars"
+    # DraftKings login runs a headed Chromium under Xvfb, because Akamai
+    # rejects headless outright — see DRAFTKINGS.md. Leave this false; setting
+    # it true gets the login blocked rather than merely unsupported. The
+    # browser adds ~300-500MB while a login or sync runs (not resident), which
+    # the 4Gi limit above absorbs — worth watching only if it coincides with a
+    # cold pybaseball scrape.
+    DRAFTKINGS_HEADLESS: "false"
   # Persists pybaseball's on-disk Statcast cache across pod restarts so the
   # full 3-season scrape only ever runs once (not on every redeploy).
   pybaseballCache:
