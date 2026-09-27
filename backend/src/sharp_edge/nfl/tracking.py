@@ -122,17 +122,12 @@ def _has_kicked_off(row: dict, now: Optional[datetime] = None) -> bool:
 
     Unparseable or missing kickoff returns False — a row is only withheld on
     positive evidence that its game has started.
+
+    The parse itself lives in ``card`` because the betslip link needs the same
+    question answered, and two copies of a time comparison is two chances to
+    disagree about what "already started" means.
     """
-    raw = row.get("kickoff")
-    if not raw:
-        return False
-    try:
-        when = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return when <= (now or datetime.now(timezone.utc))
+    return card_mod.kickoff_passed(row, now)
 
 
 def _pick_row(r: dict, season: int, week: int, source: str) -> dict:
@@ -253,6 +248,12 @@ async def _repair_card_ids(season: int, week: int, props: list) -> int:
     legs = card.get("legs") or []
     missing = [l for l in legs if not l.get("fd_market_id")]
     if not legs or not missing:
+        return 0
+    # Only a card that could still be bet. The ids exist to rebuild a betslip
+    # link and the link expires at kickoff, so repairing a played week would
+    # rewrite the record to produce nothing — and the record is the one thing
+    # here worth leaving alone.
+    if any(card_mod.kickoff_passed(l) for l in legs):
         return 0
 
     by_key = {(r.get("key"), r.get("market")): r for r in props}
@@ -798,9 +799,16 @@ async def track_record(season: Optional[int] = None) -> dict:
                                  else _leg_result(leg, q.get("actual")))
 
     # A link back to FanDuel for the parlay actually on record, not the one the
-    # live board would rebuild now. Only while it is still unsettled: FanDuel
-    # pulls every market at kickoff, so a link on a graded week is a dead link
-    # dressed up as a button.
+    # live board would rebuild now — and only while it can still be placed.
+    # ``betslip_url`` drops it at the first leg's kickoff, which is the moment
+    # the markets go, rather than at settlement a day or two later. The legs,
+    # their lines and the prices that were available stay on the record either
+    # way; it is only the link that expires.
+    # Both guards, and neither is redundant. Kickoff is the one that matters —
+    # it drops the link at the moment FanDuel pulls the markets, which is the
+    # whole weekend before a result exists. The result check behind it catches
+    # what the kickoff parse cannot see: a leg frozen without a kickoff, or one
+    # whose timestamp will not parse, on a week that has already graded.
     for c in cards:
         c["betslip_url"] = (
             None if c.get("result")

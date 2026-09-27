@@ -1728,8 +1728,10 @@ async def test_a_frozen_card_can_be_reopened_on_fanduel(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_graded_parlay_offers_no_link(tmp_path):
-    """FanDuel pulls every market at kickoff, so a link on a settled week is a
-    dead link dressed up as a button."""
+    """The backstop for what the kickoff gate cannot see.
+
+    These legs carry no kickoff at all, so ``kickoff_passed`` reads them as not
+    started. The week has graded, which settles it regardless."""
     from sharp_edge.db.sqlite import SQLiteDatabase
 
     db = SQLiteDatabase(str(tmp_path / "c.db"))
@@ -1824,5 +1826,97 @@ async def test_a_settled_card_is_never_rewritten(tmp_path):
         # And the guard is in the WHERE clause too, not only in the caller.
         assert await db.update_nfl_card_legs(2026, 2, json.dumps([])) is False
         assert (await db.get_nfl_card(2026, 2))["legs"][0]["line"] == 45.5
+    finally:
+        await db.close()
+
+
+def test_the_link_dies_at_kickoff_not_at_settlement():
+    """The window this closes is the whole weekend.
+
+    FanDuel pulls a market when its game starts; the result does not land until
+    nflverse publishes a day or two later. Gated on the result, a parlay played
+    on Sunday morning keeps offering a live button until Tuesday, pointing at
+    markets that stopped existing at 11am.
+    """
+    past = {**_prop(kickoff="2026-09-20T17:00:00Z"), "side": "UNDER"}
+    future = {**_prop(kickoff="2099-01-01T00:00:00Z"), "side": "UNDER"}
+    assert card_mod.betslip_url([future]) is not None
+    assert card_mod.betslip_url([past]) is None
+    # All or nothing: a partial slip would load a different bet from the one
+    # recorded, which is the same failure as sending the wrong side.
+    assert card_mod.betslip_url([future, past]) is None
+
+
+def test_a_leg_with_no_kickoff_still_links():
+    """The parse defaults to 'not started' on missing or unparseable input, and
+    that default is deliberate — it is the result check in ``track_record``
+    that covers the graded case, not a guess made here."""
+    assert card_mod.betslip_url([_prop()]) is not None
+    assert card_mod.betslip_url([_prop(kickoff="not a timestamp")]) is not None
+
+
+def test_the_two_kickoff_readers_cannot_drift():
+    """Settlement and the betslip ask the same question of the same field, so
+    they answer it with the same code."""
+    row = {"kickoff": "2026-09-20T17:00:00Z"}
+    assert nfl_tracking._has_kicked_off(row) is card_mod.kickoff_passed(row)
+
+
+@pytest.mark.asyncio
+async def test_a_played_but_ungraded_parlay_offers_no_link(tmp_path):
+    """The case that prompted this: week 1's card still carried result=None on
+    a dev database in week 3, so a result-gated link would have been live two
+    weeks after the games."""
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    db = SQLiteDatabase(str(tmp_path / "k.db"))
+    await db.connect()
+    try:
+        nfl_tracking.configure(db)
+        await db.insert_nfl_card({
+            "season": 2026, "week": 1, "leg_count": 1, "american": 120,
+            "decimal_odds": 2.2, "model_p": 0.5,
+            "legs": json.dumps([{
+                "player_key": "a receiver", "market": "receiving_yards",
+                "line": 45.5, "side": "UNDER", "fd_odds": -114,
+                "kickoff": "2026-09-07T17:00:00Z",
+                "fd_market_id": "708.1", "under_selection_id": 12,
+            }]),
+        })
+        record = await nfl_tracking.track_record(2026)
+        row = record["cards"]["rows"][0]
+        assert row["result"] is None, "the fixture is an ungraded week"
+        assert row["betslip_url"] is None
+        # What the record is for survives — the leg, its line and its price.
+        leg = row["legs"][0]
+        assert leg["line"] == 45.5 and leg["side"] == "UNDER"
+        assert leg["fd_odds"] == -114
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_played_card_is_not_rewritten_to_produce_a_dead_link(tmp_path):
+    """The ids exist to rebuild a link that expires at kickoff, so repairing a
+    played week would touch the record for nothing."""
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    db = SQLiteDatabase(str(tmp_path / "p.db"))
+    await db.connect()
+    try:
+        nfl_tracking.configure(db)
+        await db.insert_nfl_card({
+            "season": 2026, "week": 1, "leg_count": 1, "american": 120,
+            "decimal_odds": 2.2, "model_p": 0.5,
+            "legs": json.dumps([{
+                "player_key": "a receiver", "market": "receiving_yards",
+                "line": 45.5, "side": "UNDER",
+                "kickoff": "2026-09-07T17:00:00Z",
+            }]),
+        })
+        props = [_prop(fd_market_id="708.9", under_selection_id=92,
+                       kickoff="2026-09-07T17:00:00Z")]
+        assert await nfl_tracking._repair_card_ids(2026, 1, props) == 0
+        assert (await db.get_nfl_card(2026, 1))["legs"][0].get("fd_market_id") is None
     finally:
         await db.close()

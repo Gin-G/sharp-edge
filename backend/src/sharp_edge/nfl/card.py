@@ -30,6 +30,7 @@ scored.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 from urllib.parse import quote
 
@@ -295,16 +296,52 @@ def summarise(card: list[dict]) -> dict:
     }
 
 
-def betslip_url(card: Iterable[dict]) -> Optional[str]:
-    """An addToBetslip link for the card.
+def kickoff_passed(row: dict, now: Optional[datetime] = None) -> bool:
+    """Has this row's game already started?
+
+    Unparseable or missing kickoff returns False — a row is only called
+    started on positive evidence that it has. See ``tracking._has_kicked_off``,
+    which delegates here, for why that default points the way it does.
+    """
+    raw = row.get("kickoff")
+    if not raw:
+        return False
+    try:
+        when = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when <= (now or datetime.now(timezone.utc))
+
+
+def betslip_url(card: Iterable[dict],
+                now: Optional[datetime] = None) -> Optional[str]:
+    """An addToBetslip link for the card, while the card can still be placed.
 
     Which selection id depends on the side — a prop market has one for the
     over and one for the under, and sending the wrong one loads the opposite
     bet, which is the worst possible failure for a convenience feature.
+
+    **Kickoff ends the link, not settlement.** FanDuel pulls a market the
+    moment its game starts, while a result does not land until nflverse
+    publishes a day or two later — so a link gated on the result stays lit
+    through the whole weekend pointing at markets that no longer exist. What
+    the record is for is the leg, the line and the price that was available;
+    the link is a convenience with an expiry, and past it a button is worse
+    than no button.
+
+    All or nothing: one kicked-off leg kills the link rather than shortening
+    it. A partial slip would load a different bet from the one recorded, which
+    is the same failure as sending the wrong side.
     """
+    legs = list(card)
+    if any(kickoff_passed(r, now) for r in legs):
+        return None
+
     parts: list[str] = []
     i = 0
-    for r in card:
+    for r in legs:
         market = r.get("fd_market_id")
         sel = (r.get("under_selection_id") if r.get("side") == "UNDER"
                else r.get("over_selection_id"))
