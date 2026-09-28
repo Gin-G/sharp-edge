@@ -14,13 +14,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 # headless Chromium either way, so the browser has to run headed, and headed
 # needs a display. Hence Xvfb.
 #
+# xauth is named explicitly because it is only a Recommends of xvfb, so
+# --no-install-recommends drops it -- and xvfb-run shells out to xauth to set
+# up the display's auth cookie, so without it the container exits immediately
+# with "xvfb-run: error: xauth command not found".
+#
 # `--with-deps` pulls the system libraries Chromium needs, which the slim base
 # does not carry. This layer is the bulk of the image (~400MB); for a
 # FanDuel-only build, drop it and remove playwright from requirements.txt —
 # the DraftKings routes then answer 501 naming the missing browser and nothing
 # else changes.
 RUN playwright install --with-deps chromium && \
-    apt-get update && apt-get install -y --no-install-recommends xvfb && \
+    apt-get update && apt-get install -y --no-install-recommends xvfb xauth && \
     rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
