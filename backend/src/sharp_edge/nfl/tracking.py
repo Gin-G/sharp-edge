@@ -50,6 +50,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from . import card as card_mod
+from ..db.base import iso_utc
 from .names import norm_name
 
 logger = logging.getLogger(__name__)
@@ -130,6 +131,22 @@ def _has_kicked_off(row: dict, now: Optional[datetime] = None) -> bool:
     return card_mod.kickoff_passed(row, now)
 
 
+def _is_locked(row: dict, now: Optional[datetime] = None) -> bool:
+    """Is this row's bet committed?
+
+    Delegates to ``card`` for the same reason ``_has_kicked_off`` does: the
+    deadline and the kickoff test are the same timestamp read two ways, and two
+    copies of that arithmetic is two chances to disagree.
+    """
+    return card_mod.is_locked(row, now)
+
+
+def _lock_stamp(row: dict) -> Optional[str]:
+    """This row's lock deadline, formatted for storage, or None if undatable."""
+    when = card_mod.lock_at(row)
+    return None if when is None else iso_utc(when)
+
+
 def _pick_row(r: dict, season: int, week: int, source: str) -> dict:
     return {
         "season": season, "week": week,
@@ -151,6 +168,10 @@ def _pick_row(r: dict, season: int, week: int, source: str) -> dict:
         "adjusted": r.get("adjusted"),
         "metrics": _metrics(r),
         "source": source,
+        # The commitment point, computed from this row's own kickoff. Stored so
+        # the deadline is answerable from the row and the rule lives in one
+        # place; see card.LOCK_LEAD.
+        "lock_at": _lock_stamp(r),
     }
 
 
@@ -188,13 +209,29 @@ async def freeze_week(payload: dict, source: str = "live") -> dict:
     db = _require_db()
     season, week = payload["season"], payload["week"]
 
-    # Only rows whose game is still ahead of us. Everything already under way
-    # is left exactly as it was recorded before kickoff — see _has_kicked_off.
-    picks = [r for r in card_mod.suggestions(payload.get("props") or [])
-             if not _has_kicked_off(r)]
+    # Only rows whose game is still ahead of us, and of those only the ones
+    # still open. Everything already under way is left exactly as it was
+    # recorded before kickoff (see _has_kicked_off); everything past its lock
+    # is left exactly as it was recorded at the lock (see card.LOCK_LEAD).
+    #
+    # The database enforces the second one too — a locked row fails the
+    # upsert's WHERE — because this filter runs on the board's view of a row
+    # while the guard that matters is about the row already stored. Belt and
+    # braces on the one invariant the whole record now rests on: a bet, once
+    # committed, is never rewritten.
+    live = [r for r in card_mod.suggestions(payload.get("props") or [])
+            if not _has_kicked_off(r)]
+    picks = [r for r in live if not _is_locked(r)]
+    locked = len(live) - len(picks)
     written = await db.upsert_nfl_picks(
         [_pick_row(r, season, week, source) for r in picks]
     )
+    # And the other direction: a candidate the board has stopped liking goes,
+    # while it is still only a candidate. See _tighten.
+    dropped = await _tighten(
+        season, week, payload.get("props") or [],
+        keep={(r["player_key"], r["market"])
+              for r in (_pick_row(x, season, week, source) for x in picks)})
 
     await _snapshot_board(payload)
 
@@ -221,8 +258,50 @@ async def freeze_week(payload: dict, source: str = "live") -> dict:
         })
     repaired = await _repair_card_ids(season, week, payload.get("props") or [])
     return {"suggestions": len(picks), "written": written,
+            "locked": locked,
+            "dropped": len(dropped), "dropped_rows": dropped,
             "card_legs": len(the_card), "card_frozen": frozen,
             "card_ids_repaired": repaired}
+
+
+async def _tighten(season: int, week: int, props: list,
+                   keep: set, now: Optional[datetime] = None) -> list:
+    """Drop the candidates this week's board no longer wants.
+
+    ``freeze_week`` was add-only, which made "tighten it up as the week goes
+    on" a figure of speech: a row recorded on Tuesday that developed a role
+    conflict or an injury flag by Friday stayed on the record and settled
+    anyway. This is the other half — the set narrows as the picture firms up.
+
+    **Three things are never dropped, and each for its own reason.** A locked
+    pick is a placed bet. A graded pick is history. And a pick whose market is
+    not on the board at all is *unexplained*: FanDuel pulls markets routinely,
+    and a thin or failed fetch must not be read as "the gate declined these".
+    So a row goes only on positive evidence — it is on the board, and the
+    board's own gate turned it down. Same rule as ``purge_late_picks`` and
+    ``_has_kicked_off``: act on evidence, never on its absence.
+
+    Returns what it removed, with the price it was holding, so a drop is
+    reportable rather than silent.
+    """
+    db = _require_db()
+    on_board = {(r.get("key") or norm_name(r.get("player")), r.get("market")): r
+                for r in props}
+    dropped = []
+    for p in await db.list_nfl_picks(season=season, week=week):
+        if p.get("result"):
+            continue
+        ident = (p["player_key"], p["market"])
+        if ident in keep or _is_locked(p, now):
+            continue
+        if ident not in on_board:
+            continue        # not offered right now; no evidence either way
+        if await db.delete_nfl_pick(season, week, p["player_key"], p["market"]):
+            dropped.append({"player": p.get("player"), "market": p["market"],
+                            "line": p.get("line"), "side": p.get("side"),
+                            "open_line": p.get("open_line"),
+                            "lock_at": p.get("lock_at")})
+    return dropped
 
 
 async def _repair_card_ids(season: int, week: int, props: list) -> int:
@@ -394,6 +473,29 @@ def _result_for(pick: dict, row) -> tuple[Optional[str], Optional[float]]:
     over = actual > line
     won = over if pick["side"] == "OVER" else not over
     return ("WIN" if won else "LOSS"), actual
+
+
+def _open_result_for(pick: dict, row) -> Optional[str]:
+    """The same outcome graded against the line and side we FIRST saw.
+
+    A different bet from the locked one whenever the market moved, and
+    sometimes the other side of it: if the line drifts past our projection
+    between Tuesday and Sunday, the open was an OVER and the lock is an UNDER.
+    Grading both is what answers "would we have been better off firing at
+    open?" — a question the record could not previously ask, because the
+    opening number was overwritten by the next board refresh.
+
+    None when the pick predates the open columns, which is every pick recorded
+    before this shipped. Those grade on the locked side only, and the
+    open-versus-lock comparison skips them rather than pretending the one line
+    it has was both.
+    """
+    if pick.get("open_line") is None or not pick.get("open_side"):
+        return None
+    graded, _ = _result_for(
+        {"market": pick["market"], "line": pick["open_line"],
+         "side": pick["open_side"]}, row)
+    return graded
 
 
 async def record_game_predictions(season: int, week: int,
@@ -621,13 +723,14 @@ async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
             continue
         row = actuals.get(p["player_key"])
         if row is None:
-            result, actual = "VOID", None
+            result, actual, open_result = "VOID", None, "VOID"
         else:
             result, actual = _result_for(p, row)
             if result is None:
                 continue
+            open_result = _open_result_for(p, row)
         await db.settle_nfl_pick(season, week, p["player_key"], p["market"],
-                                 result, actual)
+                                 result, actual, open_result)
         counts[result] += 1
 
     # Scored against the card's OWN legs, not the week's. Gating this on the
@@ -737,6 +840,54 @@ def _bucket(rows: list[dict]) -> dict:
     }
 
 
+def _open_vs_lock(rows: list[dict]) -> dict:
+    """Did waiting for the lock help, on the picks where it can be compared.
+
+    The two bets being compared are the SAME selection at two moments: the line
+    and price we first saw, and the line and price it had when the bet
+    committed. Only rows carrying both and graded on both count, so everything
+    recorded before the open columns existed drops out rather than being
+    counted as a wash.
+
+    ``moved_to_us`` is the one to watch. It is the share of picks where the
+    market came toward our side between open and lock — the line moving in the
+    direction we had already taken. That is closing line value measured against
+    our own commitment point rather than against the close, and it is the
+    nearest thing to an honest read on whether a bet was good that does not
+    depend on whether it won.
+    """
+    pairs = [r for r in rows
+             if r.get("open_result") in ("WIN", "LOSS")
+             and r.get("result") in ("WIN", "LOSS")
+             and r.get("open_line") is not None and r.get("line") is not None]
+    if not pairs:
+        return {"comparable": 0,
+                "note": "no pick yet carries both an opening and a locked line"}
+
+    at_open = [{**r, "result": r["open_result"],
+                "fd_odds": r.get("open_odds")} for r in pairs]
+    moved = 0
+    for r in pairs:
+        delta = float(r["line"]) - float(r["open_line"])
+        if delta == 0:
+            continue
+        # Measured against the side taken at OPEN, because the open bet is the
+        # one whose value this is asking about. An OVER wants the line to come
+        # down afterwards, an UNDER wants it to go up.
+        moved += 1 if (delta < 0) == (r.get("open_side") == "OVER") else 0
+    flipped = sum(1 for r in pairs if r.get("open_side") != r.get("side"))
+    changed = sum(1 for r in pairs
+                  if float(r["line"]) != float(r["open_line"]))
+    return {
+        "comparable": len(pairs),
+        "at_open": _bucket(at_open),
+        "at_lock": _bucket(pairs),
+        "line_moved": changed,
+        "side_flipped": flipped,
+        "moved_to_us": round(100 * moved / changed, 1) if changed else None,
+    }
+
+
 def _roi(rows: list[dict]) -> Optional[float]:
     staked = profit = 0.0
     for r in rows:
@@ -819,6 +970,9 @@ async def track_record(season: Optional[int] = None) -> dict:
     return {
         "season": season,
         "overall": _bucket(rows),
+        # The same picks graded at the line we first saw against the line they
+        # locked at. See _open_vs_lock, and card.LOCK_LEAD for the deadline.
+        "open_vs_lock": _open_vs_lock(rows),
         "by_market": _group(rows, "market"),
         "by_side": _group(rows, "side"),
         # The open question this season: we rank roughly half the board's

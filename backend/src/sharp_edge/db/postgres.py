@@ -7,7 +7,8 @@ from typing import Optional
 
 import asyncpg
 
-from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_PICK_COLUMNS,
+from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_PICK_ADDED_COLUMNS,
+                   NFL_PICK_COLUMNS,
                    NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
 
 
@@ -148,6 +149,18 @@ CREATE TABLE IF NOT EXISTS nfl_picks (
     actual DOUBLE PRECISION,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     resolved_at TIMESTAMPTZ,
+    -- When this pick stops being revised: its own kickoff less card.LOCK_LEAD.
+    -- Stored rather than derived so the deadline is answerable from the row and
+    -- the -2h rule lives in exactly one place.
+    lock_at TIMESTAMPTZ,
+    -- The bet as first seen. Written on insert, absent from every DO UPDATE,
+    -- so the opening number cannot be overwritten by a later board.
+    open_line DOUBLE PRECISION,
+    open_side TEXT,
+    open_odds INTEGER,
+    open_adjusted DOUBLE PRECISION,
+    open_edge_pts DOUBLE PRECISION,
+    open_result TEXT,
     PRIMARY KEY (season, week, player_key, market)
 );
 CREATE TABLE IF NOT EXISTS nfl_board_snapshots (
@@ -276,6 +289,12 @@ class PostgresDatabase(BetDatabase):
                     "DROP TABLE IF EXISTS sync_state CASCADE;"
                 )
             await conn.execute(SCHEMA)
+            # CREATE TABLE IF NOT EXISTS will not alter a table that already
+            # exists, so a column added after the fact needs this too.
+            for name, pg_type, _ in NFL_PICK_ADDED_COLUMNS:
+                await conn.execute(
+                    f"ALTER TABLE nfl_picks ADD COLUMN IF NOT EXISTS {name} {pg_type}"
+                )
             for idx in INDEXES:
                 try:
                     await conn.execute(idx)
@@ -491,9 +510,11 @@ class PostgresDatabase(BetDatabase):
                     """INSERT INTO nfl_picks (
                         season, week, player_key, market, player, player_id, position,
                         team, event, kickoff, line, side, fd_odds, model_p, edge_pts,
-                        residual, projection, adjusted, metrics, source
+                        residual, projection, adjusted, metrics, source, lock_at,
+                        open_line, open_side, open_odds, open_adjusted, open_edge_pts
                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-                              $16,$17,$18,$19,$20)
+                              $16,$17,$18,$19,$20,$21,
+                              $11,$12,$13,$18,$15)
                     ON CONFLICT (season, week, player_key, market) DO UPDATE SET
                         player=EXCLUDED.player, position=EXCLUDED.position,
                         team=EXCLUDED.team, event=EXCLUDED.event,
@@ -501,14 +522,17 @@ class PostgresDatabase(BetDatabase):
                         side=EXCLUDED.side, fd_odds=EXCLUDED.fd_odds,
                         model_p=EXCLUDED.model_p, edge_pts=EXCLUDED.edge_pts,
                         residual=EXCLUDED.residual, projection=EXCLUDED.projection,
-                        adjusted=EXCLUDED.adjusted, metrics=EXCLUDED.metrics
-                    WHERE nfl_picks.result IS NULL""",
+                        adjusted=EXCLUDED.adjusted, metrics=EXCLUDED.metrics,
+                        lock_at=EXCLUDED.lock_at
+                    WHERE nfl_picks.result IS NULL
+                      AND (nfl_picks.lock_at IS NULL OR nfl_picks.lock_at > NOW())""",
                     row["season"], row["week"], row["player_key"], row["market"],
                     row.get("player"), row.get("player_id"), row.get("position"),
                     row.get("team"), row.get("event"), row.get("kickoff"),
                     row["line"], row["side"], row.get("fd_odds"), row.get("model_p"),
                     row.get("edge_pts"), row.get("residual"), row.get("projection"),
                     row.get("adjusted"), row.get("metrics"), row.get("source", "live"),
+                    row.get("lock_at"),
                 )
                 n += int(status.rsplit(" ", 1)[-1])
         return n
@@ -533,13 +557,17 @@ class PostgresDatabase(BetDatabase):
         return [_nfl_row(r) for r in rows]
 
     async def settle_nfl_pick(self, season, week, player_key, market,
-                              result, actual) -> None:
+                              result, actual, open_result=None) -> None:
+        """Grade a pick. ``open_result`` grades the same outcome against the
+        line and side we first saw, which is a different bet whenever the
+        market moved — see nfl/tracking.settle_week."""
         async with self._pool.acquire() as conn:
             await conn.execute(
-                """UPDATE nfl_picks SET result = $1, actual = $2, resolved_at = NOW()
+                """UPDATE nfl_picks SET result = $1, actual = $2, resolved_at = NOW(),
+                       open_result = $7
                    WHERE season = $3 AND week = $4 AND player_key = $5
                      AND market = $6""",
-                result, actual, season, week, player_key, market,
+                result, actual, season, week, player_key, market, open_result,
             )
 
     async def delete_nfl_pick(self, season, week, player_key, market) -> int:

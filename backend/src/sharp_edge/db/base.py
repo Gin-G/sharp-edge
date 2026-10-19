@@ -20,8 +20,37 @@ PARLAY_COLUMNS = (
 NFL_PICK_COLUMNS = (
     "season, week, player_key, market, player, player_id, position, team, "
     "event, kickoff, line, side, fd_odds, model_p, edge_pts, residual, "
-    "projection, adjusted, metrics, source, result, actual, created_at, resolved_at"
+    "projection, adjusted, metrics, source, result, actual, created_at, resolved_at, "
+    # The bet as first seen, frozen on insert and never updated, against the
+    # bet as locked in the columns above. See nfl/card.LOCK_LEAD.
+    "lock_at, open_line, open_side, open_odds, open_adjusted, open_edge_pts, "
+    "open_result"
 )
+
+def iso_utc(when) -> str:
+    """A UTC timestamp as a fixed-width ISO string.
+
+    SQLite has no timestamp type, so ``lock_at`` is stored as text and compared
+    as text. That is only correct if both sides of the comparison are written
+    the same way, so every one of them goes through here: same offset, no
+    microseconds, so lexicographic order is chronological order.
+    """
+    return when.replace(microsecond=0).isoformat()
+
+
+#: Added after nfl_picks shipped, so they need an ALTER on an existing table
+#: as well as a place in the CREATE. Kept here because both backends apply the
+#: same list and a column added to one and not the other is a silent divergence
+#: that only shows up as a missing key in the API response.
+NFL_PICK_ADDED_COLUMNS = [
+    ("lock_at", "TIMESTAMPTZ", "TEXT"),
+    ("open_line", "DOUBLE PRECISION", "REAL"),
+    ("open_side", "TEXT", "TEXT"),
+    ("open_odds", "INTEGER", "INTEGER"),
+    ("open_adjusted", "DOUBLE PRECISION", "REAL"),
+    ("open_edge_pts", "DOUBLE PRECISION", "REAL"),
+    ("open_result", "TEXT", "TEXT"),
+]
 
 NFL_SNAPSHOT_COLUMNS = (
     "season, week, market, taken_at, rows, signal_over, signal_under, "

@@ -2,12 +2,14 @@
 
 import csv
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import aiosqlite
 
-from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_PICK_COLUMNS,
+from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_PICK_ADDED_COLUMNS,
+                   NFL_PICK_COLUMNS, iso_utc,
                    NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
 
 def _card_row(row) -> dict:
@@ -127,6 +129,14 @@ CREATE TABLE IF NOT EXISTS nfl_picks (
     actual REAL,
     created_at TEXT DEFAULT (datetime('now')),
     resolved_at TEXT,
+    -- Text, compared as text; see base.iso_utc for why that is safe here.
+    lock_at TEXT,
+    open_line REAL,
+    open_side TEXT,
+    open_odds INTEGER,
+    open_adjusted REAL,
+    open_edge_pts REAL,
+    open_result TEXT,
     PRIMARY KEY (season, week, player_key, market)
 );
 CREATE TABLE IF NOT EXISTS nfl_board_snapshots (
@@ -241,6 +251,14 @@ class SQLiteDatabase(BetDatabase):
             )
 
         await self._db.executescript(SCHEMA)
+        # SQLite has no ADD COLUMN IF NOT EXISTS, so ask first. Same list the
+        # postgres backend alters with, so the two cannot drift apart.
+        cur = await self._db.execute("PRAGMA table_info(nfl_picks)")
+        have = {r[1] for r in await cur.fetchall()}
+        for name, _, lite_type in NFL_PICK_ADDED_COLUMNS:
+            if name not in have:
+                await self._db.execute(
+                    f"ALTER TABLE nfl_picks ADD COLUMN {name} {lite_type}")
         await self._db.commit()
 
     async def close(self) -> None:
@@ -431,26 +449,34 @@ class SQLiteDatabase(BetDatabase):
     async def upsert_nfl_picks(self, rows: list[dict]) -> int:
         if not rows:
             return 0
+        now = iso_utc(datetime.now(timezone.utc))
         n = 0
         for row in rows:
             cursor = await self._db.execute(
                 """INSERT INTO nfl_picks (
                     season, week, player_key, market, player, player_id, position,
                     team, event, kickoff, line, side, fd_odds, model_p, edge_pts,
-                    residual, projection, adjusted, metrics, source
+                    residual, projection, adjusted, metrics, source, lock_at,
+                    open_line, open_side, open_odds, open_adjusted, open_edge_pts
                 ) VALUES (
                     :season, :week, :player_key, :market, :player, :player_id, :position,
                     :team, :event, :kickoff, :line, :side, :fd_odds, :model_p, :edge_pts,
-                    :residual, :projection, :adjusted, :metrics, :source
+                    :residual, :projection, :adjusted, :metrics, :source, :lock_at,
+                    :line, :side, :fd_odds, :adjusted, :edge_pts
                 ) ON CONFLICT(season, week, player_key, market) DO UPDATE SET
                     player=excluded.player, position=excluded.position,
                     team=excluded.team, event=excluded.event, kickoff=excluded.kickoff,
                     line=excluded.line, side=excluded.side, fd_odds=excluded.fd_odds,
                     model_p=excluded.model_p, edge_pts=excluded.edge_pts,
                     residual=excluded.residual, projection=excluded.projection,
-                    adjusted=excluded.adjusted, metrics=excluded.metrics
-                WHERE nfl_picks.result IS NULL""",
-                row,
+                    adjusted=excluded.adjusted, metrics=excluded.metrics,
+                    lock_at=excluded.lock_at
+                WHERE nfl_picks.result IS NULL
+                  AND (nfl_picks.lock_at IS NULL OR nfl_picks.lock_at > :lock_now)""",
+                # The open_* columns are deliberately absent from DO UPDATE: the
+                # opening number is written once and the database is what stops
+                # a later board overwriting it.
+                {**row, "lock_now": now, "lock_at": row.get("lock_at")},
             )
             n += cursor.rowcount or 0
         await self._db.commit()
@@ -474,12 +500,12 @@ class SQLiteDatabase(BetDatabase):
         return [dict(r) for r in await cursor.fetchall()]
 
     async def settle_nfl_pick(self, season, week, player_key, market,
-                              result, actual) -> None:
+                              result, actual, open_result=None) -> None:
         await self._db.execute(
             """UPDATE nfl_picks SET result = ?, actual = ?,
-                   resolved_at = datetime('now')
+                   resolved_at = datetime('now'), open_result = ?
                WHERE season = ? AND week = ? AND player_key = ? AND market = ?""",
-            (result, actual, season, week, player_key, market),
+            (result, actual, open_result, season, week, player_key, market),
         )
         await self._db.commit()
 

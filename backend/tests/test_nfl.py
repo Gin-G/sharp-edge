@@ -11,7 +11,7 @@ wrong rather than toward coverage:
                      replaced it has its own degenerate case
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import json
 import pytest
@@ -1417,6 +1417,391 @@ def test_a_naive_created_at_is_read_as_utc(monkeypatch):
     rows = [_row("after", "2026-09-14T14:50:00")]
     out, _ = _purge(monkeypatch, rows)
     assert out["late"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The lock: open the week wide, tighten it, then commit
+# ---------------------------------------------------------------------------
+
+def _dt(s):
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+@pytest.mark.parametrize("label,kickoff,expected", [
+    # The deadlines the owner asked for, derived rather than written down.
+    ("TNF", "2026-10-22T00:15:00Z", "2026-10-21T22:15:00+00:00"),
+    ("Sunday early", "2026-10-25T17:00:00Z", "2026-10-25T15:00:00+00:00"),
+    # 15:00Z is 11:00 Eastern, which is exactly what was asked for. The next
+    # three are why it is per game: a flat "Sunday 11:00" locks the late slate
+    # and both night games hours early, and locks London *after* kickoff.
+    ("London", "2026-10-25T13:30:00Z", "2026-10-25T11:30:00+00:00"),
+    ("Sunday late", "2026-10-25T20:25:00Z", "2026-10-25T18:25:00+00:00"),
+    ("SNF", "2026-10-26T00:20:00Z", "2026-10-25T22:20:00+00:00"),
+    ("MNF", "2026-10-27T00:15:00Z", "2026-10-26T22:15:00+00:00"),
+])
+def test_the_lock_is_two_hours_before_each_games_own_kickoff(label, kickoff, expected):
+    assert card_mod.lock_at({"kickoff": kickoff}).isoformat() == expected, label
+
+
+def test_a_wall_clock_sunday_rule_would_have_locked_london_after_kickoff():
+    """The case that decided the anchor, stated as a test so it stays decided.
+
+    A 9:30am Eastern kickoff is 13:30Z. A flat "Sunday 11:00 Eastern" lock is
+    16:00Z — ninety minutes after the game started. There is one of these most
+    weeks in September and October.
+    """
+    london = {"kickoff": "2026-10-25T13:30:00Z"}
+    flat_rule = _dt("2026-10-25T16:00:00Z")
+    assert card_mod.kickoff_at(london) < flat_rule
+    assert card_mod.lock_at(london) < card_mod.kickoff_at(london)
+
+
+def test_a_row_is_open_until_its_deadline_and_committed_after():
+    row = {"kickoff": "2026-10-25T17:00:00Z"}      # locks 15:00Z
+    assert not card_mod.is_locked(row, _dt("2026-10-25T14:59:00Z"))
+    assert card_mod.is_locked(row, _dt("2026-10-25T15:00:00Z")), "inclusive"
+    assert card_mod.is_locked(row, _dt("2026-10-25T16:30:00Z"))
+
+
+def test_an_undatable_row_stays_open_rather_than_locking_arbitrarily():
+    """Same direction kickoff_passed defaults in: freezing a row we cannot
+    date would pick a moment at random and call it a commitment."""
+    for row in ({}, {"kickoff": None}, {"kickoff": "not a time"}):
+        assert card_mod.lock_at(row) is None
+        assert card_mod.is_locked(row) is False
+
+
+@pytest.mark.asyncio
+async def test_a_locked_pick_is_never_rewritten(tmp_path):
+    """The invariant the whole record now rests on, against real sqlite.
+
+    Before the lock the upsert refines the row, which is the "tightening up"
+    through the week. After it, the same upsert must not touch line, side,
+    price or any model number — that row is a placed bet.
+    """
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    db = SQLiteDatabase(str(tmp_path / "t.db"))
+    await db.connect()
+    try:
+        past = "2020-01-01T00:00:00+00:00"       # already locked
+        future = "2099-01-01T00:00:00+00:00"     # still open
+        base = {"season": 2026, "week": 8, "player_key": "x", "market": "receptions",
+                "player": "X", "player_id": "00-9", "position": "WR", "team": "KC",
+                "event": "DEN @ KC", "kickoff": "2026-10-25T17:00:00Z",
+                "line": 4.5, "side": "OVER", "fd_odds": -110, "model_p": 0.6,
+                "edge_pts": 1.2, "residual": 1.2, "projection": 5.7,
+                "adjusted": 5.7, "metrics": None, "source": "live"}
+
+        # The guard reads the deadline ALREADY STORED on the row, not the one
+        # the incoming board carries — a bet is committed by time passing
+        # since it was written, so the stored value is the only one that can
+        # say so.
+        assert await db.upsert_nfl_picks([{**base, "lock_at": future}]) == 1
+        # Still open: the board refines it. This is the tightening up.
+        await db.upsert_nfl_picks([{**base, "lock_at": future, "line": 5.5,
+                                    "fd_odds": -120, "adjusted": 6.1}])
+        got = (await db.list_nfl_picks(2026, 8))[0]
+        assert (got["line"], got["fd_odds"], got["adjusted"]) == (5.5, -120, 6.1)
+
+        # A row whose stored deadline has passed. The same upsert must not
+        # touch line, side, price or any model number.
+        shut = {**base, "player_key": "z", "lock_at": past}
+        await db.upsert_nfl_picks([shut])
+        await db.upsert_nfl_picks([{**shut, "line": 9.5, "fd_odds": -300,
+                                    "adjusted": 99.0, "side": "UNDER",
+                                    "model_p": 0.99, "edge_pts": 50.0}])
+        got = [r for r in await db.list_nfl_picks(2026, 8)
+               if r["player_key"] == "z"][0]
+        assert got["line"] == 4.5, "a committed bet moved"
+        assert got["side"] == "OVER" and got["fd_odds"] == -110
+        assert got["adjusted"] == 5.7 and got["model_p"] == 0.6
+        assert got["edge_pts"] == 1.2
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_the_opening_line_survives_every_later_board(tmp_path):
+    """The open columns are absent from DO UPDATE, so the database is what
+    stops the opening number being overwritten — not discipline upstream."""
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    db = SQLiteDatabase(str(tmp_path / "t.db"))
+    await db.connect()
+    try:
+        base = {"season": 2026, "week": 8, "player_key": "y", "market": "receiving_yards",
+                "player": "Y", "player_id": "00-8", "position": "WR", "team": "KC",
+                "event": "DEN @ KC", "kickoff": "2026-10-25T17:00:00Z",
+                "line": 50.5, "side": "OVER", "fd_odds": -110, "model_p": 0.6,
+                "edge_pts": 12.0, "residual": 12.0, "projection": 62.5,
+                "adjusted": 62.5, "metrics": None, "source": "live",
+                "lock_at": "2099-01-01T00:00:00+00:00"}
+        await db.upsert_nfl_picks([base])
+        # The line drifts all week and takes our side with it.
+        for line, side, odds in ((56.5, "OVER", -115), (64.5, "UNDER", -105)):
+            await db.upsert_nfl_picks([{**base, "line": line, "side": side,
+                                        "fd_odds": odds, "edge_pts": 2.0}])
+        got = (await db.list_nfl_picks(2026, 8))[0]
+        assert (got["line"], got["side"]) == (64.5, "UNDER"), "the lock side follows"
+        assert (got["open_line"], got["open_side"]) == (50.5, "OVER"), "the open does not"
+        assert got["open_odds"] == -110 and got["open_adjusted"] == 62.5
+        assert got["open_edge_pts"] == 12.0
+    finally:
+        await db.close()
+
+
+def test_freeze_does_not_resubmit_a_locked_pick(monkeypatch):
+    """freeze_week runs on every board read, so the filter in front of the
+    upsert is the one that keeps a committed row out of the write entirely."""
+    import asyncio
+
+    sent = []
+
+    class _DB:
+        async def upsert_nfl_picks(self, rows):
+            sent.extend(rows)
+            return len(rows)
+
+        async def get_nfl_card(self, season, week):
+            return None
+
+        async def list_nfl_picks(self, season=None, week=None):
+            return []
+
+        async def insert_nfl_card(self, row):
+            return False
+
+        async def upsert_nfl_snapshot(self, row):
+            return None
+
+        async def upsert_nfl_game_predictions(self, rows):
+            return 0
+
+    # The one window that exercises this: kicking off soon enough that the
+    # lock has passed, but not yet started — so _has_kicked_off lets it
+    # through and only the lock filter can stop it. A fixed date cannot sit in
+    # a two-hour window forever, so it is relative to now.
+    now = datetime.now(timezone.utc)
+    open_prop = _prop(player="Open Guy", key="open guy",
+                      kickoff=(now + timedelta(days=3)).isoformat())
+    shut_prop = _prop(player="Shut Guy", key="shut guy",
+                      kickoff=(now + timedelta(minutes=45)).isoformat())
+    nfl_tracking.configure(_DB())
+    try:
+        out = asyncio.run(nfl_tracking.freeze_week(
+            {"season": 2026, "week": 8, "props": [open_prop, shut_prop]}))
+    finally:
+        nfl_tracking.configure(None)
+
+    assert out["locked"] == 1, "a pick inside its lock window was resubmitted"
+    assert [r["player_key"] for r in sent] == ["open guy"]
+    # Stamped two hours before its own kickoff, which is what the record has
+    # to carry for the open-versus-lock comparison to mean anything.
+    want = (_dt(open_prop["kickoff"]) - timedelta(hours=2)).replace(microsecond=0)
+    assert sent[0]["lock_at"] == want.isoformat()
+
+
+@pytest.mark.parametrize("open_line,open_side,expected", [
+    # Actual 60. The locked bet is OVER 50.5 and wins either way below.
+    (50.5, "OVER", "WIN"),      # the open was the same bet, and also won
+    (64.5, "UNDER", "WIN"),     # the open was the OTHER side, and still won
+    (64.5, "OVER", "LOSS"),     # waiting for the lock is what saved it
+])
+def test_the_open_is_graded_as_its_own_bet(open_line, open_side, expected):
+    pick = {"market": "receiving_yards", "line": 50.5, "side": "OVER",
+            "open_line": open_line, "open_side": open_side}
+    assert nfl_tracking._open_result_for(pick, {"receiving_yards": 60.0}) == expected
+
+
+def test_a_pick_from_before_the_lock_shipped_has_no_open_grade():
+    """Every pick recorded until now. Grading those on the one line they have
+    would report the locked result twice and call it a comparison."""
+    pick = {"market": "receiving_yards", "line": 50.5, "side": "OVER"}
+    assert nfl_tracking._open_result_for(pick, {"receiving_yards": 60.0}) is None
+
+
+def test_open_versus_lock_compares_only_what_can_be_compared():
+    rows = [
+        # Moved to us: we took the OVER and the line came down. Both won.
+        {"result": "WIN", "open_result": "WIN", "side": "OVER", "open_side": "OVER",
+         "line": 46.5, "open_line": 50.5, "fd_odds": -110, "open_odds": -110},
+        # Moved against us, and the open bet is the one that lost.
+        {"result": "WIN", "open_result": "LOSS", "side": "OVER", "open_side": "OVER",
+         "line": 58.5, "open_line": 50.5, "fd_odds": -110, "open_odds": -110},
+        # No open columns — predates the lock, must not count either way.
+        {"result": "LOSS", "side": "UNDER", "line": 4.5, "fd_odds": -110},
+        # Unsettled.
+        {"result": None, "open_result": None, "side": "OVER", "open_side": "OVER",
+         "line": 4.5, "open_line": 4.5, "fd_odds": -110, "open_odds": -110},
+    ]
+    out = nfl_tracking._open_vs_lock(rows)
+    assert out["comparable"] == 2
+    assert out["at_lock"]["wins"] == 2 and out["at_lock"]["losses"] == 0
+    assert out["at_open"]["wins"] == 1 and out["at_open"]["losses"] == 1
+    assert out["line_moved"] == 2 and out["side_flipped"] == 0
+    assert out["moved_to_us"] == 50.0
+
+
+def test_open_versus_lock_says_so_when_nothing_is_comparable():
+    out = nfl_tracking._open_vs_lock(
+        [{"result": "WIN", "side": "OVER", "line": 4.5, "fd_odds": -110}])
+    assert out["comparable"] == 0 and "note" in out
+
+
+@pytest.mark.asyncio
+async def test_the_whole_week_open_to_graded(tmp_path):
+    """Tuesday's opening line through to a result, against a real database.
+
+    The unit tests above each pin one joint. This is the shape the owner asked
+    for end to end: open wide, let the week move the line, commit at the lock,
+    then grade the open and the lock as the two different bets they are. It is
+    also the test that caught the guard being misread — it reads the deadline
+    STORED on the row, so "the lock passed" is simulated by ageing that value,
+    which is what the passage of time does. A board carrying a past deadline
+    for a row still stored as open is not a thing production can produce.
+    """
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    future, past = "2099-01-01T00:00:00+00:00", "2020-01-01T00:00:00+00:00"
+
+    def row(key, line, side, odds, adjusted, lock_at):
+        return {"season": 2026, "week": 8, "player_key": key,
+                "market": "receiving_yards", "player": key.title(),
+                "player_id": "00-1", "position": "WR", "team": "KC",
+                "event": "DEN @ KC", "kickoff": "2026-10-25T17:00:00Z",
+                "line": line, "side": side, "fd_odds": odds, "model_p": 0.58,
+                "edge_pts": abs(adjusted - line), "residual": adjusted - line,
+                "projection": adjusted, "adjusted": adjusted, "metrics": None,
+                "source": "live", "lock_at": lock_at}
+
+    db = SQLiteDatabase(str(tmp_path / "t.db"))
+    await db.connect()
+    nfl_tracking.configure(db)
+    try:
+        # Tuesday's open, then the market comes toward us by Saturday.
+        await db.upsert_nfl_picks([row("mover", 50.5, "OVER", -110, 62.5, future)])
+        await db.upsert_nfl_picks([row("mover", 46.5, "OVER", -118, 61.0, future)])
+        # And one where the line runs away and takes our side with it.
+        await db.upsert_nfl_picks([row("runner", 40.5, "OVER", -110, 52.0, future)])
+        await db.upsert_nfl_picks([row("runner", 58.5, "UNDER", -105, 52.0, future)])
+
+        # The clock reaches both deadlines.
+        await db._db.execute("UPDATE nfl_picks SET lock_at = ?", (past,))
+        await db._db.commit()
+
+        # A later board, still sending the real kickoff-derived deadline.
+        for key in ("mover", "runner"):
+            await db.upsert_nfl_picks([row(key, 99.5, "UNDER", -400, 1.0, future)])
+        stored = {p["player_key"]: p for p in await db.list_nfl_picks(2026, 8)}
+        assert stored["mover"]["line"] == 46.5, "a committed bet was rewritten"
+        assert stored["runner"]["side"] == "UNDER"
+        assert stored["mover"]["lock_at"] == past, "the deadline moved after the lock"
+
+        # 60 yards: the open won both, the lock split.
+        for p in stored.values():
+            res, val = nfl_tracking._result_for(p, {"receiving_yards": 60.0})
+            opn = nfl_tracking._open_result_for(p, {"receiving_yards": 60.0})
+            await db.settle_nfl_pick(2026, 8, p["player_key"], p["market"],
+                                     res, val, opn)
+
+        graded = {p["player_key"]: p for p in await db.list_nfl_picks(2026, 8)}
+        assert (graded["mover"]["open_result"], graded["mover"]["result"]) == ("WIN", "WIN")
+        # Opened as an OVER 40.5 and won; locked as an UNDER 58.5 and lost.
+        assert (graded["runner"]["open_result"], graded["runner"]["result"]) == ("WIN", "LOSS")
+
+        ovl = (await nfl_tracking.track_record(2026))["open_vs_lock"]
+        assert ovl["comparable"] == 2
+        assert ovl["line_moved"] == 2 and ovl["side_flipped"] == 1
+        assert ovl["at_open"]["wins"] == 2 and ovl["at_open"]["losses"] == 0
+        assert ovl["at_lock"]["wins"] == 1 and ovl["at_lock"]["losses"] == 1
+        # One line came to the open side, one ran away from it.
+        assert ovl["moved_to_us"] == 50.0
+    finally:
+        nfl_tracking.configure(None)
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Tightening: the set narrows as the picture firms up
+# ---------------------------------------------------------------------------
+
+def _tighten_db(stored):
+    class _DB:
+        def __init__(self):
+            self.rows = [dict(r) for r in stored]
+            self.deleted = []
+
+        async def list_nfl_picks(self, season=None, week=None):
+            return self.rows
+
+        async def delete_nfl_pick(self, season, week, player_key, market):
+            self.deleted.append((player_key, market))
+            return 1
+
+    return _DB()
+
+
+def _stored(key, market="receiving_yards", **kw):
+    row = {"season": 2026, "week": 8, "player_key": key, "market": market,
+           "player": key.title(), "line": 45.5, "side": "OVER",
+           "open_line": 42.5, "result": None,
+           "kickoff": "2099-01-01T00:00:00Z",
+           "lock_at": "2098-12-31T22:00:00+00:00"}
+    row.update(kw)
+    return row
+
+
+def _run_tighten(db, stored_props, keep):
+    import asyncio
+
+    nfl_tracking.configure(db)
+    try:
+        return asyncio.run(nfl_tracking._tighten(2026, 8, stored_props, keep))
+    finally:
+        nfl_tracking.configure(None)
+
+
+def test_a_candidate_the_board_has_turned_down_is_dropped():
+    """The week-long tightening. It was on the board Tuesday, it is on the
+    board Friday, and the gate no longer wants it — so it goes while it is
+    still only a candidate."""
+    db = _tighten_db([_stored("a receiver")])
+    dropped = _run_tighten(db, [_prop(key="a receiver")], keep=set())
+    assert db.deleted == [("a receiver", "receiving_yards")]
+    assert dropped[0]["open_line"] == 42.5, "the drop is reportable"
+
+
+def test_a_candidate_still_wanted_is_kept():
+    db = _tighten_db([_stored("a receiver")])
+    _run_tighten(db, [_prop(key="a receiver")],
+                 keep={("a receiver", "receiving_yards")})
+    assert db.deleted == []
+
+
+def test_a_market_that_is_not_posted_is_not_evidence_against_a_pick():
+    """The dangerous case. FanDuel pulls markets routinely and a fetch can come
+    back thin, so "absent from the board" must never read as "declined by the
+    gate" — otherwise one bad fetch deletes the week."""
+    db = _tighten_db([_stored("a receiver"), _stored("another receiver")])
+    assert _run_tighten(db, [], keep=set()) == []
+    assert db.deleted == []
+
+
+def test_a_locked_pick_is_never_dropped():
+    """It is a placed bet. The board's opinion of it stopped mattering at the
+    lock."""
+    db = _tighten_db([_stored("a receiver",
+                              lock_at="2020-01-01T00:00:00+00:00",
+                              kickoff="2020-01-01T02:00:00Z")])
+    _run_tighten(db, [_prop(key="a receiver")], keep=set())
+    assert db.deleted == []
+
+
+def test_a_graded_pick_is_never_dropped():
+    db = _tighten_db([_stored("a receiver", result="LOSS")])
+    _run_tighten(db, [_prop(key="a receiver")], keep=set())
+    assert db.deleted == []
 
 
 # ---------------------------------------------------------------------------

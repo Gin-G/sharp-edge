@@ -30,7 +30,7 @@ scored.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 from urllib.parse import quote
 
@@ -296,6 +296,59 @@ def summarise(card: list[dict]) -> dict:
     }
 
 
+#: How long before its own kickoff a pick stops being revised.
+#:
+#: **Per game, not per slate, and that is the whole point.** A wall-clock rule
+#: — "Sunday at 11" — is right for the 1pm Eastern games and wrong for every
+#: other window on the calendar: it locks the late slate five hours early, it
+#: locks Sunday night and Monday night a day early, and it locks a London game
+#: that kicked at 9:30am Eastern *ninety minutes after it started*. There is a
+#: London game most weeks in September and October, so that is not a corner
+#: case. Anchored on each game's own kickoff it comes out at 11:00 Eastern for
+#: a 1pm game anyway, and stays correct for Thursday, Saturday, Thanksgiving,
+#: Christmas and the 9:30 kickoffs without a second rule.
+#:
+#: Two hours, because that is comfortably before the official inactives land
+#: 90 minutes out. Locking after them would mean recording a bet that could
+#: not have been placed in that state — the market reprices the moment they
+#: post.
+LOCK_LEAD = timedelta(hours=2)
+
+
+def kickoff_at(row: dict) -> Optional[datetime]:
+    """This row's kickoff as an aware datetime, or None if it cannot be read.
+
+    The single parse. ``kickoff_passed``, ``lock_at`` and the betslip link all
+    go through here, because three copies of a time comparison is three
+    chances to disagree about what "already started" means.
+    """
+    raw = row.get("kickoff")
+    if not raw:
+        return None
+    try:
+        when = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
+
+
+def lock_at(row: dict) -> Optional[datetime]:
+    """When this row stops being revised: its kickoff less ``LOCK_LEAD``.
+
+    None when the kickoff cannot be read, which leaves the row revisable — the
+    same direction ``kickoff_passed`` defaults in. Freezing a row we cannot
+    date would pick an arbitrary moment and call it a commitment.
+    """
+    when = kickoff_at(row)
+    return None if when is None else when - LOCK_LEAD
+
+
+def is_locked(row: dict, now: Optional[datetime] = None) -> bool:
+    """Is this row's bet committed — line, price and side no longer moving?"""
+    deadline = lock_at(row)
+    return deadline is not None and deadline <= (now or datetime.now(timezone.utc))
+
+
 def kickoff_passed(row: dict, now: Optional[datetime] = None) -> bool:
     """Has this row's game already started?
 
@@ -303,16 +356,8 @@ def kickoff_passed(row: dict, now: Optional[datetime] = None) -> bool:
     started on positive evidence that it has. See ``tracking._has_kicked_off``,
     which delegates here, for why that default points the way it does.
     """
-    raw = row.get("kickoff")
-    if not raw:
-        return False
-    try:
-        when = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return when <= (now or datetime.now(timezone.utc))
+    when = kickoff_at(row)
+    return when is not None and when <= (now or datetime.now(timezone.utc))
 
 
 def betslip_url(card: Iterable[dict],

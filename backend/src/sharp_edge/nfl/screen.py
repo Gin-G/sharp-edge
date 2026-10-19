@@ -642,6 +642,14 @@ def warm_async(force: bool = False) -> dict:
 
 def as_payload(board: NFLBoard) -> dict:
     """The board as the API serves it."""
+    # Stamp every row with its own commitment point before anything reads the
+    # board, so the page can show what is committed without re-deriving the
+    # deadline. One copy of that arithmetic, in card.LOCK_LEAD — the same
+    # reason kickoff_passed lives there rather than in each caller.
+    for r in board.props:
+        when = card_mod.lock_at(r)
+        r["lock_at"] = when.isoformat() if when else None
+        r["locked"] = card_mod.is_locked(r)
     signals = [r for r in board.props if r["signal"] and r["bettable"]]
     suggested = card_mod.suggestions(board.props)
     the_card = card_mod.build(board.props)
@@ -662,6 +670,11 @@ def as_payload(board: NFLBoard) -> dict:
         # two legs; the suggestions are what the track record is built from.
         "suggestions": suggested,
         "role_conflicts": sum(1 for r in suggested if r.get("role_conflict")),
+        # How much of what we would bet is already committed. Each row carries
+        # its own lock_at and locked above; this is the count the page leads
+        # with, because "9 of 14 committed" is the state of the week.
+        "locked_count": sum(1 for r in suggested if r.get("locked")),
+        "lock_lead_hours": card_mod.LOCK_LEAD.total_seconds() / 3600,
         # What the availability feeds took off the board, reported rather than
         # silently applied — a guard nobody can see is a guard nobody revisits.
         "availability": {
