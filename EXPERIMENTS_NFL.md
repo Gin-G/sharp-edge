@@ -698,6 +698,232 @@ execution proves the code runs.
 
 ---
 
+## Finding 13 — six weeks of settled picks: the availability layer is worth about six points, and the record has three holes in it
+
+First read of the real track record, 2026 weeks 1-6, 513 recorded picks of which
+417 have settled (216-195-6, **52.6%**, ROI **-2.9%**). Break-even at -110 is
+52.38%, so as a whole the board is paying for itself and nothing more. The
+interesting part is not the total, it is what the splits say.
+
+**The availability layer went live in week 4, and the record splits almost
+exactly on it.** Weeks 1-3 carry no `avail` and no `depth_rank` on a single
+frozen pick; weeks 4-6 carry both on every one. That makes the `by_availability`
+split in `/nfl/track-record` an accidental before/after of `nfl/availability.py`:
+
+| | picks | W-L | hit | ROI |
+|---|---|---|---|---|
+| weeks 1-3, no injury/role view (`avail` null) | 268 | 125-124 | 50.2% | **-7.2%** |
+| weeks 4-6, injury/role view live (`avail` ACTIVE) | 245 | 91-71 | **56.2%** | **+3.7%** |
+
+Six points of hit rate and eleven of ROI, on 162 settled bets after the change —
+and, per hole 1 below, earned on the roster-designation half of the module
+alone, because the practice report has never reached it. Not a controlled
+comparison — the weeks differ in every other way too, and week
+3 (36-54, -25.0%) is doing a lot of the damage on the early side — but it is the
+first evidence that refusing bets on men who are not playing, and on UNDERs
+whose role just grew, is worth what it cost to build.
+
+**The vacated-share direction holds up.** `VACATED_SHARE_BLOCKS_UNDER = 0.33`
+was shipped as a judgement with nothing settled behind it. The rows that survive
+the guard — a vacancy visible but not large enough to block, or an OVER on the
+man inheriting it — are the best bucket on the board:
+
+| vacated_share | picks | W-L | hit | ROI |
+|---|---|---|---|---|
+| major (>=0.33) | 5 | 3-0 | 100.0% | +74.5% |
+| minor (0.08-0.33) | 50 | 20-12 | 62.5% | +18.0% |
+| none | 458 | 193-183 | 51.3% | -5.3% |
+
+Five picks is not a result and fifty barely is, but the sign is the one the
+module predicted: where we can *see* the role change, we are better than the
+market, and where we cannot, we are the market.
+
+**The role-conflict verdict predicts, and the losing side of it is still being
+bet.** `flag_role_conflicts` adjudicates a conflict against the depth chart and
+records `role_conflict_verdict` — `"model"` when the chart agrees with our
+projection, `"market"` when it says the market is describing the player's
+current role and we are describing an old one. That was shipped recorded but not
+acted on, with the explicit note that whether it predicts anything was a
+question for the record. It is answered:
+
+| verdict | picks | W-L | hit | ROI |
+|---|---|---|---|---|
+| model | 48 | 24-12 | 66.7% | **+22.1%** |
+| market | 27 | 6-11 | 35.3% | **-35.9%** |
+| no conflict | 130 | 65-56 | 53.7% | -1.5% |
+
+Seventeen settled picks is a thin basis for a filter, so this is logged rather
+than shipped. But it is the sign the module argued for, and it is the only
+bucket on the board that loses more than a third of its stake.
+
+**Rushing yards is the losing market, by a distance.**
+
+| market | picks | W-L | hit | ROI |
+|---|---|---|---|---|
+| receiving yards | 169 | 79-60 | 56.8% | +6.9% |
+| receptions | 207 | 89-76 | 53.9% | -2.9% |
+| rushing yards | 137 | 48-59 | **44.9%** | **-15.6%** |
+
+Which is consistent with everything in Finding 8: a backfield split is the role
+the projection is worst at, and 137 picks is enough to take seriously. UNDER
+(54.8%, +0.8%) also continues to beat OVER (50.2%, -6.6%).
+
+Dropping the two losing buckets, on the 301 settled picks the pick endpoint
+returns (week 1 falls outside its 400-row window):
+
+| | W-L | hit | ROI |
+|---|---|---|---|
+| as it stands | 160-141 | 53.2% | -1.7% |
+| drop verdict == market | 154-130 | 54.2% | +0.3% |
+| drop rushing yards | 126-97 | 56.5% | +4.0% |
+| drop both | 120-88 | 57.7% | +6.3% |
+| drop both, weeks 4-6 only | 67-37 | **64.4%** | **+18.4%** |
+
+These are filters chosen after seeing the outcomes, so the last row is an
+upper bound on what they are worth, not an estimate of it. Recorded here to be
+re-measured on weeks 7+ before anything is cut.
+
+### Four holes the record exposed, and the first one is the big one
+
+**1. The official injury report has never once reached the board.** `_verdict`
+does `(report_status or "").strip().lower()`, and nflverse writes a *null*
+`report_status` for every player who appears on the report with practice
+information but no game designation — 195 of week 6's 376 rows, and a majority
+of every week's. `float('nan')` is truthy, so `or ""` does not catch it and
+`nan.strip()` raises `AttributeError`. That propagates out of `_fetch`, and
+`week_board` answers an exception by returning **the last board it successfully
+built**:
+
+```python
+except Exception as e:
+    logger.warning(...)
+    return cached if _cache["key"] == key and cached else Board(...)
+```
+
+A board only builds successfully while `inj[inj.week == week]` is *empty* — that
+is, before the week's first club files. From the first filing onward every
+rebuild raises and silently re-serves the pre-report snapshot. The live week-6
+board, rebuilt on demand on 2026-10-19, still reports
+`injury_report_rows: 0` and `depth_as_of: 2026-10-13T14:58:07Z`, while the feeds
+themselves are current (376 injury rows for week 6; newest depth snapshot
+`2026-10-19T14:35:37Z`). Null `report_status` rows exist in all six weeks
+(121/182 in week 1), so this has been true since the module shipped.
+
+What survived is the roster-designation leg — `RES`/`IR`/`PUP`/`SUS`/`NON` and
+the `I01` inactive flag — because those come from the roster feed, which is read
+before the crash. So the layer has been running on *half* its evidence: it knows
+who is on injured reserve and who was ruled inactive, and it has never known
+who was listed Out or Doubtful on the practice report. **The +6 points above
+were earned without the injury report.** The fix is one line — coerce with
+`pandas.isna` or `str(x or "")` rather than relying on `or`, in `_verdict` for
+both `report_status` and `practice_status` — and the honest consequence is that
+the availability measurement above has to be re-taken afterwards, because the
+feed it is named for was not in it.
+
+Worth separating from the upstream projection: NFL-API's own
+`parse_nflverse_injuries` coerces with `str(... or "").strip().upper()` and
+handles the same nulls correctly, so the *projection* has been reading the
+report all along. Only the board's gate has not.
+
+**2. Every Monday-night game is stranded, permanently.**
+
+36 picks across weeks
+2-5 are still pending, and all 36 are from exactly four games: NYG@LAR (wk2, 7),
+PHI@CHI (wk3, 8), ATL@NO (wk4, 14), BUF@LAR (wk5, 7). Every one is the week's
+Monday nighter. The cause is in `/nfl/settle` with no arguments:
+`target = max((p["season"], p["week"]) for p in pending)` settles only the
+single highest week that has anything pending. The settle cronjob refreshes the
+board before settling, which *creates* the next week's picks — so by the time
+Tuesday's settle runs, the max pending week has already advanced past the week
+whose Monday game just finished, and it never goes back. `settle_week` itself is
+correct; it waits on each pick's own team appearing in the published file. The
+no-arg week picker is the bug. It should iterate every week with pending picks,
+not take the max. Until it does, the record is missing one full slate a week,
+9% of recorded picks, and it is a biased slice rather than a random one.
+
+**3. About 15% of picks each week are frozen off the August projection.**
+NFL-API publishes only the upcoming week to `player_projections`; later weeks
+keep their preseason vintage until their own turn comes. `current_week` rolls to
+week N+1 as soon as week N's last game is in the past — Monday night — while the
+in-season projection for week N+1 is not published until the Tuesday 21:00
+Denver run. The board therefore spends roughly a day each week pricing against
+an August number computed with `use_injuries=False` and no current-season form.
+`projections._is_preseason` catches it and `calibrate_to_market` rescales it, so
+it is not blind, but it is a different model:
+
+| frozen | W-L | hit |
+|---|---|---|
+| before that week's in-season projection | 22-21 | 51.2% |
+| after it | 138-120 | 53.5% |
+
+43 settled picks against 258 — directionally worse, nowhere near significant,
+and worth re-reading at the end of the season. The cheap mitigation is to not
+freeze picks against a projection `_is_preseason` has already flagged, once the
+season is underway.
+
+**4. The upstream projection has not been recomputed since week 6.** The
+`nfl-api-projections` cronjob has failed every run since 2026-10-15 with
+`pyarrow requires NumPy 2.0 or newer, found 1.26.4` — the same pyarrow/numpy
+break that took out the roster sync. NFL-API pinned `pyarrow>=7.0.0,<18` in its
+own image, but this job pip-installs `nfl_projections` from the `main` tarball
+on top of that image and `nfl-data-py`'s `pyproject.toml` leaves `pyarrow`
+uncapped, so the cap is only as good as whatever pip decides to leave alone. The
+injury and fill-in machinery the board depends on — zeroing OUT and DOUBTFUL
+from the nflverse report, promoting whoever is behind them via
+`roles.effective_rank`, capping the group with `roles.apply_team_budget` — all
+of it runs inside that job, so no run means no fresh view of either. Week 6's
+projection carried 105 `injured_out` rows; week 7's, as it stands, is the August
+one and carries none.
+
+### What shipped
+
+Holes 1, 2 and 4 are fixed. Hole 3 is left as it is, deliberately.
+
+**1 — `availability._text`.** One coercion helper, applied where the injury
+feed is read rather than at each use, so a parquet null never reaches
+`_verdict`, a `Player`, or the JSON the screen serialises. Verified against the
+live feeds on 2026-10-19: `injury_report_rows` 0 → **376**, `depth_as_of`
+`2026-10-13` → `2026-10-19T14:35:37Z`, and the week-6 board went from 455 OUT
+and *no* QUESTIONABLE to 503 OUT and 82 QUESTIONABLE — about fifty absences
+that had never reached the gate, plus a whole status that had never appeared on
+the board at all.
+
+`week_board` also stopped re-serving a stale board silently. The fallback is
+still right — the alternative is dropping every availability guard over one bad
+fetch — but the copy it returns now carries `stale_seconds` and the reason, and
+`summary()` reports both, so the next time this happens the board says so
+instead of looking built.
+
+Tests: `_verdict` over every null parquet hands us, and — the ones that would
+actually have caught it — `_fetch` and `week_board` executed against stubbed
+feeds. Every availability test before this called `_verdict` directly, which is
+precisely why a bug in how `_fetch` assembles its arguments survived six weeks.
+
+**2 — the settle walk.** `/nfl/settle` with no arguments now iterates every
+week holding an unresolved pick, oldest first, each in its own try so one bad
+week cannot strand the others, and reports per-week results plus totals. A
+named `(season, week)` behaves exactly as before. The cronjob's curl timeout
+went to 600s for the one-time catch-up of weeks 2-6.
+
+**4 — the pyarrow cap**, in `nfl-data-py`'s `pyproject.toml` *and*
+`requirements.txt`: `pyarrow>=7.0.0,<18`. The cronjob installs the package from
+the `main` tarball over the API image, so the image's own pin could not survive
+a resolve it did not control — pip saw 26.0.0 as newest and took it. Under the
+cap it resolves 17.0.0, which is the version already in the image and the one
+the last successful run used. Guarded by two tests: a parquet round-trip that
+exercises the pyarrow/numpy bridge rather than reading a version number, and a
+check that the cap is present in both files.
+
+**3 — left alone.** Not freezing picks against a projection `_is_preseason`
+has already flagged would be acting on 43 settled bets at a 2.3-point
+difference, which is noise, and it would cut 15% of the sample that is meant to
+measure it. The two real options are owner calls rather than bug fixes: publish
+the upcoming *two* weeks from NFL-API, or roll the board to week N+1 on the
+Tuesday publish instead of the moment week N's last game ends. Re-read at the
+end of the season.
+
+---
+
 ## Operations
 
 **Daily settlement** runs in-cluster at 13:00 UTC
