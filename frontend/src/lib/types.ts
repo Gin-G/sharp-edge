@@ -378,6 +378,17 @@ export interface NflProp {
   vacated_share?: number | null;
   vacated_by?: string[] | null;
 
+  /** When this bet commits: two hours before this row's own kickoff, so the
+   *  deadline is right for London, Thursday, Saturday and both night games
+   *  without a second rule. See LOCK_LEAD in nfl/card.py. Null when the
+   *  kickoff cannot be read, which leaves the row open. */
+  lock_at?: string | null;
+  /** Past its deadline. A locked row shows the line and price it committed
+   *  at, not what the book is offering now — so the two must be told apart
+   *  on the page, or a line that has since moved reads as a stale board
+   *  rather than as a bet already placed. */
+  locked?: boolean;
+
   prediction_type: string | null;
   exp_games: number | null;
 
@@ -488,9 +499,30 @@ export interface NflTrackBucket {
   roi: number | null;
 }
 
+/** The same picks graded twice: at the line we first saw and at the line they
+ *  committed at. Answers "would we have been better off firing at open?" */
+export interface NflOpenVsLock {
+  /** Picks carrying both an opening and a locked line, and graded on both.
+   *  Everything recorded before the lock shipped is excluded rather than
+   *  counted as a wash. */
+  comparable: number;
+  at_open?: NflTrackBucket;
+  at_lock?: NflTrackBucket;
+  line_moved?: number;
+  /** Where the line moved far enough to flip which side we were on — the open
+   *  and the lock are then genuinely different bets. */
+  side_flipped?: number;
+  /** Share of the moves that went toward the side taken at open. Closing line
+   *  value measured against our own commitment point: the nearest honest read
+   *  on whether a bet was good that does not depend on whether it won. */
+  moved_to_us?: number | null;
+  note?: string;
+}
+
 export interface NflTrackRecord {
   season: number | null;
   overall: NflTrackBucket;
+  open_vs_lock?: NflOpenVsLock;
   by_market: ({ market: string } & NflTrackBucket)[];
   by_side: ({ side: string } & NflTrackBucket)[];
   by_week: ({ week: number } & NflTrackBucket)[];
@@ -569,6 +601,12 @@ export interface NflScreen {
    *  set the track record is built from. */
   suggestions: NflProp[];
   role_conflicts: number;
+  /** How many of the suggestions have passed their lock. The state of the
+   *  week in one number: the rest are still being refined. */
+  locked_count?: number;
+  /** Hours before kickoff that a bet commits, so the page can state the rule
+   *  rather than hardcode it. */
+  lock_lead_hours?: number;
   /** Who is out this week, what their absence vacated, and what that took off
    *  the board. Reported rather than silently applied. */
   availability?: {
@@ -579,6 +617,9 @@ export interface NflScreen {
     depth_as_of: string | null;
     injury_report_rows: number;
     errors: string[];
+    /** Set only when this board is being re-served after a failed refresh,
+     *  which used to happen silently. */
+    stale_seconds?: number | null;
     rows_out: number;
     vacancies: NflVacancy[];
     withheld_unavailable: NflWithheld[];

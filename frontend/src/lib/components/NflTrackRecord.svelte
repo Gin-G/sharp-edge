@@ -84,6 +84,7 @@
   }
 
   $: o = data?.overall;
+  $: ovl = data?.open_vs_lock;
   $: cardRows = (data?.cards.rows ?? []).slice().sort(
     (a, b) => b.season - a.season || b.week - a.week
   );
@@ -166,6 +167,66 @@
         <div class="text-xs text-slate-500 mt-0.5">weeks swept</div>
       </div>
     </div>
+
+    <!-- Open against lock. Only meaningful once picks carry both lines, so it
+         says so rather than rendering an empty comparison. -->
+    {#if ovl}
+      <div class="border-t border-border px-5 pt-4 pb-4">
+        <div
+          class="text-xs font-medium text-slate-400 uppercase tracking-wider"
+          title="The same picks graded twice: at the line first seen on Tuesday, and at the line they committed at two hours before kickoff."
+        >
+          Opening line vs the lock
+        </div>
+        {#if !ovl.comparable}
+          <div class="text-xs text-slate-500 mt-2">
+            {ovl.note ?? 'Nothing carries both lines yet.'}
+            Picks recorded from now on carry their opening number, so this fills
+            in as the first locked week settles.
+          </div>
+        {:else}
+          <div class="flex items-baseline gap-x-6 gap-y-1 flex-wrap mt-2 text-sm">
+            <span class="text-slate-400">
+              at open
+              <span class="text-slate-200 tabular-nums font-medium ml-1">
+                {ovl.at_open?.wins}–{ovl.at_open?.losses}
+              </span>
+              <span class="tabular-nums ml-1 {roiClass(ovl.at_open?.roi ?? null)}">
+                {ovl.at_open?.roi == null ? '' : `${ovl.at_open.roi > 0 ? '+' : ''}${ovl.at_open.roi.toFixed(1)}%`}
+              </span>
+            </span>
+            <span class="text-slate-400">
+              at lock
+              <span class="text-slate-200 tabular-nums font-medium ml-1">
+                {ovl.at_lock?.wins}–{ovl.at_lock?.losses}
+              </span>
+              <span class="tabular-nums ml-1 {roiClass(ovl.at_lock?.roi ?? null)}">
+                {ovl.at_lock?.roi == null ? '' : `${ovl.at_lock.roi > 0 ? '+' : ''}${ovl.at_lock.roi.toFixed(1)}%`}
+              </span>
+            </span>
+            {#if ovl.moved_to_us != null}
+              <span
+                class="text-slate-500 text-xs"
+                title="Of the picks whose line moved between open and lock, the share that moved toward the side we took at open. Above half means the market came to us, which is the best read on whether a bet was good that does not depend on whether it won."
+              >
+                market came to us on {ovl.moved_to_us}% of {ovl.line_moved} moves
+              </span>
+            {/if}
+            {#if ovl.side_flipped}
+              <span
+                class="text-slate-500 text-xs"
+                title="The line moved far enough to put us on the other side, so the open and the lock are genuinely different bets."
+              >
+                {ovl.side_flipped} flipped side
+              </span>
+            {/if}
+          </div>
+          <div class="text-xs text-slate-600 mt-1">
+            {ovl.comparable} picks carry both lines
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     {#each groups as group}
       {#if group.rows.length}

@@ -4,7 +4,7 @@
   import {
     NFL_CACHE_KEY, load as loadScreen, initialState,
     fmtOdds, fmtPct, fmtSigned, fmtEv, evClass, MARKET_LABEL, fmtKickoff,
-    shortEvent, MARKET_GROUP, GROUP_ORDER, GROUP_BLURB,
+    fmtLock, shortEvent, MARKET_GROUP, GROUP_ORDER, GROUP_BLURB,
   } from '$lib/nflScreen';
   import type { NflScreen, NflProp } from '$lib/types';
   import NflCard from '$lib/components/NflCard.svelte';
@@ -36,6 +36,15 @@
     if (!includeUnbettable && !p.bettable) return false;
     return true;
   });
+
+  // How much of the week is committed, and when the next thing commits. The
+  // one-line state of the week: the rest is still being refined.
+  $: committed = (data?.suggestions ?? []).filter((r) => r.locked).length;
+  $: stillOpen = (data?.suggestions ?? []).filter((r) => !r.locked);
+  $: nextLock = stillOpen
+    .map((r) => r.lock_at)
+    .filter((x): x is string => !!x)
+    .sort()[0] ?? null;
 
   $: overs = rows.filter((r) => r.signal === 'OVER').length;
   $: unders = rows.filter((r) => r.signal === 'UNDER').length;
@@ -146,6 +155,29 @@
          where they came from — both are context for it. -->
     <NflCard {data} />
 
+    {#if (data.suggestions?.length ?? 0) > 0}
+      <div
+        class="card py-2 text-xs text-slate-400 flex items-center gap-x-4 gap-y-1 flex-wrap"
+        title="Each bet commits two hours before its own game rather than at a fixed time of day, so the deadline is right for Thursday, the 9:30 London kickoff, Saturday and both night games without a second rule."
+      >
+        <span class="text-slate-300 font-medium">
+          {committed} of {data.suggestions.length} committed
+        </span>
+        {#if stillOpen.length}
+          <span>
+            {stillOpen.length} still being refined{nextLock
+              ? ` · next commits ${fmtKickoff(nextLock)}`
+              : ''}
+          </span>
+        {:else}
+          <span>the whole week is locked</span>
+        {/if}
+        <span class="text-slate-600">
+          a locked row shows the line it committed at, not today's
+        </span>
+      </div>
+    {/if}
+
     <NflTrackRecord />
 
     <!-- Controls -->
@@ -243,6 +275,10 @@
                 <th class="text-right px-3 py-3">Edge</th>
                 <th class="text-right px-3 py-3">EV/$1</th>
                 <th class="text-left px-3 py-3">Game</th>
+                <th
+                  class="text-left px-3 py-3 whitespace-nowrap"
+                  title="A bet commits two hours before its own game. Until then the line and price on this row keep being refined; after it they are the numbers it committed at, whatever the book shows now."
+                >Lock</th>
               </tr>
             </thead>
             <tbody>
@@ -281,6 +317,20 @@
                   <td class="px-3 py-2.5 text-slate-500 text-xs whitespace-nowrap" title={r.event ?? ''}>
                     {shortEvent(r.event)}
                     <span class="text-slate-600"> · {fmtKickoff(r.kickoff)}</span>
+                  </td>
+                  <td class="px-3 py-2.5 text-xs whitespace-nowrap">
+                    <span
+                      class={r.locked
+                        ? 'text-slate-300 font-medium'
+                        : 'text-slate-500'}
+                      title={r.lock_at
+                        ? (r.locked
+                            ? `Committed at ${fmtKickoff(r.lock_at)}. This line and price are what it locked at.`
+                            : `Commits ${fmtKickoff(r.lock_at)}, two hours before kickoff.`)
+                        : 'No readable kickoff, so this row stays open.'}
+                    >
+                      {r.locked ? '●' : '○'} {fmtLock(r.lock_at, r.locked)}
+                    </span>
                   </td>
                 </tr>
               {/each}

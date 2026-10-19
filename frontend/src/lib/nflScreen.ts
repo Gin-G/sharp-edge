@@ -148,6 +148,26 @@ export function shortEvent(event: string | null | undefined): string {
 }
 
 /** Kickoff as a short local weekday + time. */
+/** How long until this bet commits, or how long ago it did.
+ *
+ * Shown rather than just a padlock because the useful question mid-week is
+ * "how much longer can this move", and on a locked row it is "when was this
+ * the price" — the line on screen is the one it committed at, not what the
+ * book is offering now.
+ */
+export function fmtLock(iso: string | null | undefined,
+                        locked: boolean | undefined): string {
+  if (!iso) return '—';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '—';
+  const mins = Math.round((at.getTime() - Date.now()) / 60000);
+  const abs = Math.abs(mins);
+  const span = abs < 60 ? `${abs}m`
+    : abs < 60 * 36 ? `${Math.round(abs / 60)}h`
+    : `${Math.round(abs / 1440)}d`;
+  return locked ? `locked ${span} ago` : `${span} left`;
+}
+
 export function fmtKickoff(iso: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);
