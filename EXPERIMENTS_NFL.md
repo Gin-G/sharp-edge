@@ -924,6 +924,88 @@ end of the season.
 
 ---
 
+## The lock — open wide, tighten, commit
+
+Shipped on the owner's design: look at the opening line, refine the set as the
+week fills in, and commit each bet before its own game. It replaces a freeze
+model where a pick was upserted with the current line for as long as it stayed
+unresolved, which meant the recorded "bet" was whatever the board last saw
+rather than anything anyone could have placed.
+
+**The deadline is each game's own kickoff less two hours, not a time of day.**
+The brief was "Thursday night locking at noon Thursday, Sunday bets locking at
+11 on Sunday". Anchored per game that comes out at 11:00 Eastern for a 1pm
+kickoff — the same answer — and stays right everywhere a flat rule breaks:
+
+| slate | kickoff | lock |
+|---|---|---|
+| Thursday night | Thu 20:15 ET | Thu 18:15 ET |
+| London | **Sun 09:30 ET** | **Sun 07:30 ET** |
+| Sunday early | Sun 13:00 ET | Sun 11:00 ET |
+| Sunday late | Sun 16:25 ET | Sun 14:25 ET |
+| Sunday night | Sun 20:20 ET | Sun 18:20 ET |
+| Monday night | Mon 20:15 ET | Mon 18:15 ET |
+
+A flat "Sunday 11:00" locks the late slate five hours early, both night games
+nearly a day early, and a London game **ninety minutes after it kicked off**.
+There is a London game most weeks in September and October, so that is not a
+corner case — it is a silent recording of bets on games already in progress,
+which is the exact class of bug `purge_late_picks` exists to clean up after.
+Two hours because the official inactives land at ninety minutes; locking after
+them would record a price the market had already moved off.
+
+**Three states, and the database enforces the boundaries.** `lock_at` is
+stored on the row, so a bet is committed by the clock passing a value already
+written rather than by a job running — there is nothing to miss and nothing to
+race. The upsert carries `AND (lock_at IS NULL OR lock_at > NOW())`, and the
+`open_*` columns are absent from every `DO UPDATE` clause, so neither the
+opening number nor a committed bet can be rewritten by a later board. That is
+a guarantee from the schema rather than from discipline upstream.
+
+An unreadable kickoff leaves the row open rather than locking it, the same
+direction `kickoff_passed` already defaulted: freezing a row we cannot date
+would pick a moment at random and call it a commitment.
+
+**Tightening had to be built, not just named.** `freeze_week` was add-only, so
+a row recorded on Tuesday that developed a role conflict or an injury flag by
+Friday stayed on the record and settled anyway. `_tighten` now drops a
+candidate the board has turned down — but only on positive evidence: the market
+is on the board *and* the gate declined it. A locked pick, a graded pick, and a
+pick whose market is simply not posted are all left alone, because FanDuel
+pulls markets routinely and a thin fetch must never read as "the gate declined
+these". One bad board refresh would otherwise delete the week.
+
+**What it unlocks.** Both numbers are graded, so the record can now answer a
+question it previously could not ask, because the opening line was destroyed by
+the next refresh: *would we have been better off firing at open?* The
+comparison also yields `moved_to_us` — of the picks whose line moved between
+open and lock, the share that moved toward the side taken at open. That is
+closing line value measured against our own commitment point, and it is the
+best read available on whether a bet was good that does not depend on whether
+it won. Nothing to report yet: no pick carries both lines, and the first
+numbers arrive when the first locked week settles.
+
+**Read that comparison with hole 3 above in mind, because the lock half-fixes
+it and the open half-inherits it.** The board rolls to week N+1 the moment week
+N's last game ends, which is Monday night, while the in-season projection for
+week N+1 is not published until Tuesday 21:00 Denver. A lock two hours before
+kickoff is therefore always on the current projection — the committed bet is
+clean, which is the structural fix hole 3 was asking for. The *opening* line,
+though, is captured on whatever board first carried the market, and for a
+Monday-or-Tuesday open that can still be the August vintage with
+`use_injuries=False` behind it. So if the open grades worse than the lock, part
+of the gap may be the projection rather than the price, and the two cannot be
+separated from the record alone. Splitting the comparison on whether the open
+was taken against a `_is_preseason` board is the way to tell, and is worth
+adding once there are enough locked weeks for it to say anything.
+
+One consequence worth stating plainly. Every settled pick is necessarily a
+locked pick, since the lock precedes kickoff which precedes settlement — so the
+track record remains a record of committed bets, and dropping an unlocked
+candidate removes something that was never one.
+
+---
+
 ## Operations
 
 **Daily settlement** runs in-cluster at 13:00 UTC
