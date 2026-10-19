@@ -1,8 +1,9 @@
 {{- if .Values.nflSettle.enabled }}
 # Daily NFL settlement.
 #
-# Resolves the most recent week's recorded suggestions against nflverse
-# actuals. It has to be a scheduled job rather than something the app does on
+# Resolves every pending week's recorded suggestions against nflverse actuals
+# (the endpoint walks all of them when called bare — it used to take only the
+# newest, which left every Monday-night game unsettled forever). It has to be a scheduled job rather than something the app does on
 # read, because nflverse publishes a day or two after the games — there is no
 # request at the right moment to hang it off.
 #
@@ -53,7 +54,7 @@ spec:
                   echo "refreshing the board (records the week)";
                   curl -sS -m 120 "$BASE/nfl/screen" -o /dev/null -w 'board: %{http_code}\n' || true;
                   echo "settling";
-                  curl -sS -m 120 -X POST "$BASE/nfl/settle" -w '\n'
+                  curl -sS -m 600 -X POST "$BASE/nfl/settle" -w '\n'
               resources:
                 requests:
                   cpu: 10m

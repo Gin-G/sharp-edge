@@ -594,6 +594,79 @@ def test_missing_season_file_is_a_status_not_an_error():
 
 
 # ---------------------------------------------------------------------------
+# Which weeks a bare settlement run actually touches
+# ---------------------------------------------------------------------------
+
+class _PendingDB:
+    def __init__(self, picks):
+        self.picks = picks
+
+    async def list_nfl_picks(self, season=None, week=None):
+        return self.picks
+
+
+def _pending(*weeks, season=2026):
+    return [{"season": season, "week": w, "result": None} for w in weeks]
+
+
+def _run_settle(monkeypatch, picks, raises=(), **kw):
+    """Call the endpoint for real, recording which weeks it asked for."""
+    import asyncio
+
+    from sharp_edge import api
+
+    seen = []
+
+    async def fake_settle(season, week, regrade=False):
+        seen.append((season, week))
+        if week in raises:
+            raise RuntimeError("feed down")
+        return {"season": season, "week": week, "settled": 2, "WIN": 1, "LOSS": 1}
+
+    monkeypatch.setattr(api, "get_db", lambda: _PendingDB(picks))
+    monkeypatch.setattr(nfl_tracking, "settle_week", fake_settle)
+    return seen, asyncio.run(api.nfl_settle(**kw))
+
+
+def test_a_bare_settlement_run_walks_every_pending_week(monkeypatch):
+    """It used to take max() of the pending weeks, and that is how every
+    Monday-night game ended up permanently unsettled."""
+    seen, body = _run_settle(monkeypatch, _pending(4, 4, 5, 6))
+    assert seen == [(2026, 4), (2026, 5), (2026, 6)]
+    assert body["weeks_walked"] == 3
+    assert body["settled"] == 6 and body["WIN"] == 3
+
+
+def test_the_monday_night_week_is_not_left_behind_when_the_next_board_opens(monkeypatch):
+    """The exact shape of the bug. The settle job refreshes the board first,
+    which records week 7 — so week 6's Monday-night picks were behind the
+    cursor by the time anything looked at them, and stayed there."""
+    seen, _ = _run_settle(monkeypatch, _pending(6) + _pending(7, 7))
+    assert (2026, 6) in seen, "the Monday-night week was skipped again"
+    assert seen == [(2026, 6), (2026, 7)]
+
+
+def test_one_failing_week_does_not_strand_the_rest(monkeypatch):
+    seen, body = _run_settle(monkeypatch, _pending(4, 5, 6), raises=(5,))
+    assert seen == [(2026, 4), (2026, 5), (2026, 6)]
+    assert body["settled"] == 4          # weeks 4 and 6 still went through
+    failed = [w for w in body["weeks"] if w.get("error")]
+    assert len(failed) == 1 and failed[0]["week"] == 5
+
+
+def test_a_named_week_settles_only_that_week(monkeypatch):
+    seen, body = _run_settle(monkeypatch, _pending(4, 5, 6), season=2026, week=5)
+    assert seen == [(2026, 5)]
+    assert body["week"] == 5 and "weeks" not in body
+
+
+def test_nothing_pending_is_not_an_error(monkeypatch):
+    seen, body = _run_settle(monkeypatch, [])
+    assert seen == [] and body["settled"] == 0
+    assert body["message"] == "nothing pending"
+
+
+# ---------------------------------------------------------------------------
 # Role conflicts: we rank a team's players differently from the market
 # ---------------------------------------------------------------------------
 

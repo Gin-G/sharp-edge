@@ -920,25 +920,55 @@ async def nfl_track_record(season: Optional[int] = None):
 @app.post("/nfl/settle")
 async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None,
                      regrade: bool = False):
-    """Settle one week against nflverse actuals.
+    """Settle against nflverse actuals: one named week, or every pending one.
 
-    Defaults to the most recent week that still has pending picks, so the
-    daily job can call it with no arguments and do the right thing. nflverse
-    publishes a day or two after the games, and a week with no actuals yet is
-    reported as such rather than settled wrongly.
+    With no arguments it walks **every** week that still has an unresolved
+    pick, oldest first, so the daily job can call it bare and leave nothing
+    behind. nflverse publishes a day or two after the games, and a week with no
+    actuals yet is reported as such rather than settled wrongly.
+
+    It used to take ``max()`` of the pending weeks instead, and that quietly
+    dropped a full slate a week. The settle job refreshes the board before it
+    settles, and the refresh is what *records* the upcoming week — so by the
+    Tuesday after a Monday-night game, the newest pending week is already the
+    next one and the Monday game's picks are behind the cursor forever. It cost
+    36 picks across 2026 weeks 2-5, every one of them from that week's Monday
+    nighter: a biased 9% of the record rather than a random one.
     """
     try:
         from .nfl import tracking as nfl_tracking
     except ImportError as e:
         raise HTTPException(500, f"NFL extras not installed: {e}")
 
-    if season is None or week is None:
-        pending = [p for p in await get_db().list_nfl_picks() if not p.get("result")]
-        if not pending:
-            return {"settled": 0, "message": "nothing pending"}
-        target = max((p["season"], p["week"]) for p in pending)
-        season, week = target
-    return await nfl_tracking.settle_week(season, week, regrade=regrade)
+    if season is not None and week is not None:
+        return await nfl_tracking.settle_week(season, week, regrade=regrade)
+
+    pending = [p for p in await get_db().list_nfl_picks() if not p.get("result")]
+    if not pending:
+        return {"settled": 0, "message": "nothing pending"}
+    weeks = sorted({(p["season"], p["week"]) for p in pending})
+    if season is not None:
+        weeks = [(s, w) for s, w in weeks if s == season]
+    if week is not None:
+        weeks = [(s, w) for s, w in weeks if w == week]
+
+    results = []
+    for s, w in weeks:
+        # One week failing must not strand the rest — that is the whole shape
+        # of the bug this loop replaced.
+        try:
+            results.append(await nfl_tracking.settle_week(s, w, regrade=regrade))
+        except Exception as e:
+            logger.warning("[nfl] settle %s wk%s failed: %r", s, w, e)
+            results.append({"season": s, "week": w, "settled": 0, "error": str(e)})
+    def total(field):
+        return sum(r.get(field) or 0 for r in results)
+
+    return {"weeks": results, "weeks_walked": len(results),
+            "settled": total("settled"),
+            "waiting_on_kickoff": total("waiting_on_kickoff"),
+            "WIN": total("WIN"), "LOSS": total("LOSS"),
+            "PUSH": total("PUSH"), "VOID": total("VOID")}
 
 
 @app.post("/nfl/picks/purge-late")
