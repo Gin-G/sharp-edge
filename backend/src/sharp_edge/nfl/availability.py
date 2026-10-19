@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
@@ -190,6 +190,9 @@ class Board:
     depth_as_of: Optional[str] = None
     injury_rows: int = 0
     errors: list = field(default_factory=list)
+    #: Set only on a board being re-served after a failed refresh — see
+    #: ``week_board``. ``None`` means this board is what the feeds say now.
+    stale_seconds: Optional[int] = None
 
     def get(self, player_id: Optional[str] = None,
             key: Optional[str] = None) -> Optional[Player]:
@@ -214,6 +217,7 @@ class Board:
             "depth_as_of": self.depth_as_of,
             "injury_report_rows": self.injury_rows,
             "errors": self.errors,
+            "stale_seconds": self.stale_seconds,
         }
 
 
@@ -232,6 +236,32 @@ class Vacancy:
                 "players": self.players}
 
 
+def _text(value) -> str:
+    """A feed value as text, reading every kind of null as empty.
+
+    **This is load-bearing and it was the single worst bug in the module.**
+    These columns arrive from parquet, where a missing string is
+    ``float('nan')`` — and NaN is *truthy*, so the obvious ``value or ""``
+    passes it straight through and the ``.strip()`` after it raises
+    ``AttributeError: 'float' object has no attribute 'strip'``.
+
+    nflverse files a null ``report_status`` for every player who appears on the
+    injury report with practice information but no game designation, which is
+    most of the report — 195 of week 6's 376 rows in 2026, and a majority of
+    every week since week 1. So the first club to file each week raised out of
+    ``_fetch``, ``week_board`` answered the exception by re-serving the last
+    board it had built successfully, and that board was always one built
+    *before any club had filed*. The practice report never reached the screen
+    once: the live week-6 board still read ``injury_report_rows: 0`` six days
+    after the games, with 376 rows sitting in the file.
+
+    Anything that is not a string is a null here. Returning empty for it is
+    also the conservative answer for a status field: no designation read, which
+    falls through to the roster feed rather than inventing one.
+    """
+    return value if isinstance(value, str) else ""
+
+
 def _verdict(roster_status, abbr, report_status, practice_status, injury):
     """``(status, reason)`` from the three feeds, hardest evidence first.
 
@@ -245,16 +275,22 @@ def _verdict(roster_status, abbr, report_status, practice_status, injury):
     if abbr in _ABBR_OUT:
         return OUT, _ABBR_OUT[abbr]
 
-    reported = _REPORT.get((report_status or "").strip().lower())
+    # Coerced before anything is read off them — see _text.
+    report = _text(report_status).strip()
+    practice = _text(practice_status).strip()
+    hurt = _text(injury).strip()
+    because = f" ({hurt})" if hurt else ""
+
+    reported = _REPORT.get(report.lower())
     if reported:
-        return reported, f"{report_status.strip()}{f' ({injury})' if injury else ''}"
+        return reported, f"{report}{because}"
 
     # No report filed yet. A player who did not practise at all is the only
     # pre-report signal worth carrying, and it is carried as the softest
     # status there is — most of them play. It exists so that a Tuesday board,
     # built before a single club has filed, is not simply blind.
-    if (practice_status or "").strip().lower().startswith("did not"):
-        return QUESTIONABLE, f"did not practise{f' ({injury})' if injury else ''}"
+    if practice.lower().startswith("did not"):
+        return QUESTIONABLE, f"did not practise{because}"
     return ACTIVE, None
 
 
@@ -291,11 +327,13 @@ def _fetch(season: int, week: int) -> Board:
         inj = inj[inj.week == week]
         board.injury_rows = len(inj)
         for row in inj.itertuples(index=False):
+            # Coerced here rather than downstream so that a parquet NaN never
+            # reaches _verdict, a Player, or the JSON the screen serialises.
             injuries[getattr(row, "gsis_id", None)] = (
-                getattr(row, "report_status", None),
-                getattr(row, "practice_status", None),
-                getattr(row, "report_primary_injury", None)
-                or getattr(row, "practice_primary_injury", None),
+                _text(getattr(row, "report_status", None)) or None,
+                _text(getattr(row, "practice_status", None)) or None,
+                _text(getattr(row, "report_primary_injury", None))
+                or _text(getattr(row, "practice_primary_injury", None)) or None,
             )
     except Exception as e:
         logger.warning("[nfl-avail] injuries %s failed: %s", season, e)
@@ -370,8 +408,15 @@ def week_board(season: int, week: int, force: bool = False) -> Board:
         board = _fetch(season, week)
     except Exception as e:
         logger.warning("[nfl-avail] %s wk%s failed: %s", season, week, e)
-        return cached if _cache["key"] == key and cached else Board(season, week,
-                                                                    errors=[str(e)])
+        if _cache["key"] == key and cached:
+            # The last good board is the right thing to serve — the alternative
+            # is taking every availability guard off the card over a bad fetch.
+            # Serving it *silently* is not: a crash on the injury report left
+            # week 6 reading a Tuesday snapshot for six days and nothing on the
+            # board said so. The copy carries the age and the reason instead.
+            return replace(cached, errors=[*cached.errors, f"stale: {e}"],
+                           stale_seconds=round(now - _cache["fetched_at"]))
+        return Board(season, week, errors=[str(e)])
     if board.by_id or board.errors:
         _cache.update({"key": key, "value": board, "fetched_at": now})
     return board

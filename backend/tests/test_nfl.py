@@ -1480,6 +1480,39 @@ def test_no_practice_is_the_softest_signal_there_is():
     assert "Ankle" in reason
 
 
+def test_a_null_report_status_does_not_take_the_injury_report_down():
+    """The bug that hid the whole practice report for six weeks.
+
+    nflverse files a null ``report_status`` for every player who is on the
+    report with practice information but no game designation — most of the
+    report. NaN is truthy, so ``(report_status or "")`` left it in place and
+    the ``.strip()`` after it raised, which propagated out of ``_fetch`` and
+    left ``week_board`` re-serving a pre-report snapshot for the rest of the
+    week. Parametrised over every null parquet hands us.
+    """
+    for null in (float("nan"), None, 0.0):
+        status, reason = avail._verdict("ACT", "A01", null, null, null)
+        assert status == avail.ACTIVE
+        assert reason is None
+
+
+def test_a_null_report_status_still_leaves_the_practice_fallback_reachable():
+    """The null must fall *through* to the practice signal, not short-circuit
+    it — that is the only pre-report evidence a Tuesday board has."""
+    status, reason = avail._verdict(
+        "ACT", "A01", float("nan"), "Did Not Participate In Practice", "Ankle")
+    assert status == avail.QUESTIONABLE
+    assert reason == "did not practise (Ankle)"
+
+
+def test_a_null_injury_does_not_become_the_word_nan():
+    """``f"{injury}"`` on a NaN renders "nan", so the reason would have read
+    "Out (nan)" on every player whose injury was not specified."""
+    status, reason = avail._verdict("ACT", "A01", "Out", None, float("nan"))
+    assert status == avail.OUT
+    assert reason == "Out"
+
+
 def test_doubtful_is_grouped_with_out_not_with_questionable():
     assert avail.QUESTIONABLE in avail.PLAYABLE
     assert avail.DOUBTFUL not in avail.PLAYABLE
@@ -1568,6 +1601,104 @@ def test_the_id_index_beats_the_name_index():
     assert board.get(player_id="josh-jones").team == "SEA"
     assert board.get(key="josh jones").team == "SEA"
     assert board.get(player_id="nobody", key="nobody") is None
+
+
+# ---------------------------------------------------------------------------
+# Availability, executed end to end against stubbed feeds
+#
+# Every test above calls _verdict directly. None of them would have caught the
+# null-report_status crash, because that bug lived in how _fetch assembles the
+# arguments and in what week_board does with the exception. Only execution
+# proves the code runs — the same lesson as the usage-blend NameErrors.
+# ---------------------------------------------------------------------------
+
+def _feeds(monkeypatch, *, report_status, week=6):
+    """Stand in for the three nflverse parquet files, dispatching on URL."""
+    pd = pytest.importorskip("pandas")
+
+    roster = pd.DataFrame([
+        # Three men on one team: one ruled out, one on the report with no
+        # designation filed, one who was never on it at all.
+        {"week": week, "team": "MIN", "position": "RB", "full_name": "Aaron Jones",
+         "gsis_id": "00-1", "status": "ACT", "status_description_abbr": "A01"},
+        {"week": week, "team": "MIN", "position": "RB", "full_name": "Jordan Mason",
+         "gsis_id": "00-2", "status": "ACT", "status_description_abbr": "A01"},
+        {"week": week, "team": "MIN", "position": "WR", "full_name": "Justin Jefferson",
+         "gsis_id": "00-3", "status": "ACT", "status_description_abbr": "A01"},
+    ])
+    injuries = pd.DataFrame([
+        {"week": week, "gsis_id": "00-2", "report_status": "Out",
+         "practice_status": "Did Not Participate In Practice",
+         "report_primary_injury": "Ankle", "practice_primary_injury": "Ankle"},
+        # The row that used to raise: on the report, no designation yet.
+        {"week": week, "gsis_id": "00-1", "report_status": report_status,
+         "practice_status": report_status,
+         "report_primary_injury": report_status,
+         "practice_primary_injury": report_status},
+        # Last week's report must not be read as this week's.
+        {"week": week - 1, "gsis_id": "00-3", "report_status": "Out",
+         "practice_status": None, "report_primary_injury": "Knee",
+         "practice_primary_injury": None},
+    ])
+    depth = pd.DataFrame([
+        {"dt": "2026-10-19T14:35:37Z", "team": "MIN", "player_name": "Aaron Jones",
+         "gsis_id": "00-1", "pos_abb": "RB", "pos_rank": 1},
+        {"dt": "2026-10-13T14:58:07Z", "team": "MIN", "player_name": "Aaron Jones",
+         "gsis_id": "00-1", "pos_abb": "RB", "pos_rank": 3},
+    ])
+
+    def read_parquet(url, columns=None, **kw):
+        frame = (roster if "roster" in url else
+                 injuries if "injuries" in url else depth)
+        return frame[list(columns)] if columns else frame
+
+    monkeypatch.setattr(pd, "read_parquet", read_parquet)
+
+
+@pytest.mark.parametrize("null", [float("nan"), None])
+def test_the_board_builds_with_an_undesignated_player_on_the_report(monkeypatch, null):
+    """The regression. A null report_status used to raise out of _fetch, and
+    the week-6 board reported injury_report_rows 0 with 376 rows in the file."""
+    _feeds(monkeypatch, report_status=null)
+    board = avail._fetch(2026, 6)
+
+    assert board.errors == []
+    # Both of this week's rows counted, last week's excluded.
+    assert board.injury_rows == 2
+    assert board.get(player_id="00-2").status == avail.OUT
+    assert board.get(player_id="00-2").reason == "Out (Ankle)"
+    # Undesignated: playable, and nothing invented about him.
+    jones = board.get(player_id="00-1")
+    assert jones.status == avail.ACTIVE and jones.report_status is None
+    assert jones.depth_rank == 1          # newest snapshot, not the Oct 13 one
+    assert board.depth_as_of == "2026-10-19T14:35:37Z"
+
+
+def test_last_weeks_designation_is_not_applied_to_this_week(monkeypatch):
+    _feeds(monkeypatch, report_status=float("nan"))
+    board = avail._fetch(2026, 6)
+    assert board.get(player_id="00-3").status == avail.ACTIVE
+
+
+def test_a_board_served_after_a_failed_refresh_says_it_is_stale(monkeypatch):
+    """Serving the last good board is right; serving it silently is what let a
+    Tuesday snapshot stand in for week 6 for six days."""
+    _feeds(monkeypatch, report_status="Out")
+    avail._cache.update({"key": None, "value": None, "fetched_at": 0.0})
+    good = avail.week_board(2026, 6, force=True)
+    assert good.stale_seconds is None and good.errors == []
+
+    def boom(*a, **kw):
+        raise RuntimeError("feed down")
+
+    monkeypatch.setattr(avail, "_fetch", boom)
+    served = avail.week_board(2026, 6, force=True)
+    assert served.by_id == good.by_id          # still gating the card
+    assert served.stale_seconds is not None    # but no longer claiming to be now
+    assert any("feed down" in e for e in served.errors)
+    assert served.summary()["stale_seconds"] is not None
+    # The cached board itself is not polluted by the failure.
+    assert good.errors == []
 
 
 # ---------------------------------------------------------------------------
