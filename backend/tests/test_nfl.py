@@ -1722,6 +1722,59 @@ async def test_the_whole_week_open_to_graded(tmp_path):
         await db.close()
 
 
+@pytest.mark.asyncio
+async def test_postgres_is_handed_a_datetime_for_the_deadline():
+    """The one the sqlite tests could not catch, found in production.
+
+    lock_at is canonically an ISO string — one format, shared with the sqlite
+    backend so that text comparison of deadlines is safe. asyncpg refuses a str
+    for a timestamptz, so the postgres backend has to convert at the boundary,
+    and every test above exercises sqlite only. The freeze failed on the first
+    live board with:
+
+        invalid input for query argument $21: '2026-10-19T22:16:00+00:00'
+        (expected a datetime.date or datetime.datetime instance, got 'str')
+
+    Asserted by recording what the driver is actually handed, rather than by
+    reading the source, because the defect was a value's type at a call site.
+    """
+    from datetime import datetime
+
+    from sharp_edge.db.base import iso_utc
+    from sharp_edge.db.postgres import PostgresDatabase
+
+    sent = []
+
+    class _Conn:
+        async def execute(self, sql, *args):
+            sent.append(args)
+            return "INSERT 0 1"
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    db = PostgresDatabase("postgres://unused")
+    db._pool = _Pool()
+    stamp = iso_utc(card_mod.lock_at({"kickoff": "2026-10-25T17:00:00Z"}))
+    await db.upsert_nfl_picks([{
+        "season": 2026, "week": 8, "player_key": "a", "market": "receptions",
+        "line": 4.5, "side": "OVER", "lock_at": stamp,
+    }])
+
+    deadline = sent[0][20]
+    assert isinstance(deadline, datetime), f"asyncpg will refuse {type(deadline)}"
+    assert deadline.tzinfo is not None, "a naive deadline is read as server-local"
+    assert deadline.isoformat() == "2026-10-25T15:00:00+00:00"
+
+
 # ---------------------------------------------------------------------------
 # Tightening: the set narrows as the picture firms up
 # ---------------------------------------------------------------------------

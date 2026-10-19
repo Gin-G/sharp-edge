@@ -532,7 +532,10 @@ class PostgresDatabase(BetDatabase):
                     row["line"], row["side"], row.get("fd_odds"), row.get("model_p"),
                     row.get("edge_pts"), row.get("residual"), row.get("projection"),
                     row.get("adjusted"), row.get("metrics"), row.get("source", "live"),
-                    row.get("lock_at"),
+                    # _to_dt, not the raw string: lock_at is canonically an ISO
+                    # string (one format, shared with sqlite, see base.iso_utc)
+                    # and asyncpg refuses str for a timestamptz.
+                    _to_dt(row.get("lock_at")),
                 )
                 n += int(status.rsplit(" ", 1)[-1])
         return n
