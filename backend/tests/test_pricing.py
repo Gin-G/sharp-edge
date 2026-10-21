@@ -307,7 +307,8 @@ def test_a_strong_hitter_is_still_allowed_an_edge():
 # Snapshot exit codes
 # --------------------------------------------------------------------------
 
-def _run_snapshot_main(tmp_path, monkeypatch, date_str, prices, make_existing):
+def _run_snapshot_main(tmp_path, monkeypatch, date_str, prices, make_existing,
+                       events=({"event_id": "1", "name": "A @ B"},)):
     """Drive snapshot_odds.main() with a stubbed fetch."""
     import sys
     snap = _snap()
@@ -317,6 +318,7 @@ def _run_snapshot_main(tmp_path, monkeypatch, date_str, prices, make_existing):
     class _FD:
         def __init__(self, *a, **k): pass
         async def hit_prices_detailed(self, target=None): return prices
+        async def slate_events(self, target=None): return list(events)
 
     monkeypatch.setattr(snap, "FanDuelOdds", _FD)
     monkeypatch.setattr(sys, "argv", [
@@ -345,6 +347,14 @@ def test_a_day_with_no_snapshot_at_all_still_fails(tmp_path, monkeypatch):
     code = _run_snapshot_main(tmp_path, monkeypatch, "2026-08-16",
                               prices={}, make_existing=False)
     assert code == 1
+
+
+def test_a_day_with_no_games_is_not_a_failure(tmp_path, monkeypatch):
+    """Off days and the offseason list nothing. 2026-10-20 and -21 went red
+    on every pass with the fetch returning 200 and an empty board."""
+    code = _run_snapshot_main(tmp_path, monkeypatch, "2026-10-21",
+                              prices={}, make_existing=False, events=())
+    assert code == 0
 
 
 # ---------------------------------------------------------------------------

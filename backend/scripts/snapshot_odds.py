@@ -332,6 +332,15 @@ def main() -> None:
                 "earlier captures", args.date, existing.name,
             )
             return
+        # Unless there were no games to price. Off days, the gaps in the
+        # postseason and the whole winter all list nothing, and the schedule
+        # keeps firing through them — 2026-10-20 and -21 went red six times a
+        # day on an empty board.
+        target = date.fromisoformat(args.date)
+        if not asyncio.run(FanDuelOdds(state=args.state).slate_events(target)):
+            logger.info("%s: no MLB games on the board, nothing to snapshot",
+                        args.date)
+            return
         logger.error("%s: no prices, and no snapshot from any earlier pass",
                      args.date)
         sys.exit(1)

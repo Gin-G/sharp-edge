@@ -146,6 +146,19 @@ class FanDuelOdds:
                     }
         return out
 
+    async def _events_on(self, client: httpx.AsyncClient, target: date) -> list[dict]:
+        events = await self.fetch_events(client)
+        return [e for e in events if _same_day(e.get("open_date"), target)]
+
+    async def slate_events(self, target: Optional[date] = None) -> list[dict]:
+        """The games listed for ``target`` — empty on an off day or out of season."""
+        target = target or date.today()
+        async with httpx.AsyncClient(
+            headers=DEFAULT_HEADERS, timeout=self._timeout,
+            transport=self._transport,
+        ) as client:
+            return await self._events_on(client, target)
+
     async def hit_prices_detailed(self, target: Optional[date] = None) -> dict[str, dict]:
         """Prices with the game they belong to.
 
@@ -159,8 +172,7 @@ class FanDuelOdds:
             headers=DEFAULT_HEADERS, timeout=self._timeout,
             transport=self._transport,
         ) as client:
-            events = await self.fetch_events(client)
-            events = [e for e in events if _same_day(e.get("open_date"), target)]
+            events = await self._events_on(client, target)
             if not events:
                 logger.info("[fd-odds] no MLB events listed for %s", target)
                 return {}
