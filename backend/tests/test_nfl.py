@@ -408,9 +408,9 @@ def test_held_rows_are_reported_not_dropped():
     board = screen.NFLBoard(season=2026, week=1)
     board.props = [
         {"signal": "UNDER", "bettable": False, "prior_only": True,
-         "market": "rushing_yards", "player": "James Cook"},
+         "market": "receiving_yards", "player": "James Cook"},
         {"signal": "OVER", "bettable": True, "prior_only": False,
-         "market": "rushing_yards", "player": "Derrick Henry"},
+         "market": "receiving_yards", "player": "Derrick Henry"},
         # Prior-only, but in a market that is off the card anyway — not "held".
         {"signal": "UNDER", "bettable": False, "prior_only": True,
          "market": "passing_yards", "player": "Some QB"},
@@ -472,19 +472,19 @@ def test_a_short_line_is_refused_on_both_sides():
     card was Mack Hollins over 8.5 receiving yards on a projection of 33.
     """
     for side in ("OVER", "UNDER"):
-        row = _prop(side=side, signal=side, line=8.5, adjusted=9.0, edge_pts=25.0)
+        row = _prop(side=side, signal=side, line=8.5, adjusted=9.0, edge_pts=11.0)
         assert card_mod.suggestions([row]) == [], side
     # The same edge on a real line is fine.
     assert len(card_mod.suggestions([_prop(side="UNDER", signal="UNDER",
                                            line=45.5, adjusted=40.0,
-                                           edge_pts=20.0)])) == 1
+                                           edge_pts=11.0)])) == 1
 
 
 def test_a_projection_at_twice_the_line_is_a_different_player_week():
     """Not a strong opinion — a description of a role the book is not pricing."""
-    assert card_mod.suggestions([_prop(line=30.0, adjusted=75.0, edge_pts=20.0)]) == []
+    assert card_mod.suggestions([_prop(line=30.0, adjusted=75.0, edge_pts=11.0)]) == []
     assert len(card_mod.suggestions([_prop(line=30.0, adjusted=50.0,
-                                           edge_pts=20.0)])) == 1
+                                           edge_pts=11.0)])) == 1
 
 
 def test_card_takes_one_leg_per_game():
@@ -719,7 +719,7 @@ def test_flagged_rows_are_still_suggested():
     """Flagged, not filtered — dropping them would remove the evidence needed
     to find out whether they actually lose."""
     row = _prop(line=50.5, adjusted=20.0, side="UNDER", signal="UNDER",
-                edge_pts=22.0)
+                edge_pts=11.0)
     row["role_conflict"] = True
     assert len(card_mod.suggestions([row])) == 1
 
@@ -2233,7 +2233,7 @@ def test_an_under_on_an_inherited_role_is_refused():
     projection still describes the committee — so the residual points down by
     construction and the under is our own stale number talking."""
     under = _prop(side="UNDER", signal="UNDER", line=55.5, adjusted=31.0,
-                  edge_pts=15.0, market="rushing_yards", vacated_share=0.44)
+                  edge_pts=11.0, market="receiving_yards", vacated_share=0.44)
     assert card_mod.suggestions([under]) == []
     # The over on the same row is not refused: nothing about a vacated role
     # argues the man who inherited it will fall short.
@@ -2296,7 +2296,7 @@ def test_withheld_reports_only_what_the_guards_actually_cost():
     never_qualified = _prop(key="scrub", avail=avail.OUT, edge_pts=0.6)
     inherited = _prop(key="jones", side="UNDER", signal="UNDER",
                       market="rushing_yards", line=55.5, adjusted=31.0,
-                      edge_pts=15.0, vacated_share=0.44)
+                      edge_pts=11.0, vacated_share=0.44)
     got = card_mod.withheld([would_have_bet, never_qualified, inherited])
     assert [r["key"] for r in got["unavailable"]] == ["a receiver"]
     assert [r["key"] for r in got["vacated_under"]] == ["jones"]
@@ -2310,8 +2310,8 @@ def test_the_two_guards_are_reported_separately():
     """A man who is out and whose group lost work is one row, not two — he is
     refused for being out, and cannot also be said to have inherited a role he
     will not be there to fill."""
-    row = _prop(avail=avail.OUT, side="UNDER", signal="UNDER", edge_pts=15.0,
-                market="rushing_yards", line=55.5, adjusted=31.0,
+    row = _prop(avail=avail.OUT, side="UNDER", signal="UNDER", edge_pts=11.0,
+                market="receiving_yards", line=55.5, adjusted=31.0,
                 vacated_share=0.44)
     got = card_mod.withheld([row])
     assert len(got["unavailable"]) == 1

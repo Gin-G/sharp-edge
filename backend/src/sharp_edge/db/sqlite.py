@@ -8,7 +8,8 @@ from typing import Optional
 
 import aiosqlite
 
-from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_PICK_ADDED_COLUMNS,
+from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_GAME_ADDED_COLUMNS,
+                   NFL_PICK_ADDED_COLUMNS,
                    NFL_PICK_COLUMNS, iso_utc,
                    NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
 
@@ -259,6 +260,12 @@ class SQLiteDatabase(BetDatabase):
             if name not in have:
                 await self._db.execute(
                     f"ALTER TABLE nfl_picks ADD COLUMN {name} {lite_type}")
+        cur = await self._db.execute("PRAGMA table_info(nfl_game_predictions)")
+        have = {r[1] for r in await cur.fetchall()}
+        for name, _, lite_type in NFL_GAME_ADDED_COLUMNS:
+            if name not in have:
+                await self._db.execute(
+                    f"ALTER TABLE nfl_game_predictions ADD COLUMN {name} {lite_type}")
         await self._db.commit()
 
     async def close(self) -> None:
@@ -522,12 +529,12 @@ class SQLiteDatabase(BetDatabase):
         n = 0
         for r in rows:
             await self._db.execute(
-                """INSERT INTO nfl_game_predictions (season,week,home_team,away_team,event,kickoff,exp_home_points,exp_away_points,exp_total,exp_margin,home_win_p,market_spread,market_total,thin)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """INSERT INTO nfl_game_predictions (season,week,home_team,away_team,event,kickoff,exp_home_points,exp_away_points,exp_total,exp_margin,home_win_p,market_spread,market_total,thin,sim)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(season, week, home_team, away_team) DO UPDATE SET
-                       event=excluded.event, kickoff=excluded.kickoff, exp_home_points=excluded.exp_home_points, exp_away_points=excluded.exp_away_points, exp_total=excluded.exp_total, exp_margin=excluded.exp_margin, home_win_p=excluded.home_win_p, market_spread=excluded.market_spread, market_total=excluded.market_total, thin=excluded.thin
+                       event=excluded.event, kickoff=excluded.kickoff, exp_home_points=excluded.exp_home_points, exp_away_points=excluded.exp_away_points, exp_total=excluded.exp_total, exp_margin=excluded.exp_margin, home_win_p=excluded.home_win_p, market_spread=excluded.market_spread, market_total=excluded.market_total, thin=excluded.thin, sim=excluded.sim
                    WHERE nfl_game_predictions.home_score IS NULL""",
-                tuple(r.get(c) for c in ('season', 'week', 'home_team', 'away_team', 'event', 'kickoff', 'exp_home_points', 'exp_away_points', 'exp_total', 'exp_margin', 'home_win_p', 'market_spread', 'market_total', 'thin')),
+                tuple(r.get(c) for c in ('season', 'week', 'home_team', 'away_team', 'event', 'kickoff', 'exp_home_points', 'exp_away_points', 'exp_total', 'exp_margin', 'home_win_p', 'market_spread', 'market_total', 'thin', 'sim')),
             )
             n += 1
         await self._db.commit()

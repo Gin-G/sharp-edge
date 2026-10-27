@@ -49,3 +49,37 @@ def norm_name(name: Optional[str]) -> str:
     # "d j moore" while the projection's "DJ Moore" stays "dj moore". Glue
     # runs of single letters back together so both land on "dj moore".
     return re.sub(r"\b([a-z])\s+(?=[a-z]\b)", r"\1", s)
+
+
+# FanDuel names a game by full club name ("Dallas Cowboys @ Philadelphia
+# Eagles"); nflverse and the game model use its abbreviations. Without this the
+# two never join, which is how the game model's predictions were computed
+# every week and attached to no game on the board — the event strings simply
+# never matched. nflverse codes, so the Rams are LA rather than LAR.
+TEAM_ABBR = {
+    "Arizona Cardinals": "ARI", "Atlanta Falcons": "ATL",
+    "Baltimore Ravens": "BAL", "Buffalo Bills": "BUF",
+    "Carolina Panthers": "CAR", "Chicago Bears": "CHI",
+    "Cincinnati Bengals": "CIN", "Cleveland Browns": "CLE",
+    "Dallas Cowboys": "DAL", "Denver Broncos": "DEN",
+    "Detroit Lions": "DET", "Green Bay Packers": "GB",
+    "Houston Texans": "HOU", "Indianapolis Colts": "IND",
+    "Jacksonville Jaguars": "JAX", "Kansas City Chiefs": "KC",
+    "Las Vegas Raiders": "LV", "Los Angeles Chargers": "LAC",
+    "Los Angeles Rams": "LA", "Miami Dolphins": "MIA",
+    "Minnesota Vikings": "MIN", "New England Patriots": "NE",
+    "New Orleans Saints": "NO", "New York Giants": "NYG",
+    "New York Jets": "NYJ", "Philadelphia Eagles": "PHI",
+    "Pittsburgh Steelers": "PIT", "San Francisco 49ers": "SF",
+    "Seattle Seahawks": "SEA", "Tampa Bay Buccaneers": "TB",
+    "Tennessee Titans": "TEN", "Washington Commanders": "WAS",
+}
+
+
+def event_teams(event: Optional[str]) -> Optional[tuple[str, str]]:
+    """``(away, home)`` abbreviations from a FanDuel "Away @ Home" event name."""
+    if not isinstance(event, str) or " @ " not in event:
+        return None
+    away, home = (s.strip() for s in event.split(" @ ", 1))
+    a, h = TEAM_ABBR.get(away, away), TEAM_ABBR.get(home, home)
+    return (a, h) if a and h else None

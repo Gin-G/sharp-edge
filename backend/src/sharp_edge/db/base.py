@@ -52,6 +52,13 @@ NFL_PICK_ADDED_COLUMNS = [
     ("open_result", "TEXT", "TEXT"),
 ]
 
+# Same idea for nfl_game_predictions. ``sim`` is the gamesim run recorded with
+# the prediction — FanDuel's prices at the time, the moneyline picks and the
+# model's leans — so they can be graded at the prices they were made against.
+NFL_GAME_ADDED_COLUMNS = [
+    ("sim", "JSONB", "TEXT"),
+]
+
 NFL_SNAPSHOT_COLUMNS = (
     "season, week, market, taken_at, rows, signal_over, signal_under, "
     "suggested_over, suggested_under, residual_p10, residual_p50, "

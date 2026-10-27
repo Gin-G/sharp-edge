@@ -35,9 +35,10 @@ from typing import Optional
 import httpx
 
 from ..fanduel.odds import american_to_implied
-from . import (availability as nfl_avail, card as card_mod, gamemodel,
+from . import (availability as nfl_avail, card as card_mod, gamemodel, gamesim,
                matchup as nfl_matchup, model, odds as nfl_odds,
                projections as nfl_proj, usage as nfl_usage)
+from .names import event_teams
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +121,12 @@ class NFLBoard:
     props: list[dict] = field(default_factory=list)
     tds: list[dict] = field(default_factory=list)
     games: list[dict] = field(default_factory=list)
-    #: Our own score/total/margin view of each game. Predictions only — no
-    #: price, no edge, no side, until the live record earns one.
+    #: Our own score/total/margin view of each game.
     game_model: list[dict] = field(default_factory=list)
+    #: Each game simulated from our projection and from FanDuel's own lines:
+    #: win/cover/over probabilities, the moneyline picks, the model's leans.
+    #: See nfl/gamesim.py for which of those is a recommendation and why.
+    game_sims: list[dict] = field(default_factory=list)
     fits: dict = field(default_factory=dict)
     prob_fits: dict = field(default_factory=dict)
     #: Who is out this week, and which position groups lost work because of it.
@@ -209,26 +213,44 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
     board.games = fd.games
 
     # Our own view of each game, fitted on results only so it can be compared
-    # with the line rather than derived from it. Attached to the market rows by
-    # team pair; a game we cannot rate keeps its prices and gets no prediction.
-    # There is deliberately no edge or side here — see nfl/gamemodel.py.
+    # with the line rather than derived from it, then simulated against
+    # FanDuel's prices. Joined by team pair: FanDuel names clubs in full and
+    # nflverse abbreviates, and until names.event_teams existed the two never
+    # matched, so every prediction was computed and attached to nothing.
     try:
         preds = {(p["home_team"], p["away_team"]): p
                  for p in gamemodel.for_week(season, week, force=force)}
+        misses = gamesim.residuals(gamemodel._schedule())
     except Exception as exc:                      # never cost the board its props
         logger.warning("[nfl-screen] game model unavailable: %s", exc)
-        preds = {}
+        preds, misses = {}, []
+    by_game: dict = {}
+    for g in board.games:
+        teams = event_teams(g.get("event"))
+        if teams and g.get("fd_event_id"):
+            slot = by_game.setdefault(teams, {"event": g.get("event"),
+                                              "kickoff": g.get("kickoff"),
+                                              "fd_event_id": g.get("fd_event_id"),
+                                              "markets": {}})
+            slot["markets"][g.get("market")] = g
+    for (away, home), slot in by_game.items():
+        pred = preds.get((home, away))
+        try:
+            sim = gamesim.price_game(home, away, slot["markets"], pred, misses,
+                                     seed=f"{season}-{week}-{away}@{home}")
+        except Exception as exc:
+            logger.warning("[nfl-screen] sim %s@%s failed: %s", away, home, exc)
+            continue
+        sim.update({k: slot[k] for k in ("event", "kickoff", "fd_event_id")})
+        board.game_sims.append(sim)
+        if pred is not None:
+            # Recorded with the prediction, so the picks and leans are graded
+            # at the prices they were made against. FanDuel's kickoff replaces
+            # nflverse's date-only one, which reads as midnight and would stop
+            # the record updating hours before the game.
+            pred["sim"] = {k: sim[k] for k in ("fd", "market", "model", "picks", "leans")}
+            pred["kickoff"] = slot["kickoff"] or pred.get("kickoff")
     board.game_model = list(preds.values())
-    if preds:
-        by_event: dict = {}
-        for p in preds.values():
-            by_event[f"{p['away_team']} @ {p['home_team']}"] = p
-        for g in board.games:
-            hit = by_event.get(g.get("event"))
-            if hit:
-                g["model"] = {k: hit[k] for k in
-                              ("exp_home_points", "exp_away_points", "exp_total",
-                               "exp_margin", "home_win_p", "thin")}
 
     # How much of any disagreement with the market to keep. Set once for the
     # whole board: it is a statement about the projections, not about a market.
@@ -433,7 +455,12 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             american_to_implied(q["odds"]) if q["odds"] is not None else None,
             shrink,
         )
-        priced = model.price_td(a, q["odds"], model_p=prob)
+        # No absolute read off an August projection: the calibration was
+        # measured on in-season ones, and hole 3 in Finding 13 is exactly a
+        # board spending a day a week on the preseason vintage.
+        priced = model.price_td(
+            a, q["odds"], model_p=prob,
+            p_cal=None if proj.preseason else model.td_calibrated(prob))
         td_rate = (p.get("rushing_tds") or 0) + (p.get("receiving_tds") or 0)
         board.tds.append({
             "player": q["player"], "key": q["key"],
@@ -453,7 +480,8 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
 
     flag_role_conflicts(board.props)
     board.props.sort(key=_prop_rank)
-    board.tds.sort(key=lambda r: -(r.get("edge_pts") if r.get("edge_pts") is not None else -99))
+    board.tds.sort(key=lambda r: -(r.get("true_edge_pts")
+                                   if r.get("true_edge_pts") is not None else -99))
     board.unmatched = sorted({ln.key for ln in fd.lines if ln.key not in matched})
     return board
 
@@ -702,10 +730,17 @@ def as_payload(board: NFLBoard) -> dict:
             "betslip_url": card_mod.betslip_url(the_card),
             "min_edge_pts": card_mod.MIN_EDGE_PTS,
             "under_min_edge_pts": card_mod.UNDER_MIN_EDGE_PTS,
+            "max_edge_pts": card_mod.MAX_EDGE_PTS,
         },
         "tds": board.tds,
+        "td_picks": card_mod.td_suggestions(board.tds),
+        "td_rules": {"min_edge_pts": card_mod.TD_MIN_EDGE_PTS,
+                     "min_p": card_mod.TD_MIN_P},
         "games": board.games,
         "game_model": board.game_model,
+        "game_sims": board.game_sims,
+        "game_rules": {"sims": gamesim.SIMS, "ml_gap_pts": gamesim.ML_GAP_PTS,
+                       "lean_min_p": gamesim.LEAN_MIN_P},
         "fits": board.fits,
         "prob_fits": board.prob_fits,
         "thresholds": THRESHOLDS,

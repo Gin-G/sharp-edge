@@ -3,8 +3,8 @@
 
   const screens = [
     { href: '/nfl/props', label: 'Props', blurb: 'Yardage & receptions vs the posted line' },
-    { href: '/nfl/touchdowns', label: 'Touchdowns', blurb: 'Anytime scorer: model vs the price' },
-    { href: '/nfl/games', label: 'Games', blurb: 'Moneyline, spread and total' },
+    { href: '/nfl/touchdowns', label: 'Touchdowns', blurb: 'Anytime scorer picks: calibrated odds vs the price' },
+    { href: '/nfl/games', label: 'Games', blurb: 'Simulated predictions and moneyline picks' },
   ];
 </script>
 

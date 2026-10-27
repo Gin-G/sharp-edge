@@ -21,15 +21,16 @@ pricing an uncertain role and role is the one thing the projection cannot see.
 
 **What actually gets picked.** Every row where the model and the market
 disagree by more than the stated threshold *and* the disagreement survives the
-shrink is a **suggestion**. The card takes the two suggestions with the largest
-devigged edge, one per game. That is a much lower bar than baseball's, and
-deliberately so: with no track record yet, the point of week 1 is to generate
-a measurable set of predictions, not to bet optimally on a model nobody has
-scored.
+shrink is a **suggestion**. The card takes the two suggestions most likely to
+win once the model's confidence is cut to what the record says it is worth
+(``calibrated_p``), one per game. It began as the two with the largest edge;
+seven settled weeks showed the largest edges are where the model is least
+informed, so they are now capped (``MAX_EDGE_PTS``) and no longer lead.
 """
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 from urllib.parse import quote
@@ -129,6 +130,42 @@ MAX_PROJECTION_RATIO = 2.0
 # revisit against results.
 VACATED_SHARE_BLOCKS_UNDER = 0.33
 
+# A ceiling on the edge itself. Past it, a disagreement with the market is far
+# more often our projection describing a role that no longer exists than the
+# book being wrong.
+#
+# Measured on the live record, weeks 1-7, with rushing yards and the
+# market-verdict rows already out: edges of 12 points or less went 162-122
+# (57.0%, +4.7%), edges above it 39-41 (48.8%, -7.1%). The split was chosen
+# after seeing the first six weeks, where it was invisible (35-29 above, 54.7%);
+# the picks settled after that went 4-12 above it and 18-12 below. Sixteen picks
+# is thin, but it is out of sample and it is the direction Findings 7 and 8
+# predicted — the biggest gaps are where the model is least informed.
+MAX_EDGE_PTS = 12.0
+
+# How much of the model's log-odds disagreement with the fair price survives
+# into ``calibrated_p``. Fitted by likelihood on the settled picks that pass
+# today's gate (364): 0.10-0.20 are flat at the optimum, 0.5 is clearly worse,
+# and keeping all of it is worst. In plain terms the anchored model reads 60.2%
+# on its picks and they land 55.2% against a 50.8% fair price — it is right
+# about direction and three times too loud about size.
+#
+# Used to rank card legs, not to select suggestions: a selection threshold on
+# this scale would be a new rule fitted on the same 364 picks.
+CALIBRATION_KEEP = 0.15
+
+# Anytime-TD selection. ``p_cal`` is a held-out-calibrated probability (see
+# ``model.td_calibrated``) and the edge is against the raw quoted price, so the
+# vig is already inside the bar. Five points sits above the worst held-out
+# calibration miss among the buckets with any depth; the 20% floor keeps the
+# list to players with a real role near the goal line, where the model's
+# calibration was measured on hundreds of player-games rather than a handful.
+#
+# Neither has been scored against a price yet — no TD price was ever stored
+# before this — so both are judgements, and the record splits on them.
+TD_MIN_EDGE_PTS = 5.0
+TD_MIN_P = 0.20
+
 
 def _plausible(row: dict) -> bool:
     """Are the model and the market pricing the same player-week?
@@ -212,9 +249,45 @@ def _qualified(row: dict) -> bool:
         and not row.get("prior_only")
         and row.get("side")
         and row.get("edge_pts") is not None
-        and row["edge_pts"] >= _edge_bar(row)
+        and _edge_bar(row) <= row["edge_pts"] <= MAX_EDGE_PTS
         and _plausible(row)
+        # The depth chart sided with the market about this player's role. It
+        # was recorded and not acted on until it had a result: 10-21 (32.3%,
+        # -41.1%) through week 7, and 3-6 on the picks settled after it was
+        # first measured. See screen.flag_role_conflicts.
+        and row.get("role_conflict_verdict") != "market"
     )
+
+
+def calibrated_p(row: dict) -> Optional[float]:
+    """The leg's win probability on the scale the record says it lands at.
+
+    The fair price carries most of it; the model contributes CALIBRATION_KEEP
+    of its disagreement. So among suggestions this ranks the shorter-priced,
+    modest-edge legs first — the parlay's objective is legs that actually
+    happen, and the record says the loud ones do not.
+    """
+    p, fair = row.get("model_p"), row.get("fair_p")
+    if p is None or fair is None or not (0 < p < 1) or not (0 < fair < 1):
+        return None
+    lf = math.log(fair / (1 - fair))
+    z = lf + CALIBRATION_KEEP * (math.log(p / (1 - p)) - lf)
+    return 1 / (1 + math.exp(-z))
+
+
+def td_suggestions(tds: Iterable[dict]) -> list[dict]:
+    """Anytime-TD rows worth a bet, best edge against the price first.
+
+    Same availability rule as the props — a void is not a prediction.
+    """
+    out = [r for r in tds
+           if r.get("odds") is not None
+           and r.get("p_cal") is not None
+           and r["p_cal"] >= TD_MIN_P
+           and (r.get("true_edge_pts") or 0) >= TD_MIN_EDGE_PTS
+           and _available(r)]
+    out.sort(key=lambda r: -(r.get("true_edge_pts") or 0))
+    return out
 
 
 def withheld(props: Iterable[dict]) -> dict:
@@ -247,7 +320,11 @@ def build(props: Iterable[dict], max_legs: int = MAX_LEGS) -> list[dict]:
     """
     picked: list[dict] = []
     seen_games: set = set()
-    for r in suggestions(props):
+    # Most likely first, not largest edge. Ranked by edge the card was 11 of 14
+    # legs rushing yards and swept 0 of 6; replayed on the settled weeks under
+    # today's gate, edge order sweeps 1 of 7 and calibrated order 4 of 7.
+    ranked = sorted(suggestions(props), key=lambda r: -(calibrated_p(r) or 0))
+    for r in ranked:
         game = r.get("fd_event_id")
         if game is not None and game in seen_games:
             continue

@@ -108,7 +108,13 @@ PASSING_YARDS_CAVEAT = (
 )
 
 MARKETS = tuple(_PROP_COEF)
-BETTABLE = ("receiving_yards", "receptions", "rushing_yards")
+# Rushing yards is priced and shown but no longer selected. On the live record
+# it went 60-81 (42.6%, -19.9% ROI) over weeks 1-7, it lost in both halves of
+# that sample — 53-67 on the picks seen when Finding 13 was written, then 7-14
+# on the ones settled after — and the projection lands further from the result
+# than the line does on two rushing picks in three. See EXPERIMENTS_NFL.md
+# Finding 14.
+BETTABLE = ("receiving_yards", "receptions")
 
 # Fallbacks for a missing feature. Live medians would let one week's own
 # composition move the model, so these are fixed at the training medians.
@@ -395,6 +401,29 @@ def td_probability(td_rate: Optional[float], touches: Optional[float],
     return _sigmoid(z)
 
 
+# Live recalibration of ``td_probability``, fitted on 2026 weeks 1-7: every
+# RB/WR/TE/QB with a projection, 2,318 player-games that played, scored against
+# nflverse rushing + receiving TDs. Uncorrected the model is already good — AUC
+# 0.721, against 0.712 for a Poisson on the projected count — but it runs a
+# couple of points cold (16.2% predicted, 18.3% scored) and coldest at the top,
+# which is exactly where a bet would be taken:
+#
+#     reads   6.8%  14.3%  24.3%  34.7%  44.2%  53.6%
+#     lands   7.4%  16.2%  27.5%  38.8%  52.2%  73.3%
+#
+# Refitting intercept and slope on the logit, holding out each week in turn,
+# puts every bucket within a point except the thin 50-60% one (53.3 vs 48.9 on
+# 47). That held-out calibration is what licenses comparing the result with a
+# quoted price directly — see ``price_td``.
+TD_CAL_INTERCEPT = 0.287
+TD_CAL_SLOPE = 1.085
+
+
+def td_calibrated(p: float) -> float:
+    """``td_probability`` restated on the scale it has measured at, live."""
+    return _sigmoid(TD_CAL_INTERCEPT + TD_CAL_SLOPE * _logit(p))
+
+
 # ---------------------------------------------------------------------------
 # Pricing
 # ---------------------------------------------------------------------------
@@ -519,24 +548,31 @@ def anchor_field(model_ps: Sequence[float], implied_ps: Sequence[float]) -> list
 
 
 def price_td(p_anchored: float, american: Optional[int],
-             model_p: Optional[float] = None) -> dict:
-    """An anytime-TD quote against the model, as a relative read.
+             model_p: Optional[float] = None,
+             p_cal: Optional[float] = None) -> dict:
+    """An anytime-TD quote against the model, read two ways.
 
-    ``p_anchored`` comes from ``anchor_field`` and carries the book's margin,
-    the same as the implied price it is compared against. That makes the edge
-    meaningful and the EV meaningless, so **no EV is returned** — a positive
-    number computed from a margin-inflated probability would be positive for
-    most of the board and would be believed. The edge is a redistribution
-    signal: this player is likelier to score than the field's shape implies.
+    ``edge_pts`` is the relative read. ``p_anchored`` comes from
+    ``anchor_field`` and carries the book's margin, the same as the implied
+    price it is compared against, so it says *which* players the field
+    under-prices and nothing about whether any of them is worth a bet.
+
+    ``true_edge_pts`` and ``ev`` are the absolute read, and they need a
+    probability that has been measured against outcomes rather than against the
+    book. ``p_cal`` is that — ``td_calibrated`` on the unanchored model, held-out
+    calibrated on the live season. Compared with the *raw* quoted price, margin
+    and all, it has to clear the vig on its own, which is the conservative
+    direction: no devig assumption about how many scorers the book is pricing
+    for, and so no way for an unknown margin to manufacture an edge.
     """
     out = {
         "model_p": round(p_anchored, 4),
         "model_p_unanchored": round(model_p, 4) if model_p is not None else None,
+        "p_cal": round(p_cal, 4) if p_cal is not None else None,
         "odds": american,
         "implied_p": None,
         "edge_pts": None,
-        # Deliberately absent. See the docstring — this market's margin cannot
-        # be stripped without knowing how many scorers the book is pricing for.
+        "true_edge_pts": None,
         "ev": None,
         "kelly": None,
     }
@@ -545,4 +581,8 @@ def price_td(p_anchored: float, american: Optional[int],
     implied = american_to_implied(american)
     out["implied_p"] = round(implied, 4)
     out["edge_pts"] = round(100 * (p_anchored - implied), 1)
+    if p_cal is not None:
+        out["true_edge_pts"] = round(100 * (p_cal - implied), 1)
+        out["ev"] = round(expected_value(p_cal, american), 4)
+        out["kelly"] = round(kelly_fraction(p_cal, american), 4)
     return out

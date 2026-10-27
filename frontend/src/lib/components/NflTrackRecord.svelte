@@ -94,6 +94,16 @@
   $: groups = data
     ? [
         { title: 'By market', rows: data.by_market.map((r) => ({ label: r.market, ...r })) },
+        // Touchdowns sit outside every other split here — a different bet.
+        ...(data.touchdowns && data.touchdowns.overall.picks
+          ? [{ title: 'Anytime TD', rows: [
+              { label: 'All TD picks', ...data.touchdowns.overall },
+              ...data.touchdowns.by_edge.map((r) => ({ label: `Edge ${r.edge}`, ...r })),
+            ] }]
+          : []),
+        // The history card.MAX_EDGE_PTS was fitted on, kept visible beside it.
+        { title: 'By edge', rows: (data.by_edge ?? []).map((r) => ({
+            label: r.edge === 'over cap' ? 'Over the cap (now refused)' : 'Under the cap', ...r })) },
         { title: 'By side', rows: data.by_side.map((r) => ({ label: r.side, ...r })) },
         { title: 'By week', rows: data.by_week.map((r) => ({ label: `Week ${r.week}`, ...r })) },
         // The season's open question — see screen.flag_role_conflicts.

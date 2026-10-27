@@ -1006,6 +1006,133 @@ candidate removes something that was never one.
 
 ---
 
+## Finding 14 — seven weeks: the model is loud, rushing is a sink, and the card picked the worst legs
+
+Weeks 1-7, every pick in `nfl_picks` (546, 533 settled): **271-262, 50.8%,
+-5.7% ROI**. The parlay card is **0 for 6**. That is down from 52.6% / -2.9% at
+Finding 13, because the 75 picks settled since — the stranded Monday games plus
+week 7 — went **32-43 (42.7%, -18.3%)**. Those 75 are the out-of-sample test of
+everything Finding 13 proposed, which is what makes them worth more than their
+count.
+
+### Where it misses
+
+**The model is three times too sure of itself.** Its picks average a 60.2%
+`model_p`; they win 50.8%, under the 53.9% the price implied. Above 75% the
+model went 8-13. Hit rate does not rise with the edge — it falls:
+
+| edge | picks | hit | ROI |
+|---|---|---|---|
+| 0-5 | 114 | 50.0% | -6.8% |
+| 5-10 | 241 | **54.4%** | -0.3% |
+| 10-15 | 103 | 48.5% | -8.3% |
+| 15-20 | 38 | 42.1% | -21.0% |
+| 20+ | 37 | 45.9% | -13.6% |
+
+The largest disagreements are the stale-role cases of Finding 8, not the best
+bets.
+
+**Rushing yards is where most of the money went**: 60-81, 42.6%, -19.9%. The
+projection lands further from the result than the line does on two rushing
+picks in three (MAE 31.0 against the line's 24.0), and its gap to the line
+averages 18 yards in the direction it bets. Lines of 60-80, the feature backs,
+went 20-40. It lost in both halves: 53-67 on the picks Finding 13 saw, 7-14 on
+the ones settled after.
+
+**The "market" verdict kept losing out of sample**: 7-15 before, 3-6 after,
+10-21 overall (-41%). Finding 13 recorded it and did not act on it, and it cost
+roughly nine units in the meantime.
+
+**The card took the worst legs on the board.** It ranked by edge, so it took
+the loudest disagreements: 11 of 14 legs were rushing yards, the market the
+model reads worst. Replayed on the settled weeks under
+today's gate, edge order sweeps 1 of 7; ordering by `calibrated_p` sweeps 4 of 7.
+
+**What still works**, with rushing and the market verdict removed (364 picks,
+201-163, 55.2%, +2.1%): receiving-yards edges of 0-8 points went 48-24
+(+25.4%); depth-chart rank 1-3 went 97-57; rows with a visible vacancy went
+28-15 (+23.4%). Depth rank 4+ went 3-9 — too thin to act on, but worth watching.
+
+### Plays we did not take
+
+There is no answer for props, and that is a finding in itself: only the picks
+and a per-market summary were ever stored, never the full board, so a prop we
+passed on cannot be graded after the fact. Touchdowns can be answered, because
+the projection's TD inputs are kept upstream: replaying the TD model over every
+projected player in weeks 1-7, players it gave 40%+ scored 47 times in 85 (55%), while the
+TD page showed only a relative edge and no EV, so none of them was ever a
+recommendation. Now that TD picks are recorded with their
+prices, from week 8 onward they can be graded.
+
+### Touchdowns: the model was good and nobody was using it
+
+`td_probability` checked against 2026 weeks 1-7 (2,318 player-games that
+played): **AUC 0.721**, Brier 0.135, and calibrated to within a couple of points
+except at the top, where it runs cold (reads 44%, scores 52%; reads 54%, scores
+73%). A two-parameter logit recalibration (`TD_CAL_INTERCEPT 0.287`,
+`TD_CAL_SLOPE 1.085`), with each week held out in turn, puts every bucket with
+depth within a point. That held-out calibration is what licenses the change of
+stance in `price_td`: the calibrated probability is compared with the *raw*
+price, vig included, so it has to beat the margin on its own and no devig
+assumption can create an edge. A TD pick needs `p_cal >= 0.20` and an edge of
+5+ points, and records into `nfl_picks` as `anytime_td` OVER 0.5, settling on
+rushing + receiving + return TDs. Both thresholds are judgements: no TD price
+was ever stored before, so profitability against FanDuel's price is unmeasured.
+
+### Games: what a simulation can and cannot claim
+
+The 90 settled game predictions — which nothing had ever settled, since the
+cronjob never called `/nfl/games/settle` — went 43-42 ATS against the close and
+40-50 on totals. Over 2016-25, refit weekly, the points model goes 48.8% ATS on
+2,572 games and worse as its disagreement grows. An EPA-per-play rating built
+for this purpose adds nothing once the closing spread is known (fitted 2016-20,
+tested 2021-25: the spread's coefficient is 1.08, MAE unchanged at 9.83). **Our
+own number is not a spread bet**, and the Games tab says so: its spread and
+total views are labelled leans, recorded and graded, never recommended.
+
+What survives is market-internal. Simulate the game from the book's own spread
+(20,000 runs, each drawing a real game's margin and total miss jointly, so key
+numbers survive) and compare the win probability with the moneyline's
+vig-inclusive price. Fitted on 2010-18, tested on 2019-25:
+
+| ML longer than spread implies by | bets | ROI |
+|---|---|---|
+| 2+ pts | 330 | **+8.5%** |
+| 3+ pts | 106 | +21.2% |
+
+It is almost entirely underdogs (+13.5% on 258; favourites -9.6% on 72), it
+swings by season (-23% in 2022, +63% in 2023), and a bootstrap puts an 18%
+chance on its true ROI being zero or worse. These are closing consensus lines,
+not FanDuel's — the mechanism carries over, but the size is untested. It ships
+as the one game recommendation, with its live record printed next to it.
+
+Also found: the game model had **never attached to a game on the board**.
+Predictions were keyed `DAL @ PHI` and FanDuel events `Dallas Cowboys @
+Philadelphia Eagles`; `names.event_teams` joins them.
+
+### What shipped
+
+* `model.BETTABLE` drops rushing yards (still priced and shown).
+* `card._qualified` refuses `role_conflict_verdict == "market"` and any edge
+  above `MAX_EDGE_PTS = 12`. The cap is the least proven of these: invisible
+  in-sample (35-29 above it), 4-12 out of sample, 39-41 overall.
+* The card ranks by `calibrated_p` — the fair price plus `CALIBRATION_KEEP =
+  0.15` of the model's log-odds disagreement (likelihood optimum 0.10-0.20 on the
+  364 gated picks). Selection thresholds are unchanged on purpose: re-cutting
+  them on this scale would be a second rule fitted to the same picks.
+* Touchdown picks, recorded and settled; `track_record` reports them in their
+  own `touchdowns` block so the prop splits stay comparable over time.
+* `nfl/gamesim.py`; the game record grades the moneyline picks and the leans at
+  the FanDuel prices recorded with them (`nfl_game_predictions.sim`); the settle
+  cronjob now settles games.
+
+Replayed on weeks 1-7, today's prop gate keeps 284 of 533 picks at 162-122,
+57.0%, +4.7%. **Read that as an upper bound**: the rushing and verdict cuts were
+confirmed out of sample, but the cap was found by looking. Weeks 8+ are the
+real test, and the first thing to check is whether the over-cap rows stay bad.
+
+---
+
 ## Operations
 
 **Daily settlement** runs in-cluster at 13:00 UTC

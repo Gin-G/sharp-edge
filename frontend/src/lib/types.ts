@@ -433,15 +433,88 @@ export interface NflTd {
   model_p_unanchored: number | null;
   odds: number | null;
   implied_p: number | null;
+  /** Relative read: which players the field under-prices, not whether any
+   *  is worth a bet. */
   edge_pts: number | null;
-  /** Always null. This market's margin can't be stripped, so a dollar EV
-   *  would read positive across most of the board and mean nothing. */
-  ev: null;
-  kelly: null;
+  /** Held-out-calibrated probability of scoring (model.td_calibrated). Null
+   *  on a preseason projection. */
+  p_cal: number | null;
+  /** p_cal against the raw quoted price, vig included. */
+  true_edge_pts: number | null;
+  ev: number | null;
+  kelly: number | null;
   thin: boolean;
+  avail?: string | null;
+  avail_reason?: string | null;
   fd_market_id: string | null;
   fd_selection_id: number | null;
   sgm: boolean;
+}
+
+export interface NflSimPick {
+  market: 'moneyline';
+  side: 'home' | 'away';
+  team: string;
+  odds: number;
+  p: number;
+  edge_pts: number;
+  ev: number;
+  fair: number | null;
+}
+
+export interface NflSimLean {
+  market: 'spread' | 'total';
+  side: 'home' | 'away' | 'over' | 'under';
+  team?: string;
+  line: number;
+  odds: number | null;
+  p: number;
+}
+
+/** One game run from our projection and from FanDuel's own lines. */
+export interface NflGameSim {
+  home_team: string;
+  away_team: string;
+  event: string | null;
+  kickoff: string | null;
+  fd_event_id: string | null;
+  sims: number;
+  fd: {
+    home_ml: number | null; away_ml: number | null;
+    home_spread: number | null; home_spread_odds: number | null;
+    away_spread_odds: number | null;
+    total: number | null; over_odds: number | null; under_odds: number | null;
+  };
+  market: { p_home_win: number | null; p_home_cover?: number | null;
+            p_over?: number | null } | null;
+  model: {
+    p_home_win: number | null; p_home_cover?: number | null; p_over?: number | null;
+    exp_home_points: number | null; exp_away_points: number | null;
+    exp_margin: number | null; exp_total: number | null;
+    fair_home_ml: number | null; fair_away_ml: number | null;
+    thin: boolean | null;
+  } | null;
+  /** Recommendations: the moneyline priced longer than its own spread says. */
+  picks: NflSimPick[];
+  /** Our projection's spread/total view. Recorded and graded, not recommended. */
+  leans: NflSimLean[];
+}
+
+export interface NflSimRecord {
+  bets: number; wins: number; losses: number; pushes: number;
+  profit: number; hit_rate: number | null; roi: number | null;
+}
+
+export interface NflGameRecord {
+  games: number;
+  message?: string;
+  ml_picks?: NflSimRecord;
+  leans?: { spread: NflSimRecord; total: NflSimRecord };
+  margin_mae?: number | null;
+  market_margin_mae?: number | null;
+  total_mae?: number | null;
+  market_total_mae?: number | null;
+  winner_called?: string | null;
 }
 
 export interface NflGameMarket {
@@ -524,6 +597,15 @@ export interface NflTrackRecord {
   overall: NflTrackBucket;
   open_vs_lock?: NflOpenVsLock;
   by_market: ({ market: string } & NflTrackBucket)[];
+  /** Picks under and over card.MAX_EDGE_PTS. */
+  by_edge?: ({ edge: string } & NflTrackBucket)[];
+  /** Anytime-TD picks, kept apart from the prop totals. */
+  touchdowns?: {
+    overall: NflTrackBucket;
+    by_edge: ({ edge: string } & NflTrackBucket)[];
+    by_week: ({ week: number } & NflTrackBucket)[];
+    picks: NflTrackPick[];
+  };
   by_side: ({ side: string } & NflTrackBucket)[];
   by_week: ({ week: number } & NflTrackBucket)[];
   by_role_conflict: ({ role_conflict: boolean } & NflTrackBucket)[];
@@ -559,12 +641,14 @@ export interface NflTrackRecord {
       }[];
     }[];
   };
-  picks: {
-    season: number; week: number; player: string; market: string; line: number;
-    side: string; fd_odds: number | null; model_p: number | null;
-    edge_pts: number | null; result: string | null; actual: number | null;
-    team: string | null; event: string | null;
-  }[];
+  picks: NflTrackPick[];
+}
+
+export interface NflTrackPick {
+  season: number; week: number; player: string; market: string; line: number;
+  side: string; fd_odds: number | null; model_p: number | null;
+  edge_pts: number | null; result: string | null; actual: number | null;
+  team: string | null; event: string | null;
 }
 
 /** One position group's loss: who is out, and how much of the group's recent
@@ -632,11 +716,17 @@ export interface NflScreen {
     betslip_url: string | null;
     min_edge_pts: number;
     under_min_edge_pts: number;
+    max_edge_pts?: number;
   };
   frozen?: { suggestions: number; written: number; card_legs: number;
              card_frozen: boolean; error?: string };
   tds: NflTd[];
+  /** Anytime-TD rows that clear card.td_suggestions — the tracked TD bets. */
+  td_picks?: NflTd[];
+  td_rules?: { min_edge_pts: number; min_p: number };
   games: NflGameMarket[];
+  game_sims?: NflGameSim[];
+  game_rules?: { sims: number; ml_gap_pts: number; lean_min_p: number };
   fits: Record<string, NflFit>;
   prob_fits: Record<string, NflProbFit>;
   thresholds: Record<string, number>;

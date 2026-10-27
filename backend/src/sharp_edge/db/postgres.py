@@ -7,7 +7,8 @@ from typing import Optional
 
 import asyncpg
 
-from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_PICK_ADDED_COLUMNS,
+from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_GAME_ADDED_COLUMNS,
+                   NFL_PICK_ADDED_COLUMNS,
                    NFL_PICK_COLUMNS,
                    NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
 
@@ -294,6 +295,10 @@ class PostgresDatabase(BetDatabase):
             for name, pg_type, _ in NFL_PICK_ADDED_COLUMNS:
                 await conn.execute(
                     f"ALTER TABLE nfl_picks ADD COLUMN IF NOT EXISTS {name} {pg_type}"
+                )
+            for name, pg_type, _ in NFL_GAME_ADDED_COLUMNS:
+                await conn.execute(
+                    f"ALTER TABLE nfl_game_predictions ADD COLUMN IF NOT EXISTS {name} {pg_type}"
                 )
             for idx in INDEXES:
                 try:
@@ -592,12 +597,12 @@ class PostgresDatabase(BetDatabase):
             return 0
         async with self._pool.acquire() as conn:
             await conn.executemany(
-                """INSERT INTO nfl_game_predictions (season,week,home_team,away_team,event,kickoff,exp_home_points,exp_away_points,exp_total,exp_margin,home_win_p,market_spread,market_total,thin)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                """INSERT INTO nfl_game_predictions (season,week,home_team,away_team,event,kickoff,exp_home_points,exp_away_points,exp_total,exp_margin,home_win_p,market_spread,market_total,thin,sim)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
                    ON CONFLICT (season, week, home_team, away_team) DO UPDATE SET
-                       event=EXCLUDED.event, kickoff=EXCLUDED.kickoff, exp_home_points=EXCLUDED.exp_home_points, exp_away_points=EXCLUDED.exp_away_points, exp_total=EXCLUDED.exp_total, exp_margin=EXCLUDED.exp_margin, home_win_p=EXCLUDED.home_win_p, market_spread=EXCLUDED.market_spread, market_total=EXCLUDED.market_total, thin=EXCLUDED.thin
+                       event=EXCLUDED.event, kickoff=EXCLUDED.kickoff, exp_home_points=EXCLUDED.exp_home_points, exp_away_points=EXCLUDED.exp_away_points, exp_total=EXCLUDED.exp_total, exp_margin=EXCLUDED.exp_margin, home_win_p=EXCLUDED.home_win_p, market_spread=EXCLUDED.market_spread, market_total=EXCLUDED.market_total, thin=EXCLUDED.thin, sim=EXCLUDED.sim
                    WHERE nfl_game_predictions.home_score IS NULL""",
-                [tuple(r.get(c) for c in ('season', 'week', 'home_team', 'away_team', 'event', 'kickoff', 'exp_home_points', 'exp_away_points', 'exp_total', 'exp_margin', 'home_win_p', 'market_spread', 'market_total', 'thin')) for r in rows],
+                [tuple(r.get(c) for c in ('season', 'week', 'home_team', 'away_team', 'event', 'kickoff', 'exp_home_points', 'exp_away_points', 'exp_total', 'exp_margin', 'home_win_p', 'market_spread', 'market_total', 'thin', 'sim')) for r in rows],
             )
         return len(rows)
 

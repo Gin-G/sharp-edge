@@ -63,6 +63,12 @@ SETTLE_COLUMN = {
     "receptions": "receptions",
 }
 
+# Anytime TD settles on every touchdown the player scores himself — rushing,
+# receiving or a return — and not on one he throws. Summed rather than one
+# column, so it is handled apart from SETTLE_COLUMN.
+TD_MARKET = "anytime_td"
+TD_COLUMNS = ("rushing_tds", "receiving_tds", "special_teams_tds")
+
 NFLVERSE_WEEKLY = (
     "https://github.com/nflverse/nflverse-data/releases/download/stats_player/"
     "stats_player_week_{season}.parquet"
@@ -175,6 +181,16 @@ def _pick_row(r: dict, season: int, week: int, source: str) -> dict:
     }
 
 
+def _td_prop(r: dict) -> dict:
+    """An anytime-TD board row in the shape of a prop, so it records and
+    settles through the same table and the same code. A "yes" is an over 0.5."""
+    return {**r, "market": TD_MARKET, "line": 0.5, "side": "OVER",
+            "fair_p": r.get("implied_p"), "model_p": r.get("p_cal"),
+            "edge_pts": r.get("true_edge_pts"),
+            "projection": r.get("projected_tds"),
+            "model_p_raw": r.get("model_p_unanchored")}
+
+
 def _leg_row(r: dict, season: int, week: int, source: str) -> dict:
     """A frozen card leg: the pick row plus the ids the betslip link needs.
 
@@ -219,7 +235,11 @@ async def freeze_week(payload: dict, source: str = "live") -> dict:
     # while the guard that matters is about the row already stored. Belt and
     # braces on the one invariant the whole record now rests on: a bet, once
     # committed, is never rewritten.
-    live = [r for r in card_mod.suggestions(payload.get("props") or [])
+    # Touchdowns ride along with the props from here on: same table, same lock,
+    # same tightening. See card.td_suggestions for the bar.
+    td_board = [_td_prop(r) for r in payload.get("tds") or []]
+    td_picked = [_td_prop(r) for r in card_mod.td_suggestions(payload.get("tds") or [])]
+    live = [r for r in card_mod.suggestions(payload.get("props") or []) + td_picked
             if not _has_kicked_off(r)]
     picks = [r for r in live if not _is_locked(r)]
     locked = len(live) - len(picks)
@@ -229,7 +249,7 @@ async def freeze_week(payload: dict, source: str = "live") -> dict:
     # And the other direction: a candidate the board has stopped liking goes,
     # while it is still only a candidate. See _tighten.
     dropped = await _tighten(
-        season, week, payload.get("props") or [],
+        season, week, (payload.get("props") or []) + td_board,
         keep={(r["player_key"], r["market"])
               for r in (_pick_row(x, season, week, source) for x in picks)})
 
@@ -459,13 +479,21 @@ def _result_for(pick: dict, row) -> tuple[Optional[str], Optional[float]]:
     prop, so counting it as a loss would make the record worse than the bet
     actually was. It is handled by the caller, which knows the row is missing.
     """
-    col = SETTLE_COLUMN.get(pick["market"])
-    if col is None or row is None:
+    if row is None:
         return None, None
-    actual = row.get(col)
-    if actual is None or actual != actual:  # NaN
+    if pick["market"] == TD_MARKET:
         actual = 0.0
-    actual = float(actual)
+        for c in TD_COLUMNS:
+            v = row.get(c)
+            actual += float(v) if v is not None and v == v else 0.0
+    else:
+        col = SETTLE_COLUMN.get(pick["market"])
+        if col is None:
+            return None, None
+        actual = row.get(col)
+        if actual is None or actual != actual:  # NaN
+            actual = 0.0
+        actual = float(actual)
 
     line = float(pick["line"])
     if actual == line:
@@ -506,7 +534,8 @@ async def record_game_predictions(season: int, week: int,
     number on record is the one that was in front of us beforehand.
     """
     db = _require_db()
-    fresh = [r for r in rows if not _has_kicked_off(r)]
+    fresh = [{**r, "sim": json.dumps(r["sim"]) if r.get("sim") is not None else None}
+             for r in rows if not _has_kicked_off(r)]
     if not fresh:
         return 0
     return await db.upsert_nfl_game_predictions(fresh)
@@ -586,8 +615,15 @@ async def game_model_record(season: Optional[int] = None) -> dict:
             mk_t_err.append(abs(r["market_total"] - total))
             beat_t += int(abs(r["exp_total"] - total)
                           < abs(r["market_total"] - total))
+    picks, leans = _grade_sims(rows)
     return {
         "games": len(rows),
+        # The moneyline recommendations (gamesim: the book's moneyline against
+        # its own spread) and the model's spread/total leans, graded at the
+        # FanDuel price recorded with them. Leans are not recommendations; this
+        # is where they would earn the right to become one.
+        "ml_picks": picks,
+        "leans": leans,
         "margin_mae": acc(m_err),
         "total_mae": acc(t_err),
         "market_margin_mae": acc(mk_m_err),
@@ -603,6 +639,63 @@ async def game_model_record(season: Optional[int] = None) -> dict:
                      "the market; this records whether it does."),
         },
     }
+
+
+def _grade_sims(rows: list[dict]) -> tuple[dict, dict]:
+    """W-L and ROI for every recorded sim pick and lean, at its recorded price."""
+    def bucket():
+        return {"bets": 0, "wins": 0, "losses": 0, "pushes": 0, "profit": 0.0}
+
+    picks = bucket()
+    leans = {"spread": bucket(), "total": bucket()}
+    for r in rows:
+        sim = r.get("sim")
+        if isinstance(sim, str):
+            try:
+                sim = json.loads(sim)
+            except (TypeError, ValueError):
+                sim = None
+        if not isinstance(sim, dict):
+            continue
+        margin = r["home_score"] - r["away_score"]
+        total = r["home_score"] + r["away_score"]
+
+        def settle(b: dict, edge: float, odds) -> None:
+            b["bets"] += 1
+            if edge == 0:
+                b["pushes"] += 1
+            elif edge > 0:
+                b["wins"] += 1
+                if odds:
+                    b["profit"] += 100 / -odds if odds < 0 else odds / 100
+                else:
+                    b["profit"] += 100 / 110
+            else:
+                b["losses"] += 1
+                b["profit"] -= 1.0
+
+        for pk in sim.get("picks") or []:
+            settle(picks, margin if pk.get("side") == "home" else -margin, pk.get("odds"))
+        for ln in sim.get("leans") or []:
+            line = ln.get("line")
+            if line is None:
+                continue
+            if ln.get("market") == "spread":
+                m = margin if ln.get("side") == "home" else -margin
+                settle(leans["spread"], m + line, ln.get("odds"))
+            elif ln.get("market") == "total":
+                settle(leans["total"],
+                       (total - line) if ln.get("side") == "over" else (line - total),
+                       ln.get("odds"))
+
+    def finish(b: dict) -> dict:
+        decided = b["wins"] + b["losses"]
+        b["hit_rate"] = round(100 * b["wins"] / decided, 1) if decided else None
+        b["roi"] = round(100 * b["profit"] / decided, 1) if decided else None
+        b["profit"] = round(b["profit"], 2)
+        return b
+
+    return finish(picks), {k: finish(v) for k, v in leans.items()}
 
 
 async def purge_late_picks(season: Optional[int] = None,
@@ -967,9 +1060,35 @@ async def track_record(season: Optional[int] = None) -> dict:
         )
 
     graded_cards = [c for c in cards if c.get("result")]
+    # Touchdowns are a different bet — plus money, a yes-only market — and
+    # folding them into the prop totals would make every split below answer
+    # two questions at once. They get their own block.
+    tds = [r for r in rows if r.get("market") == TD_MARKET]
+    rows = [r for r in rows if r.get("market") != TD_MARKET]
     return {
         "season": season,
         "overall": _bucket(rows),
+        "touchdowns": {
+            "overall": _bucket(tds),
+            "by_edge": [
+                {"edge": k, **_bucket(v)}
+                for k, v in sorted(_split(tds, lambda r: _td_edge_bucket(
+                    r.get("edge_pts"))).items())
+            ],
+            "by_week": sorted(
+                ({"week": k, **_bucket(v)} for k, v in _by_week(tds).items()),
+                key=lambda d: d["week"], reverse=True),
+            "picks": tds[:200],
+        },
+        # Whether a pick sits under card.MAX_EDGE_PTS. Every pick recorded
+        # since the cap shipped is below it by construction; the split is here
+        # so the history the cap was fitted on stays visible beside it.
+        "by_edge": [
+            {"edge": k, **_bucket(v)}
+            for k, v in sorted(_split(rows, lambda r: (
+                "over cap" if (r.get("edge_pts") or 0) > card_mod.MAX_EDGE_PTS
+                else "under cap")).items())
+        ],
         # The same picks graded at the line we first saw against the line they
         # locked at. See _open_vs_lock, and card.LOCK_LEAD for the deadline.
         "open_vs_lock": _open_vs_lock(rows),
@@ -1035,6 +1154,12 @@ async def track_record(season: Optional[int] = None) -> dict:
         },
         "picks": rows[:400],
     }
+
+
+def _td_edge_bucket(edge) -> str:
+    if edge is None:
+        return "unknown"
+    return "5-8" if edge < 8 else "8-12" if edge < 12 else "12+"
 
 
 def _vacated_bucket(share) -> str:
