@@ -357,6 +357,27 @@ def test_a_day_with_no_games_is_not_a_failure(tmp_path, monkeypatch):
     assert code == 0
 
 
+def test_the_slate_date_is_eastern_and_runs_past_midnight_utc():
+    """The late passes start after midnight UTC while the night's games are
+    still on. On 2026-10-28 at 02:36 UTC the job asked for the 28th's slate,
+    found none, and failed; the slate in progress was the 27th's."""
+    from datetime import datetime, timezone
+    snap = _snap()
+    at = lambda s: datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+    assert snap.slate_today(at("2026-10-28T02:36")).isoformat() == "2026-10-27"
+    assert snap.slate_today(at("2026-10-28T07:30")).isoformat() == "2026-10-27"
+    assert snap.slate_today(at("2026-10-28T15:00")).isoformat() == "2026-10-28"
+
+
+def test_a_pass_after_every_first_pitch_is_not_a_failure(tmp_path, monkeypatch):
+    """Games listed but all under way: their props are gone, not missing."""
+    code = _run_snapshot_main(tmp_path, monkeypatch, "2026-10-27", prices={},
+                              make_existing=False,
+                              events=({"event_id": "1", "name": "A @ B",
+                                       "open_date": "2026-10-28T00:08:00Z"},))
+    assert code == 0
+
+
 # ---------------------------------------------------------------------------
 # The model must not extrapolate past its training range
 # ---------------------------------------------------------------------------

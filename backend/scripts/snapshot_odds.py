@@ -41,8 +41,9 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -53,6 +54,21 @@ from sharp_edge.fanduel.odds import FanDuelOdds, american_to_implied
 logger = logging.getLogger("snapshot-odds")
 
 DEFAULT_DIR = Path.home() / ".sharp-edge" / "odds"
+
+# Which slate "today" is. The runner's clock is UTC, and the late closing
+# passes — scheduled 23:55 and 01:25, and started by GitHub one to three hours
+# after that — land past midnight UTC while the night's games are still being
+# played. ``date.today()`` there named tomorrow's slate, found nothing priced
+# and no file for it, and exited 1: every red run from 2026-10-24 to -28. The
+# slate is an Eastern-time day, and it runs until the small hours.
+SLATE_TZ = ZoneInfo("America/New_York")
+SLATE_ROLLOVER_HOURS = 6
+
+
+def slate_today(now: datetime | None = None) -> date:
+    """The MLB slate in progress at ``now``: Eastern date, rolled at 6am."""
+    now = now or datetime.now(timezone.utc)
+    return (now.astimezone(SLATE_TZ) - timedelta(hours=SLATE_ROLLOVER_HOURS)).date()
 
 
 def _mins_to_start(event_start: str | None, now: datetime) -> float | None:
@@ -299,7 +315,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--date", default=date.today().isoformat())
+    ap.add_argument("--date", default=slate_today().isoformat())
     ap.add_argument("--dir", type=Path, default=DEFAULT_DIR)
     ap.add_argument("--state", default="CO")
     ap.add_argument("--summary", action="store_true",
@@ -337,8 +353,17 @@ def main() -> None:
         # keeps firing through them — 2026-10-20 and -21 went red six times a
         # day on an empty board.
         target = date.fromisoformat(args.date)
-        if not asyncio.run(FanDuelOdds(state=args.state).slate_events(target)):
+        events = asyncio.run(FanDuelOdds(state=args.state).slate_events(target))
+        if not events:
             logger.info("%s: no MLB games on the board, nothing to snapshot",
+                        args.date)
+            return
+        # Or every game listed is already under way, so FanDuel has pulled
+        # their props. Nothing was missed that a working fetch would have had.
+        now = datetime.now(timezone.utc)
+        mins = [_mins_to_start(e.get("open_date"), now) for e in events]
+        if all(m is not None and m <= 0 for m in mins):
+            logger.info("%s: every listed game has started, nothing to price",
                         args.date)
             return
         logger.error("%s: no prices, and no snapshot from any earlier pass",
