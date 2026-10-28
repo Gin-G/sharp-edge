@@ -479,11 +479,44 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
         })
 
     flag_role_conflicts(board.props)
+    flag_td_rooms(board.tds)
     board.props.sort(key=_prop_rank)
     board.tds.sort(key=lambda r: -(r.get("true_edge_pts")
                                    if r.get("true_edge_pts") is not None else -99))
     board.unmatched = sorted({ln.key for ln in fd.lines if ln.key not in matched})
     return board
+
+
+def flag_td_rooms(tds: list[dict]) -> int:
+    """Mark TD rows whose teammate ahead of them is under-read by us.
+
+    "Ahead" is the market's pecking order — an active teammate at the same
+    position priced shorter — because the depth chart is the thing most likely
+    to be stale. ``starter_gap_pts`` is how far below his price our calibrated
+    number puts that teammate; card.TD_STARTER_GAP_PTS refuses the backup.
+    """
+    rooms: dict = {}
+    for r in tds:
+        if r.get("team") and r.get("position"):
+            rooms.setdefault((r["team"], r["position"]), []).append(r)
+    flagged = 0
+    for room in rooms.values():
+        for r in room:
+            r["starter_gap_pts"], r["starter"] = None, None
+            mine = r.get("implied_p")
+            if mine is None:
+                continue
+            for m in room:
+                if (m is r or m.get("p_cal") is None or m.get("implied_p") is None
+                        or m["implied_p"] <= mine
+                        or not card_mod._available(m)):
+                    continue
+                gap = round(100 * (m["implied_p"] - m["p_cal"]), 1)
+                if r["starter_gap_pts"] is None or gap > r["starter_gap_pts"]:
+                    r["starter_gap_pts"], r["starter"] = gap, m.get("player")
+            if (r["starter_gap_pts"] or 0) >= card_mod.TD_STARTER_GAP_PTS:
+                flagged += 1
+    return flagged
 
 
 def flag_role_conflicts(props: list[dict]) -> int:

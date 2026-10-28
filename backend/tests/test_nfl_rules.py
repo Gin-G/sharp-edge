@@ -222,3 +222,33 @@ def test_a_tied_moneyline_is_a_push_not_a_loss():
          "home_score": 20, "away_score": 20, "sim": {"picks": [{"side": "home", "odds": 150}]}}
     (e,) = tracking._ml_entries(g)
     assert e["result"] == "PUSH" and tracking._units(150, "PUSH") == 0.0
+
+
+def test_a_backup_behind_a_starter_we_under_read_is_not_a_td_pick():
+    from sharp_edge.nfl.screen import flag_td_rooms
+    # Week 8 2026: Jacobs back and priced at 57%, our read 41%; Strong +1100.
+    jacobs = _td(player="Josh Jacobs", key="jacobs", team="GB", position="RB",
+                 odds=-135, implied_p=0.5745, p_cal=0.4085, true_edge_pts=-16.6)
+    strong = _td(player="Pierre Strong", key="strong", team="GB", position="RB",
+                 odds=1100, implied_p=0.0833, p_cal=0.2093, true_edge_pts=12.6)
+    flag_td_rooms([jacobs, strong])
+    assert strong["starter"] == "Josh Jacobs" and strong["starter_gap_pts"] == 16.6
+    assert card_mod.td_suggestions([jacobs, strong]) == []
+
+
+def test_a_backup_is_fine_when_the_starter_is_read_like_the_market_or_out():
+    from sharp_edge.nfl.screen import flag_td_rooms
+    odunze = _td(player="Rome Odunze", team="CHI", position="WR",
+                 implied_p=0.2857, p_cal=0.2702, true_edge_pts=-1.5)
+    burden = _td(player="Luther Burden", team="CHI", position="WR",
+                 implied_p=0.2941 - 0.05, p_cal=0.3523, true_edge_pts=10.8)
+    flag_td_rooms([odunze, burden])
+    assert len(card_mod.td_suggestions([odunze, burden])) == 1
+    # A starter who is out takes nobody's share.
+    starter = _td(player="Out Back", team="GB", position="RB", avail="OUT",
+                  implied_p=0.57, p_cal=0.30)
+    backup = _td(player="Next Back", team="GB", position="RB",
+                 implied_p=0.30, p_cal=0.40, true_edge_pts=10.0)
+    flag_td_rooms([starter, backup])
+    assert backup["starter_gap_pts"] is None
+    assert len(card_mod.td_suggestions([starter, backup])) == 1

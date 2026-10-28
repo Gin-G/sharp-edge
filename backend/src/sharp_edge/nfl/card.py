@@ -166,6 +166,16 @@ CALIBRATION_KEEP = 0.15
 TD_MIN_EDGE_PTS = 5.0
 TD_MIN_P = 0.20
 
+# A backup's touchdown share is whatever the projection did not give the man
+# ahead of him. When the market prices that teammate well above our number,
+# the market is saying his role is bigger than the projection knows — a
+# starter back from injury, read off weeks he missed — and the backup's edge is
+# the starter's share counted twice. Pierre Strong, week 8 2026: +1100 at a
+# 20.9% read, because Josh Jacobs was back and priced at 57% against our 41%.
+# Same failure as the props' "market" verdict (10-21); see screen.flag_td_rooms.
+# Ten points leaves room for the vig on a raw one-way price.
+TD_STARTER_GAP_PTS = 10.0
+
 
 def _plausible(row: dict) -> bool:
     """Are the model and the market pricing the same player-week?
@@ -285,6 +295,7 @@ def td_suggestions(tds: Iterable[dict]) -> list[dict]:
            and r.get("p_cal") is not None
            and r["p_cal"] >= TD_MIN_P
            and (r.get("true_edge_pts") or 0) >= TD_MIN_EDGE_PTS
+           and (r.get("starter_gap_pts") or 0) < TD_STARTER_GAP_PTS
            and _available(r)]
     out.sort(key=lambda r: -(r.get("true_edge_pts") or 0))
     return out
