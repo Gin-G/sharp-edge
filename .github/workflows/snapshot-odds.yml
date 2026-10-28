@@ -65,7 +65,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # MLB is a March-to-early-November sport. Outside that the board is empty and
+  # every pass exits green having done nothing, six times a day all winter, so
+  # scheduled runs stand down from Nov 10 to Mar 15 and pick themselves back up
+  # for Opening Day. A manual dispatch always runs.
+  season:
+    runs-on: ubuntu-latest
+    outputs:
+      on: ${{ steps.check.outputs.on }}
+    steps:
+      - id: check
+        run: |
+          md=$(TZ=America/New_York date +%m%d)
+          if [ "${{ github.event_name }}" != "schedule" ] || { [ "$md" -ge 0315 ] && [ "$md" -le 1110 ]; }; then
+            echo "on=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "on=false" >> "$GITHUB_OUTPUT"
+            echo "MLB off-season ($md): skipping the snapshot." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   snapshot:
+    needs: season
+    if: needs.season.outputs.on == 'true'
     runs-on: ubuntu-latest
     # Generous only for the full pass, which loads Statcast. The closing
     # passes finish in seconds.
