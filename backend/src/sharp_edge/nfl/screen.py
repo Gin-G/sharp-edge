@@ -35,7 +35,7 @@ from typing import Optional
 import httpx
 
 from ..fanduel.odds import american_to_implied
-from . import (availability as nfl_avail, card as card_mod, gamemodel, gamesim,
+from . import (altparlay, availability as nfl_avail, card as card_mod, gamemodel, gamesim,
                matchup as nfl_matchup, model, odds as nfl_odds,
                projections as nfl_proj, usage as nfl_usage)
 from .names import event_teams
@@ -127,6 +127,10 @@ class NFLBoard:
     #: win/cover/over probabilities, the moneyline picks, the model's leans.
     #: See nfl/gamesim.py for which of those is a recommendation and why.
     game_sims: list[dict] = field(default_factory=list)
+    #: Every alt-ladder rung we could price, and the two parlays built from
+    #: them. See nfl/altparlay.py.
+    alt_rungs: list[dict] = field(default_factory=list)
+    alt_parlays: dict = field(default_factory=dict)
     fits: dict = field(default_factory=dict)
     prob_fits: dict = field(default_factory=dict)
     #: Who is out this week, and which position groups lost work because of it.
@@ -168,6 +172,13 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
         sr_factors = {}
     opponent_map = nfl_matchup.opponents(wk.games)
 
+    # Each player's last four games, for the alt-ladder record. A failure costs
+    # the alt parlays and nothing else.
+    try:
+        recent = await asyncio.to_thread(altparlay.recent_values, season, week)
+    except Exception as e:
+        logger.warning("[nfl] recent values for alt ladders unavailable: %s", e)
+        recent = {}
     # Tight-end receiving is blended with an opportunity projection. One market,
     # because it is the only one that beat the production model on a five-seed
     # backtest with a bootstrap interval clear of zero — see nfl.usage.
@@ -402,6 +413,35 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 **_availability_fields(p, component),
                 **priced,
             })
+            # The same player's alt ladder, priced off the same adjusted
+            # projection, centring and shrink as the main line above.
+            last4 = (recent.get(key) or {}).get(market) or []
+            for rung in fd.ladder(market, key):
+                rfair = altparlay.rung_fair(rung.over, ln.over, fair)
+                if rfair is None:
+                    continue
+                p_rung = model.anchor_probability(
+                    model.prop_probability(market, adjusted, rung.line,
+                                           est_season=adjusted, volume=volume),
+                    offset, rfair, shrink)
+                rp = altparlay.price_rung(rung.over, p_rung, rfair)
+                if rp is None:
+                    continue
+                board.alt_rungs.append({
+                    "market": market, "player": ln.player, "key": key,
+                    "player_id": p.get("player_id"), "position": p.get("position"),
+                    "team": p.get("team"), "event": rung.event,
+                    "fd_event_id": rung.event_id, "kickoff": rung.kickoff,
+                    "line": rung.line, "threshold": rung.line + 0.5, "side": "OVER",
+                    "odds": rung.over, "adjusted": round(adjusted, 1),
+                    "last4": last4,
+                    "hits4": sum(1 for v in last4 if v > rung.line),
+                    "fd_market_id": rung.market_id,
+                    "over_selection_id": rung.over_selection,
+                    "role_conflict_verdict": None,
+                    **_availability_fields(p, component),
+                    **rp,
+                })
 
     # Anytime TD. The projections carry expected touchdowns directly, so the
     # rate feature is the projected total rather than a trailing one.
@@ -480,6 +520,13 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
 
     flag_role_conflicts(board.props)
     flag_td_rooms(board.tds)
+    verdicts = {(r["key"], r["market"]): r.get("role_conflict_verdict")
+                for r in board.props}
+    for r in board.alt_rungs:
+        r["role_conflict_verdict"] = verdicts.get((r["key"], r["market"]))
+    if not proj.preseason:
+        cands = altparlay.candidates(board.alt_rungs)
+        board.alt_parlays = {k: altparlay.build(cands, k) for k in altparlay.KINDS}
     board.props.sort(key=_prop_rank)
     board.tds.sort(key=lambda r: -(r.get("true_edge_pts")
                                    if r.get("true_edge_pts") is not None else -99))
@@ -764,6 +811,17 @@ def as_payload(board: NFLBoard) -> dict:
             "min_edge_pts": card_mod.MIN_EDGE_PTS,
             "under_min_edge_pts": card_mod.UNDER_MIN_EDGE_PTS,
             "max_edge_pts": card_mod.MAX_EDGE_PTS,
+        },
+        "alt_parlays": {
+            k: (None if v is None else {**v, "betslip_url": card_mod.betslip_url(v["legs"])})
+            for k, v in board.alt_parlays.items()
+        },
+        "alt_candidates": altparlay.candidates(board.alt_rungs),
+        "alt_rules": {
+            "rungs_priced": len(board.alt_rungs),
+            "record_games": altparlay.RECORD_GAMES, "min_hits": altparlay.MIN_HITS,
+            "min_edge_pts": card_mod.MIN_EDGE_PTS, "max_edge_pts": card_mod.MAX_EDGE_PTS,
+            "kinds": altparlay.KINDS, "max_legs": altparlay.MAX_LEGS,
         },
         "tds": board.tds,
         "td_picks": card_mod.td_suggestions(board.tds),

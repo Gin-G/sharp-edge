@@ -329,6 +329,22 @@ def test_alt_ladder_splits_into_one_line_per_rung():
     assert board.by_market("rushing_yards") == {}
 
 
+def test_alt_ladder_reads_the_rung_from_the_name_not_the_handicap():
+    """FanDuel's real shape, 2026 week 8: every rung at handicap 0, no result
+    type. Grouping on the handicap collapsed the ladder to one line at 0.0."""
+    board = odds.Board()
+    odds._absorb(board, EV, _market(
+        "PLAYER_X_ALT_RECEIVING_YARDS_MEDIUM",
+        [_runner("Chuba Hubbard 5+ Yards", -500, 0, None, 11),
+         _runner("Chuba Hubbard 15+ Yards", -114, 0, None, 12),
+         _runner("Chuba Hubbard 25+ Yards", 220, 0, None, 13)],
+    ))
+    rungs = board.ladder("receiving_yards", norm_name("Chuba Hubbard"))
+    assert [(r.line, r.over, r.over_selection) for r in rungs] == [
+        (4.5, -500, 11), (14.5, -114, 12), (24.5, 220, 13)]
+    assert all(r.player == "Chuba Hubbard" for r in rungs)
+
+
 def test_suspended_markets_and_scratched_runners_are_skipped():
     board = odds.Board()
     odds._absorb(board, EV, _market(
@@ -603,6 +619,9 @@ class _PendingDB:
 
     async def list_nfl_picks(self, season=None, week=None):
         return self.picks
+
+    async def list_nfl_alt_parlays(self, season=None, week=None):
+        return []
 
 
 def _pending(*weeks, season=2026):
@@ -1279,6 +1298,13 @@ async def test_build_board_executes_end_to_end(monkeypatch):
         line=38.5, over=-114, under=-106, market_id="m1",
         over_selection=1, under_selection=2, event_id="e1",
         event="CLE @ JAX", kickoff="2026-09-13T17:00:00.000Z"))
+    # An alt ladder behind the main line, so the rung pricing runs too.
+    for rung, price in ((24.5, -400), (39.5, -130), (59.5, 250)):
+        board_obj.lines.append(nfl_odds.Line(
+            market="receiving_yards", player="A Tight End", key="a tight end",
+            line=rung, over=price, market_id="m2", over_selection=int(rung),
+            event_id="e1", event="CLE @ JAX", kickoff="2026-09-13T17:00:00.000Z",
+            alt=True))
 
     async def fake_week(today=None, client=None):
         return wk
@@ -1297,6 +1323,8 @@ async def test_build_board_executes_end_to_end(monkeypatch):
                         lambda s, force=False: {"CLE": 1.02})
     monkeypatch.setattr(scr.nfl_usage, "projections",
                         lambda s, w, pos="TE", force=False: {"a tight end": 60.0})
+    monkeypatch.setattr(scr.altparlay, "recent_values", lambda s, w, force=False: {
+        "a tight end": {"receiving_yards": [50.0, 41.0, 66.0, 30.0]}})
 
     board = await scr.build_board()
     assert board.season == 2026 and board.week == 1
@@ -1309,6 +1337,13 @@ async def test_build_board_executes_end_to_end(monkeypatch):
     payload = scr.as_payload(board)
     assert payload["usage_blend"]["rows"] == 1
     assert payload["matchup"]["rows"] == 1
+    # Every rung priced off the same projection, with its own record.
+    rungs = {r["threshold"]: r for r in board.alt_rungs}
+    assert sorted(rungs) == [25.0, 40.0, 60.0]
+    assert rungs[25.0]["hits4"] == 4 and rungs[60.0]["hits4"] == 1
+    assert rungs[25.0]["model_p"] > rungs[40.0]["model_p"] > rungs[60.0]["model_p"]
+    assert payload["alt_rules"]["rungs_priced"] == 3
+    assert set(payload["alt_parlays"]) == {"double_up", "lotto"}
 
 
 # ---------------------------------------------------------------------------

@@ -214,7 +214,9 @@ def _leg_row(r: dict, season: int, week: int, source: str) -> dict:
     }
 
 
-async def freeze_week(payload: dict, source: str = "live") -> dict:
+async def freeze_week(payload: dict, source: str = "live",
+                      alt_rungs: Optional[list] = None,
+                      built_at: Optional[float] = None) -> dict:
     """Persist this week's suggestions and freeze the card.
 
     Idempotent and safe to call on every board request: picks upsert (revising
@@ -278,7 +280,14 @@ async def freeze_week(payload: dict, source: str = "live") -> dict:
             "model_p": summary["model_p"],
         })
     repaired = await _repair_card_ids(season, week, payload.get("props") or [])
-    return {"suggestions": len(picks), "written": written,
+    try:
+        alt = await record_alt_parlays(season, week, payload.get("alt_parlays") or {})
+        alt["prices_archived"] = await archive_alt_prices(season, week, alt_rungs,
+                                                          built_at)
+    except Exception as exc:                 # must not cost the card its freeze
+        logger.warning("[nfl-track] alt parlays not recorded: %s", exc)
+        alt = {"error": str(exc)}
+    return {"suggestions": len(picks), "written": written, "alt": alt,
             "locked": locked,
             "dropped": len(dropped), "dropped_rows": dropped,
             "card_legs": len(the_card), "card_frozen": frozen,
@@ -699,6 +708,126 @@ def _grade_sims(rows: list[dict]) -> tuple[dict, dict]:
     return finish(picks), {k: finish(v) for k, v in leans.items()}
 
 
+# --- alt-line parlays (nfl/altparlay.py) -----------------------------------
+
+_archived: dict = {"key": None}
+
+
+async def record_alt_parlays(season: int, week: int, parlays: dict,
+                             now: Optional[datetime] = None) -> dict:
+    """Write this week's alt parlays, rebuilding each until its first leg locks.
+
+    The card is frozen at first build; these are not, because a lotto drawn
+    from Thursday to Monday cannot be built on Tuesday — half the ladders are
+    not up yet. So each is rewritten with the board while every leg is still
+    open, and frozen the moment its earliest leg passes its lock (kickoff less
+    card.LOCK_LEAD). From then on it is a placed bet and the database refuses
+    to rewrite it. A week the board can no longer build drops its unfrozen
+    ticket rather than leaving a stale one on the record.
+    """
+    db = _require_db()
+    stored = {r["kind"]: r for r in await db.list_nfl_alt_parlays(season, week)}
+    out = {}
+    for kind, p in parlays.items():
+        cur = stored.get(kind)
+        if cur and not cur.get("frozen") and not cur.get("result") and any(
+                _is_locked(leg, now) for leg in cur.get("legs") or []):
+            await db.freeze_nfl_alt_parlay(season, week, kind)
+            out[kind] = "frozen"
+            continue
+        if cur and (cur.get("frozen") or cur.get("result")):
+            out[kind] = "frozen"
+            continue
+        if not p or any(_is_locked(leg, now) for leg in p.get("legs") or []):
+            if cur and await db.delete_nfl_alt_parlay(season, week, kind):
+                out[kind] = "dropped"
+            else:
+                out[kind] = "none"
+            continue
+        legs = [{**{k: leg.get(k) for k in (
+                    "player", "key", "team", "position", "market", "line",
+                    "threshold", "side", "odds", "implied", "fair", "model_p",
+                    "p_cal", "edge_pts", "hits4", "last4", "event", "fd_event_id",
+                    "kickoff", "fd_market_id", "over_selection_id")},
+                 "lock_at": _lock_stamp(leg)} for leg in p["legs"]]
+        await db.upsert_nfl_alt_parlay({
+            "season": season, "week": week, "kind": kind,
+            "legs": json.dumps(legs), "leg_count": len(legs),
+            "american": p.get("american"), "decimal_odds": p.get("decimal_odds"),
+            "model_p": p.get("model_p"), "stake": p.get("stake"),
+        })
+        out[kind] = "written"
+    return out
+
+
+async def archive_alt_prices(season: int, week: int, rungs: Optional[list],
+                             built_at: Optional[float]) -> int:
+    """Every priced rung, once per board build. See upsert_nfl_alt_prices."""
+    if not rungs:
+        return 0
+    key = (season, week, built_at)
+    if built_at is not None and _archived["key"] == key:
+        return 0
+    rows = [{"season": season, "week": week, "player_key": r.get("key"),
+             **{k: r.get(k) for k in ("market", "line", "player", "team", "event",
+                                      "kickoff", "odds", "model_p", "p_cal",
+                                      "edge_pts", "hits4")}}
+            for r in rungs if r.get("key") and r.get("odds") is not None
+            and not _has_kicked_off(r)]
+    n = await _require_db().upsert_nfl_alt_prices(rows)
+    _archived["key"] = key
+    return n
+
+
+def _grade_alt_parlay(legs: list[dict], actuals: dict, played: set) -> tuple:
+    """``(result | None, legs won, legs graded, decimal over the legs that stood)``.
+
+    The card's rules: one lost leg decides it, a void leg drops out and takes
+    its price with it, and a win needs every leg in.
+    """
+    won = graded = 0
+    pending = False
+    dec = 1.0
+    for leg in legs:
+        if leg.get("team") not in played:
+            pending = True
+            continue
+        row = actuals.get(leg.get("key"))
+        if row is None:
+            continue                        # did not play: void, as the book does
+        res, actual = _result_for({**leg, "side": "OVER"}, row)
+        if res is None:
+            pending = True
+            continue
+        graded += 1
+        if res == "WIN":
+            won += 1
+            o = leg.get("odds")
+            dec *= 1 + (o / 100 if o > 0 else 100 / -o) if o else 1.0
+        elif res == "LOSS":
+            return "LOSS", won, graded, None
+    if pending:
+        return None, won, graded, None
+    if graded == 0:
+        return "VOID", 0, 0, 1.0
+    return "WIN", won, graded, round(dec, 4)
+
+
+async def _settle_alt_parlays(season: int, week: int, actuals: dict,
+                              played: set) -> int:
+    db = _require_db()
+    n = 0
+    for p in await db.list_nfl_alt_parlays(season, week):
+        if p.get("result") or not p.get("frozen"):
+            continue
+        res, won, graded, dec = _grade_alt_parlay(p.get("legs") or [], actuals, played)
+        if res is None:
+            continue
+        await db.settle_nfl_alt_parlay(season, week, p["kind"], res, won, graded, dec)
+        n += 1
+    return n
+
+
 async def purge_late_picks(season: Optional[int] = None,
                            week: Optional[int] = None,
                            apply: bool = False) -> dict:
@@ -782,7 +911,9 @@ async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
     db = _require_db()
     picks = [p for p in await db.list_nfl_picks(season=season, week=week)
              if not p.get("result")]
-    if not picks:
+    alt_pending = [p for p in await db.list_nfl_alt_parlays(season, week)
+                   if p.get("frozen") and not p.get("result")]
+    if not picks and not alt_pending:
         # Still re-score the card: every pick being settled is exactly when a
         # card most needs grading, not a reason to skip it.
         await _settle_card(season, week, regrade=regrade)
@@ -804,6 +935,7 @@ async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
                 "pending": len(picks),
                 "message": f"week {week} not in the published data yet"}
 
+    alt_settled = await _settle_alt_parlays(season, week, actuals, played)
     counts: dict = {"WIN": 0, "LOSS": 0, "PUSH": 0, "VOID": 0}
     waiting = 0
     for p in picks:
@@ -833,7 +965,7 @@ async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
     await _settle_card(season, week, regrade=regrade)
     return {"season": season, "week": week,
             "settled": sum(counts.values()), "waiting_on_kickoff": waiting,
-            **counts}
+            "alt_parlays_settled": alt_settled, **counts}
 
 
 def _leg_result(leg: dict, actual: Optional[float]) -> Optional[str]:
@@ -1275,16 +1407,49 @@ def _ml_entries(g: dict) -> list[dict]:
 
 
 def _ledger_bucket(rows: list[dict]) -> dict:
+    """Record and units. ROI is on what was staked, so a 0.1u lotto counts as
+    0.1u risked, not a full unit."""
     w = sum(1 for r in rows if r["result"] == "WIN")
     lo = sum(1 for r in rows if r["result"] == "LOSS")
     profit = sum(r["units"] for r in rows if r["units"] is not None)
+    staked = sum(r.get("stake", 1.0) for r in rows if r["result"] in ("WIN", "LOSS"))
     return {
         "bets": len(rows), "wins": w, "losses": lo,
         "pushes": sum(1 for r in rows if r["result"] in ("PUSH", "VOID")),
         "pending": sum(1 for r in rows if not r["result"]),
         "hit_rate": round(100 * w / (w + lo), 1) if w + lo else None,
         "units": round(profit, 2),
-        "roi": round(100 * profit / (w + lo), 1) if w + lo else None,
+        "staked": round(staked, 2),
+        "roi": round(100 * profit / staked, 1) if staked else None,
+    }
+
+
+def _alt_entry(p: dict) -> dict:
+    """One alt parlay as a ledger row: a single bet at its own stake."""
+    name = {"double_up": "Alt double-up", "lotto": "Alt lotto"}.get(p["kind"], p["kind"])
+    stake = float(p.get("stake") or 1.0)
+    res = p.get("result")
+    if res == "WIN":
+        units = round(stake * ((p.get("settled_decimal") or p.get("decimal_odds") or 1) - 1), 3)
+    elif res == "LOSS":
+        units = -stake
+    elif res in ("VOID", "PUSH"):
+        units = 0.0
+    else:
+        units = None
+    legs = p.get("legs") or []
+    return {
+        "season": p["season"], "week": p["week"],
+        "kickoff": min((l.get("kickoff") or "" for l in legs), default=None) or None,
+        "type": "parlay", "pick": f"{name}: {p.get('leg_count')} legs",
+        "team": None, "event": None, "market": p["kind"],
+        "odds": p.get("american"), "model_p": p.get("model_p"), "edge_pts": None,
+        "result": res,
+        "actual": (f"{p.get('legs_won')}/{p.get('legs_settled')} legs"
+                   if p.get("legs_settled") is not None else None),
+        "units": units, "stake": stake, "frozen": bool(p.get("frozen")),
+        "legs": [{k: l.get(k) for k in ("player", "market", "threshold", "odds",
+                                       "p_cal", "event", "kickoff")} for l in legs],
     }
 
 
@@ -1297,6 +1462,12 @@ async def recommendations(season: Optional[int] = None) -> dict:
     for e in entries:
         e["units"] = _units(e["odds"], e["result"])
         e["current_rules"] = (e["season"], e["week"]) >= RULES_SINCE
+    # Alt parlays carry their own stake and settled payout, so they join after
+    # the flat-stake grading above rather than through it.
+    for p in await db.list_nfl_alt_parlays(season):
+        e = _alt_entry(p)
+        e["current_rules"] = True
+        entries.append(e)
     entries.sort(key=lambda e: (e["season"], e["week"], e.get("kickoff") or "",
                                 e["pick"]), reverse=True)
 
@@ -1304,7 +1475,7 @@ async def recommendations(season: Optional[int] = None) -> dict:
         return {
             "overall": _ledger_bucket(rows),
             "by_type": {t: _ledger_bucket([r for r in rows if r["type"] == t])
-                        for t in ("prop", "touchdown", "moneyline")},
+                        for t in ("prop", "touchdown", "moneyline", "parlay")},
         }
 
     current = [e for e in entries if e["current_rules"]]
@@ -1321,7 +1492,7 @@ async def recommendations(season: Optional[int] = None) -> dict:
             {"season": s, "week": w, "current_rules": (s, w) >= RULES_SINCE,
              **_ledger_bucket(rows),
              "by_type": {t: _ledger_bucket([r for r in rows if r["type"] == t])
-                         for t in ("prop", "touchdown", "moneyline")}}
+                         for t in ("prop", "touchdown", "moneyline", "parlay")}}
             for (s, w), rows in sorted(weeks.items(), reverse=True)
         ],
         "ledger": entries,

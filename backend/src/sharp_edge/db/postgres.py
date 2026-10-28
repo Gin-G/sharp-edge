@@ -7,7 +7,7 @@ from typing import Optional
 
 import asyncpg
 
-from .base import (BetDatabase, NFL_CARD_COLUMNS, NFL_GAME_ADDED_COLUMNS,
+from .base import (BetDatabase, NFL_ALT_PARLAY_COLUMNS, NFL_CARD_COLUMNS, NFL_GAME_ADDED_COLUMNS,
                    NFL_PICK_ADDED_COLUMNS,
                    NFL_PICK_COLUMNS,
                    NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
@@ -203,6 +203,45 @@ CREATE TABLE IF NOT EXISTS nfl_game_predictions (
     PRIMARY KEY (season, week, home_team, away_team)
 );
 
+CREATE TABLE IF NOT EXISTS nfl_alt_parlays (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    legs JSONB NOT NULL,
+    leg_count INTEGER NOT NULL,
+    american INTEGER,
+    decimal_odds DOUBLE PRECISION,
+    model_p DOUBLE PRECISION,
+    stake DOUBLE PRECISION NOT NULL,
+    frozen BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    result TEXT,
+    legs_won INTEGER,
+    legs_settled INTEGER,
+    settled_decimal DOUBLE PRECISION,
+    resolved_at TIMESTAMPTZ,
+    PRIMARY KEY (season, week, kind)
+);
+CREATE TABLE IF NOT EXISTS nfl_alt_prices (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    player_key TEXT NOT NULL,
+    market TEXT NOT NULL,
+    line DOUBLE PRECISION NOT NULL,
+    player TEXT,
+    team TEXT,
+    event TEXT,
+    kickoff TEXT,
+    open_odds INTEGER,
+    odds INTEGER,
+    model_p DOUBLE PRECISION,
+    p_cal DOUBLE PRECISION,
+    edge_pts DOUBLE PRECISION,
+    hits4 INTEGER,
+    first_seen TIMESTAMPTZ DEFAULT NOW(),
+    last_seen TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (season, week, player_key, market, line)
+);
 CREATE TABLE IF NOT EXISTS nfl_cards (
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -708,6 +747,77 @@ class PostgresDatabase(BetDatabase):
                    WHERE season = $4 AND week = $5""",
                 result, legs_won, legs_settled, season, week,
             )
+
+    async def upsert_nfl_alt_parlay(self, row: dict) -> bool:
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """INSERT INTO nfl_alt_parlays (
+                    season, week, kind, legs, leg_count, american, decimal_odds,
+                    model_p, stake
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                ON CONFLICT (season, week, kind) DO UPDATE SET
+                    legs = EXCLUDED.legs, leg_count = EXCLUDED.leg_count,
+                    american = EXCLUDED.american, decimal_odds = EXCLUDED.decimal_odds,
+                    model_p = EXCLUDED.model_p, stake = EXCLUDED.stake
+                WHERE NOT nfl_alt_parlays.frozen AND nfl_alt_parlays.result IS NULL""",
+                row["season"], row["week"], row["kind"], row["legs"], row["leg_count"],
+                row.get("american"), row.get("decimal_odds"), row.get("model_p"),
+                row["stake"],
+            )
+        return int(status.rsplit(" ", 1)[-1]) > 0
+
+    async def freeze_nfl_alt_parlay(self, season: int, week: int, kind: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE nfl_alt_parlays SET frozen = TRUE "
+                "WHERE season = $1 AND week = $2 AND kind = $3", season, week, kind)
+
+    async def delete_nfl_alt_parlay(self, season: int, week: int, kind: str) -> bool:
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                "DELETE FROM nfl_alt_parlays WHERE season = $1 AND week = $2 "
+                "AND kind = $3 AND NOT frozen AND result IS NULL", season, week, kind)
+        return int(status.rsplit(" ", 1)[-1]) > 0
+
+    async def list_nfl_alt_parlays(self, season=None, week=None) -> list[dict]:
+        sql = f"SELECT {NFL_ALT_PARLAY_COLUMNS} FROM nfl_alt_parlays WHERE TRUE"
+        args: list = []
+        if season is not None:
+            args.append(season); sql += f" AND season = ${len(args)}"
+        if week is not None:
+            args.append(week); sql += f" AND week = ${len(args)}"
+        sql += " ORDER BY season DESC, week DESC, kind"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+        return [_nfl_row(r) for r in rows]
+
+    async def settle_nfl_alt_parlay(self, season, week, kind, result, legs_won,
+                                    legs_settled, settled_decimal) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE nfl_alt_parlays SET result = $1, legs_won = $2,
+                       legs_settled = $3, settled_decimal = $4, resolved_at = NOW()
+                   WHERE season = $5 AND week = $6 AND kind = $7""",
+                result, legs_won, legs_settled, settled_decimal, season, week, kind)
+
+    async def upsert_nfl_alt_prices(self, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        cols = ("season", "week", "player_key", "market", "line", "player", "team",
+                "event", "kickoff", "odds", "model_p", "p_cal", "edge_pts", "hits4")
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """INSERT INTO nfl_alt_prices (
+                    season, week, player_key, market, line, player, team, event,
+                    kickoff, odds, model_p, p_cal, edge_pts, hits4, open_odds
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$10)
+                ON CONFLICT (season, week, player_key, market, line) DO UPDATE SET
+                    odds = EXCLUDED.odds, model_p = EXCLUDED.model_p,
+                    p_cal = EXCLUDED.p_cal, edge_pts = EXCLUDED.edge_pts,
+                    hits4 = EXCLUDED.hits4, last_seen = NOW()""",
+                [tuple(r.get(c) for c in cols) for r in rows],
+            )
+        return len(rows)
 
     async def update_nfl_card_legs(self, season: int, week: int,
                                    legs: str) -> bool:

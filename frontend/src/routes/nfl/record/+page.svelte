@@ -29,8 +29,9 @@
     { key: 'prop', label: 'Props' },
     { key: 'touchdown', label: 'Touchdowns' },
     { key: 'moneyline', label: 'Moneylines' },
+    { key: 'parlay', label: 'Alt parlays' },
   ];
-  const TYPE_LABEL: Record<NflRecType, string> = { prop: 'Prop', touchdown: 'TD', moneyline: 'ML' };
+  const TYPE_LABEL: Record<NflRecType, string> = { prop: 'Prop', touchdown: 'TD', moneyline: 'ML', parlay: 'Parlay' };
 
   let era: 'current' | 'before' | 'all' = 'current';
   let type: NflRecType | 'all' = 'all';
@@ -73,7 +74,7 @@
 <div class="space-y-6">
   <div class="flex items-center justify-between flex-wrap gap-3">
     <p class="text-sm text-slate-400">
-      Every recommendation, one unit each at the FanDuel price recorded before kickoff.
+      Every recommendation at the FanDuel price recorded before kickoff: one unit each, alt parlays at their own stake.
     </p>
     <div class="flex gap-1">
       <button class={btn(era === 'current')} on:click={() => (era = 'current')}>Current rules</button>
@@ -115,7 +116,7 @@
       <div class="card py-3">
         <div class="text-xs uppercase tracking-wider text-slate-500">ROI</div>
         <div class="text-2xl tabular-nums {tone(summary.overall.roi)}">{roi(summary.overall.roi)}</div>
-        <div class="text-xs text-slate-500">on settled bets</div>
+        <div class="text-xs text-slate-500">on {summary.overall.staked ?? 0}u settled</div>
       </div>
     </div>
 

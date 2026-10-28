@@ -723,6 +723,13 @@ export interface NflScreen {
   tds: NflTd[];
   /** Anytime-TD rows that clear card.td_suggestions — the tracked TD bets. */
   td_picks?: NflTd[];
+  alt_parlays?: Partial<Record<NflAltKind, NflAltParlay | null>>;
+  alt_candidates?: NflAltRung[];
+  alt_rules?: {
+    rungs_priced: number; record_games: number; min_hits: number;
+    min_edge_pts: number; max_edge_pts: number; max_legs: number;
+    kinds: Record<NflAltKind, { target: number; odds: [number, number]; min_legs: number; stake: number }>;
+  };
   td_rules?: { min_edge_pts: number; min_p: number };
   games: NflGameMarket[];
   game_sims?: NflGameSim[];
@@ -740,10 +747,10 @@ export interface NflScreen {
 
 export interface NflLedgerBucket {
   bets: number; wins: number; losses: number; pushes: number; pending: number;
-  hit_rate: number | null; units: number; roi: number | null;
+  hit_rate: number | null; units: number; roi: number | null; staked?: number;
 }
 
-export type NflRecType = 'prop' | 'touchdown' | 'moneyline';
+export type NflRecType = 'prop' | 'touchdown' | 'moneyline' | 'parlay';
 
 export interface NflLedgerSummary {
   overall: NflLedgerBucket;
@@ -756,6 +763,9 @@ export interface NflLedgerEntry {
   market: string; odds: number | null; model_p: number | null;
   edge_pts: number | null; result: string | null;
   actual: number | string | null; units: number | null; current_rules: boolean;
+  stake?: number; frozen?: boolean;
+  legs?: { player: string; market: string; threshold: number; odds: number;
+           p_cal: number; event: string | null; kickoff: string | null }[];
 }
 
 export interface NflRecommendations {
@@ -767,4 +777,20 @@ export interface NflRecommendations {
   by_week: ({ season: number; week: number; current_rules: boolean;
               by_type: Record<NflRecType, NflLedgerBucket> } & NflLedgerBucket)[];
   ledger: NflLedgerEntry[];
+}
+
+export type NflAltKind = 'double_up' | 'lotto';
+
+export interface NflAltRung {
+  market: string; player: string; key: string; team: string | null;
+  event: string | null; fd_event_id: string | null; kickoff: string | null;
+  line: number; threshold: number; odds: number; implied: number; fair: number;
+  model_p: number; p_cal: number; edge_pts: number;
+  last4: number[]; hits4: number; avail: string | null;
+}
+
+export interface NflAltParlay {
+  kind: NflAltKind; legs: NflAltRung[]; leg_count: number;
+  decimal_odds: number; american: number; model_p: number;
+  stake: number; to_win: number; ev: number; betslip_url: string | null;
 }

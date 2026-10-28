@@ -176,6 +176,9 @@ class _LedgerDB:
     async def list_nfl_game_predictions(self, season=None, week=None):
         return self.games
 
+    async def list_nfl_alt_parlays(self, season=None, week=None):
+        return []
+
 
 def test_the_ledger_grades_every_recommendation_in_units_and_splits_at_the_rules():
     import asyncio

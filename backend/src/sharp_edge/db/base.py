@@ -65,6 +65,13 @@ NFL_SNAPSHOT_COLUMNS = (
     "residual_p90, fit_slope, prob_offset"
 )
 
+# The alt-line parlays (nfl/altparlay.py): one row per week per kind.
+NFL_ALT_PARLAY_COLUMNS = (
+    "season, week, kind, legs, leg_count, american, decimal_odds, model_p, "
+    "stake, frozen, created_at, result, legs_won, legs_settled, "
+    "settled_decimal, resolved_at"
+)
+
 NFL_CARD_COLUMNS = (
     "season, week, legs, leg_count, american, decimal_odds, model_p, "
     "created_at, result, legs_won, legs_settled, resolved_at"
@@ -322,6 +329,38 @@ class BetDatabase(ABC):
         the book. The WHERE clause refusing a settled row is what keeps it from
         becoming a general-purpose rewrite — see nfl.tracking._repair_card_ids
         for the caller, which changes nothing but the ids."""
+
+    @abstractmethod
+    async def upsert_nfl_alt_parlay(self, row: dict) -> bool:
+        """Write this week's ``kind`` parlay unless it is frozen or settled.
+
+        Rebuilt with the board until its first leg locks; after that the
+        caller freezes it and this refuses to touch it."""
+
+    @abstractmethod
+    async def freeze_nfl_alt_parlay(self, season: int, week: int, kind: str) -> None: ...
+
+    @abstractmethod
+    async def delete_nfl_alt_parlay(self, season: int, week: int, kind: str) -> bool:
+        """Drop an unfrozen parlay the board can no longer build."""
+
+    @abstractmethod
+    async def list_nfl_alt_parlays(
+        self, season: Optional[int] = None, week: Optional[int] = None
+    ) -> list[dict]: ...
+
+    @abstractmethod
+    async def settle_nfl_alt_parlay(
+        self, season: int, week: int, kind: str, result: str,
+        legs_won: int, legs_settled: int, settled_decimal: Optional[float]
+    ) -> None: ...
+
+    @abstractmethod
+    async def upsert_nfl_alt_prices(self, rows: list[dict]) -> int:
+        """Record every priced alt rung: opening price on insert, latest after.
+
+        Alt ladders cannot be fetched after the fact, so this is the archive the
+        leg rules will eventually be backtested on in units."""
 
     @abstractmethod
     async def delete_picks(

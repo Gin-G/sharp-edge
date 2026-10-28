@@ -894,7 +894,8 @@ async def nfl_screen(force: bool = False):
     # captured before kickoff without needing a scheduler to be right.
     try:
         from .nfl import tracking as nfl_tracking
-        payload["frozen"] = await nfl_tracking.freeze_week(payload)
+        payload["frozen"] = await nfl_tracking.freeze_week(
+            payload, alt_rungs=board.alt_rungs, built_at=board.built_at)
     except Exception as e:
         logger.warning("nfl freeze failed: %r", e)
         payload["frozen"] = {"error": str(e)}
@@ -955,6 +956,9 @@ async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None,
         return await nfl_tracking.settle_week(season, week, regrade=regrade)
 
     pending = [p for p in await get_db().list_nfl_picks() if not p.get("result")]
+    # A frozen alt parlay can be waiting on a week whose picks have all settled.
+    pending += [p for p in await get_db().list_nfl_alt_parlays()
+                if p.get("frozen") and not p.get("result")]
     if not pending:
         return {"settled": 0, "message": "nothing pending"}
     weeks = sorted({(p["season"], p["week"]) for p in pending})

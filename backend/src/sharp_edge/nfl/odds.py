@@ -59,6 +59,8 @@ GAME_MARKETS = {
 }
 
 _TIER_SUFFIX = re.compile(r"_(HIGH|MEDIUM|LOW)$")
+# The threshold of an alt rung, from its runner name: "25+ Yards" -> 25.
+_ALT_RUNG = re.compile(r"(\d+)\+\s+[A-Za-z ]+\s*$")
 # Main lines name their runners "<Player> Over" / "<Player> Under"; an alt rung
 # names them "<Player> 25+ Yards" or "<Player> 2+ Receptions", with the number
 # repeated in the handicap. Both suffixes have to come off to leave a name that
@@ -237,6 +239,15 @@ def _absorb(board: Board, ev: dict, m: dict) -> None:
                 continue
             odds = _american(r)
             hcap = r.get("handicap")
+            if alt:
+                # Every rung on an alt ladder carries handicap 0; the number is
+                # only in the name ("Chuba Hubbard 25+ Yards"). Grouping on the
+                # handicap collapsed the whole ladder into one line at 0.0 that
+                # kept whichever rung came last — the longest price on it — and
+                # nothing noticed because nothing read the ladder. "N+" is an
+                # over at N - 0.5, which settles exactly like a main line.
+                rung = _ALT_RUNG.search(r.get("runnerName") or "")
+                hcap = float(rung.group(1)) - 0.5 if rung else None
             if odds is None or hcap is None:
                 continue
             player = _player_of(r.get("runnerName"))
