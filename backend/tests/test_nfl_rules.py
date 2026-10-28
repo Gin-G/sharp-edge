@@ -162,3 +162,63 @@ def test_sim_picks_and_leans_grade_at_their_recorded_prices():
     assert picks["wins"] == 1 and picks["profit"] == 1.2
     assert leans["spread"]["wins"] == 1
     assert leans["total"]["pushes"] == 1 and leans["total"]["roi"] is None
+
+
+# --- the ledger ------------------------------------------------------------
+
+class _LedgerDB:
+    def __init__(self, picks, games):
+        self.picks, self.games = picks, games
+
+    async def list_nfl_picks(self, season=None):
+        return self.picks
+
+    async def list_nfl_game_predictions(self, season=None, week=None):
+        return self.games
+
+
+def test_the_ledger_grades_every_recommendation_in_units_and_splits_at_the_rules():
+    import asyncio
+    picks = [
+        {"season": 2026, "week": 7, "market": "rushing_yards", "player": "Old Back",
+         "line": 60.5, "side": "OVER", "fd_odds": -110, "result": "LOSS"},
+        {"season": 2026, "week": 8, "market": "receptions", "player": "A Receiver",
+         "line": 4.5, "side": "OVER", "fd_odds": -120, "result": "WIN", "actual": 6},
+        {"season": 2026, "week": 8, "market": "anytime_td", "player": "A Back",
+         "line": 0.5, "side": "OVER", "fd_odds": 150, "result": "WIN"},
+        {"season": 2026, "week": 8, "market": "anytime_td", "player": "B Back",
+         "line": 0.5, "side": "OVER", "fd_odds": 200, "result": None},
+    ]
+    games = [
+        {"season": 2026, "week": 8, "home_team": "JAX", "away_team": "IND",
+         "home_score": 17, "away_score": 24,
+         "sim": '{"picks": [{"side": "away", "team": "IND", "odds": 330, "p": 0.27}]}'},
+        {"season": 2026, "week": 8, "home_team": "DEN", "away_team": "KC",
+         "home_score": None, "away_score": None,
+         "sim": {"picks": [{"side": "away", "team": "KC", "odds": -122}]}},
+        {"season": 2026, "week": 7, "home_team": "PHI", "away_team": "DAL",
+         "home_score": 20, "away_score": 10, "sim": None},
+    ]
+    tracking.configure(_LedgerDB(picks, games))
+    try:
+        out = asyncio.run(tracking.recommendations(2026))
+    finally:
+        tracking.configure(None)
+
+    cur = out["current"]
+    assert cur["overall"]["bets"] == 5 and cur["overall"]["pending"] == 2
+    assert (cur["overall"]["wins"], cur["overall"]["losses"]) == (3, 0)
+    assert cur["overall"]["units"] == round(100 / 120 + 1.5 + 3.3, 2)
+    assert cur["by_type"]["moneyline"]["wins"] == 1
+    assert cur["by_type"]["touchdown"]["pending"] == 1
+    assert out["before"]["overall"]["units"] == -1.0
+    picks_text = {e["pick"] for e in out["ledger"]}
+    assert {"IND ML", "A Back anytime TD", "A Receiver Over 4.5 receptions"} <= picks_text
+    assert [w["week"] for w in out["by_week"]] == [8, 7]
+
+
+def test_a_tied_moneyline_is_a_push_not_a_loss():
+    g = {"season": 2026, "week": 8, "home_team": "A", "away_team": "B",
+         "home_score": 20, "away_score": 20, "sim": {"picks": [{"side": "home", "odds": 150}]}}
+    (e,) = tracking._ml_entries(g)
+    assert e["result"] == "PUSH" and tracking._units(150, "PUSH") == 0.0

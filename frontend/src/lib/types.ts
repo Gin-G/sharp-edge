@@ -737,3 +737,34 @@ export interface NflScreen {
   built_at: number;
   stale?: boolean;
 }
+
+export interface NflLedgerBucket {
+  bets: number; wins: number; losses: number; pushes: number; pending: number;
+  hit_rate: number | null; units: number; roi: number | null;
+}
+
+export type NflRecType = 'prop' | 'touchdown' | 'moneyline';
+
+export interface NflLedgerSummary {
+  overall: NflLedgerBucket;
+  by_type: Record<NflRecType, NflLedgerBucket>;
+}
+
+export interface NflLedgerEntry {
+  season: number; week: number; kickoff: string | null;
+  type: NflRecType; pick: string; team: string | null; event: string | null;
+  market: string; odds: number | null; model_p: number | null;
+  edge_pts: number | null; result: string | null;
+  actual: number | string | null; units: number | null; current_rules: boolean;
+}
+
+export interface NflRecommendations {
+  season: number | null;
+  rules_since: { season: number; week: number };
+  current: NflLedgerSummary;
+  before: NflLedgerSummary;
+  all_time: NflLedgerSummary;
+  by_week: ({ season: number; week: number; current_rules: boolean;
+              by_type: Record<NflRecType, NflLedgerBucket> } & NflLedgerBucket)[];
+  ledger: NflLedgerEntry[];
+}

@@ -917,6 +917,17 @@ async def nfl_track_record(season: Optional[int] = None):
     return await nfl_tracking.track_record(season)
 
 
+@app.get("/nfl/recommendations")
+async def nfl_recommendations(season: Optional[int] = None):
+    """Every NFL recommendation — props, touchdowns, moneylines — with its
+    result, plus the record, units and ROI, split at the Finding 14 rules."""
+    try:
+        from .nfl import tracking as nfl_tracking
+    except ImportError as e:
+        raise HTTPException(500, f"NFL extras not installed: {e}")
+    return await nfl_tracking.recommendations(season)
+
+
 @app.post("/nfl/settle")
 async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None,
                      regrade: bool = False):

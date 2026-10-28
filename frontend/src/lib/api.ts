@@ -1,4 +1,4 @@
-import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord, ParlayRecord, NflScreen, NflTrackRecord, NflGameRecord, BookInfo, BookQuote } from './types';
+import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord, ParlayRecord, NflScreen, NflTrackRecord, NflGameRecord, NflRecommendations, BookInfo, BookQuote } from './types';
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || 'http://localhost:8000';
 
@@ -249,4 +249,9 @@ export function getNflGameRecord(season?: number): Promise<NflGameRecord> {
 export function getNflTrackRecord(season?: number): Promise<NflTrackRecord> {
   const qs = season ? `?season=${season}` : '';
   return req<NflTrackRecord>(`/nfl/track-record${qs}`);
+}
+
+export function getNflRecommendations(season?: number): Promise<NflRecommendations> {
+  const qs = season ? `?season=${season}` : '';
+  return req<NflRecommendations>(`/nfl/recommendations${qs}`);
 }

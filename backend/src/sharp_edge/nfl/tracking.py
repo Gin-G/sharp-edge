@@ -5,11 +5,12 @@ does not write down what it said cannot be evaluated, and by the time you want
 the history it is too late to reconstruct — the lines are gone, the projections
 have been recomputed, and the board only shows today.
 
-Three jobs:
+Four jobs:
 
   ``freeze_week``    write this week's suggestions and card before kickoff
   ``settle_week``    resolve them against nflverse actuals once games are played
   ``track_record``   aggregate: hit rate overall, by market, by side, by week
+  ``recommendations`` the ledger: every bet we recommended, graded, in units
 
 **Everything here is async and called from the request path**, unlike
 ``tracking.py``, which runs in warm-up threads and has to hop back onto the
@@ -1193,3 +1194,135 @@ def _by_week(rows: list[dict]) -> dict:
     for r in rows:
         out.setdefault(r.get("week"), []).append(r)
     return out
+
+
+# --- the ledger ------------------------------------------------------------
+#
+# Every recommendation in one place, whatever produced it: the prop and
+# touchdown picks from nfl_picks and the moneyline picks stored inside each
+# game prediction's sim. One row per bet, one unit flat stake, graded at the
+# price recorded with it. Model leans and the parlay card are not in here —
+# leans were never recommended, and the card is built from picks that already
+# are, so counting it would count them twice.
+
+# The first week bet under the Finding 14 rules (edge cap, no rushing, no
+# "market" verdict, TD and moneyline picks). Everything before it is the
+# record those rules were written to fix, kept beside the new one rather than
+# blended into it.
+RULES_SINCE = (2026, 8)
+
+MARKET_LABEL = {
+    "receiving_yards": "rec yds", "receptions": "receptions",
+    "rushing_yards": "rush yds", "passing_yards": "pass yds",
+}
+
+
+def _units(odds, result) -> Optional[float]:
+    if result == "WIN":
+        if not odds:
+            return round(100 / 110, 3)
+        return round(100 / -odds if odds < 0 else odds / 100, 3)
+    if result == "LOSS":
+        return -1.0
+    if result in ("PUSH", "VOID"):
+        return 0.0
+    return None
+
+
+def _prop_entry(r: dict) -> dict:
+    td = r.get("market") == TD_MARKET
+    kind = "touchdown" if td else "prop"
+    label = (f"{r.get('player')} anytime TD" if td else
+             f"{r.get('player')} {(r.get('side') or '').title()} {r.get('line')} "
+             f"{MARKET_LABEL.get(r.get('market'), r.get('market'))}")
+    return {
+        "season": r["season"], "week": r["week"], "kickoff": r.get("kickoff"),
+        "type": kind, "pick": label, "team": r.get("team"),
+        "event": r.get("event"), "market": r.get("market"),
+        "odds": r.get("fd_odds"), "model_p": r.get("model_p"),
+        "edge_pts": r.get("edge_pts"), "result": r.get("result"),
+        "actual": r.get("actual"),
+    }
+
+
+def _ml_entries(g: dict) -> list[dict]:
+    sim = g.get("sim")
+    if isinstance(sim, str):
+        try:
+            sim = json.loads(sim)
+        except (TypeError, ValueError):
+            sim = None
+    if not isinstance(sim, dict):
+        return []
+    settled = g.get("home_score") is not None and g.get("away_score") is not None
+    out = []
+    for pk in sim.get("picks") or []:
+        result = actual = None
+        if settled:
+            m = g["home_score"] - g["away_score"]
+            m = m if pk.get("side") == "home" else -m
+            result = "WIN" if m > 0 else "LOSS" if m < 0 else "PUSH"
+            actual = f"{g['away_team']} {g['away_score']} – {g['home_score']} {g['home_team']}"
+        out.append({
+            "season": g["season"], "week": g["week"], "kickoff": g.get("kickoff"),
+            "type": "moneyline", "pick": f"{pk.get('team')} ML",
+            "team": pk.get("team"),
+            "event": f"{g['away_team']} @ {g['home_team']}", "market": "moneyline",
+            "odds": pk.get("odds"), "model_p": pk.get("p"),
+            "edge_pts": pk.get("edge_pts"), "result": result, "actual": actual,
+        })
+    return out
+
+
+def _ledger_bucket(rows: list[dict]) -> dict:
+    w = sum(1 for r in rows if r["result"] == "WIN")
+    lo = sum(1 for r in rows if r["result"] == "LOSS")
+    profit = sum(r["units"] for r in rows if r["units"] is not None)
+    return {
+        "bets": len(rows), "wins": w, "losses": lo,
+        "pushes": sum(1 for r in rows if r["result"] in ("PUSH", "VOID")),
+        "pending": sum(1 for r in rows if not r["result"]),
+        "hit_rate": round(100 * w / (w + lo), 1) if w + lo else None,
+        "units": round(profit, 2),
+        "roi": round(100 * profit / (w + lo), 1) if w + lo else None,
+    }
+
+
+async def recommendations(season: Optional[int] = None) -> dict:
+    """Every recommendation, its result, and the record and ROI they add up to."""
+    db = _require_db()
+    entries = [_prop_entry(r) for r in await db.list_nfl_picks(season=season)]
+    for g in await db.list_nfl_game_predictions(season):
+        entries.extend(_ml_entries(g))
+    for e in entries:
+        e["units"] = _units(e["odds"], e["result"])
+        e["current_rules"] = (e["season"], e["week"]) >= RULES_SINCE
+    entries.sort(key=lambda e: (e["season"], e["week"], e.get("kickoff") or "",
+                                e["pick"]), reverse=True)
+
+    def summary(rows: list[dict]) -> dict:
+        return {
+            "overall": _ledger_bucket(rows),
+            "by_type": {t: _ledger_bucket([r for r in rows if r["type"] == t])
+                        for t in ("prop", "touchdown", "moneyline")},
+        }
+
+    current = [e for e in entries if e["current_rules"]]
+    weeks: dict = {}
+    for e in entries:
+        weeks.setdefault((e["season"], e["week"]), []).append(e)
+    return {
+        "season": season,
+        "rules_since": {"season": RULES_SINCE[0], "week": RULES_SINCE[1]},
+        "current": summary(current),
+        "before": summary([e for e in entries if not e["current_rules"]]),
+        "all_time": summary(entries),
+        "by_week": [
+            {"season": s, "week": w, "current_rules": (s, w) >= RULES_SINCE,
+             **_ledger_bucket(rows),
+             "by_type": {t: _ledger_bucket([r for r in rows if r["type"] == t])
+                         for t in ("prop", "touchdown", "moneyline")}}
+            for (s, w), rows in sorted(weeks.items(), reverse=True)
+        ],
+        "ledger": entries,
+    }
