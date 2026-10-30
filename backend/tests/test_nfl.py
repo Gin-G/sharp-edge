@@ -626,6 +626,9 @@ class _PendingDB:
     async def list_nfl_placed_bets(self, season=None, week=None):
         return []
 
+    async def list_nfl_paper_tickets(self, season=None, week=None):
+        return []
+
 
 def _pending(*weeks, season=2026):
     return [{"season": season, "week": w, "result": None} for w in weeks]
@@ -1346,7 +1349,7 @@ async def test_build_board_executes_end_to_end(monkeypatch):
     assert rungs[25.0]["hits4"] == 4 and rungs[60.0]["hits4"] == 1
     assert rungs[25.0]["model_p"] > rungs[40.0]["model_p"] > rungs[60.0]["model_p"]
     assert payload["alt_rules"]["rungs_priced"] == 3
-    assert set(payload["alt_parlays"]) == {"double_up", "lotto"}
+    assert set(payload["alt_parlays"]) == {"double_up", "lotto", "short_stack", "anchored"}
 
 
 # ---------------------------------------------------------------------------

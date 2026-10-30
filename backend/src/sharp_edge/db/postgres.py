@@ -7,7 +7,7 @@ from typing import Optional
 
 import asyncpg
 
-from .base import (BetDatabase, NFL_ALT_PARLAY_COLUMNS, NFL_CARD_COLUMNS, NFL_PLACED_COLUMNS, NFL_GAME_ADDED_COLUMNS,
+from .base import (BetDatabase, NFL_ALT_PARLAY_COLUMNS, NFL_CARD_COLUMNS, NFL_PAPER_COLUMNS, NFL_PLACED_COLUMNS, NFL_GAME_ADDED_COLUMNS,
                    NFL_PICK_ADDED_COLUMNS,
                    NFL_PICK_COLUMNS,
                    NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
@@ -241,6 +241,25 @@ CREATE TABLE IF NOT EXISTS nfl_alt_prices (
     first_seen TIMESTAMPTZ DEFAULT NOW(),
     last_seen TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (season, week, player_key, market, line)
+);
+CREATE TABLE IF NOT EXISTS nfl_paper_tickets (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    strategy TEXT NOT NULL,
+    day TEXT NOT NULL,
+    legs JSONB NOT NULL,
+    leg_count INTEGER NOT NULL,
+    american INTEGER,
+    decimal_odds DOUBLE PRECISION,
+    model_p DOUBLE PRECISION,
+    stake DOUBLE PRECISION NOT NULL,
+    captured_at TIMESTAMPTZ DEFAULT NOW(),
+    result TEXT,
+    legs_won INTEGER,
+    legs_settled INTEGER,
+    settled_decimal DOUBLE PRECISION,
+    resolved_at TIMESTAMPTZ,
+    PRIMARY KEY (season, week, strategy, day)
 );
 CREATE TABLE IF NOT EXISTS nfl_placed_bets (
     id SERIAL PRIMARY KEY,
@@ -837,6 +856,55 @@ class PostgresDatabase(BetDatabase):
                 [tuple(r.get(c) for c in cols) for r in rows],
             )
         return len(rows)
+
+    async def upsert_nfl_paper_ticket(self, row: dict) -> bool:
+        cols = ("season", "week", "strategy", "day", "legs", "leg_count",
+                "american", "decimal_odds", "model_p", "stake")
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """INSERT INTO nfl_paper_tickets (
+                    season, week, strategy, day, legs, leg_count, american,
+                    decimal_odds, model_p, stake
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                ON CONFLICT (season, week, strategy, day) DO UPDATE SET
+                    legs = EXCLUDED.legs, leg_count = EXCLUDED.leg_count,
+                    american = EXCLUDED.american,
+                    decimal_odds = EXCLUDED.decimal_odds,
+                    model_p = EXCLUDED.model_p, stake = EXCLUDED.stake,
+                    captured_at = NOW()
+                WHERE nfl_paper_tickets.result IS NULL""",
+                *[row.get(c) for c in cols])
+        return int(status.rsplit(" ", 1)[-1]) > 0
+
+    async def list_nfl_paper_tickets(self, season=None, week=None) -> list[dict]:
+        sql = f"SELECT {NFL_PAPER_COLUMNS} FROM nfl_paper_tickets WHERE TRUE"
+        args: list = []
+        if season is not None:
+            args.append(season); sql += f" AND season = ${len(args)}"
+        if week is not None:
+            args.append(week); sql += f" AND week = ${len(args)}"
+        sql += " ORDER BY day DESC, strategy"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+        out = []
+        for r in rows:
+            d = _nfl_row(r)
+            if d.get("captured_at") is not None and not isinstance(d["captured_at"], str):
+                d["captured_at"] = d["captured_at"].isoformat()
+            out.append(d)
+        return out
+
+    async def settle_nfl_paper_ticket(self, season, week, strategy, day, result,
+                                      legs_won, legs_settled, settled_decimal,
+                                      legs) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE nfl_paper_tickets SET result = $1, legs_won = $2,
+                       legs_settled = $3, settled_decimal = $4, legs = $5,
+                       resolved_at = NOW()
+                   WHERE season = $6 AND week = $7 AND strategy = $8 AND day = $9""",
+                result, legs_won, legs_settled, settled_decimal, legs,
+                season, week, strategy, day)
 
     async def insert_nfl_placed_bet(self, row: dict) -> int:
         async with self._pool.acquire() as conn:

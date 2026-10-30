@@ -929,6 +929,13 @@ async def nfl_recommendations(season: Optional[int] = None):
     return await nfl_tracking.recommendations(season)
 
 
+@app.get("/nfl/paper")
+async def nfl_paper(season: Optional[int] = None):
+    """The paper strategies: every ticket presented, by day, and how each did."""
+    from .nfl import tracking as nfl_tracking
+    return await nfl_tracking.paper_record(season)
+
+
 @app.post("/nfl/placed")
 async def nfl_place_bet(bet: dict = Body(...)):
     """Record a bet the owner placed, as it was on screen. Never rebuilt."""
@@ -999,6 +1006,7 @@ async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None,
     pending += [p for p in await get_db().list_nfl_alt_parlays()
                 if p.get("frozen") and not p.get("result")]
     pending += [b for b in await get_db().list_nfl_placed_bets() if not b.get("result")]
+    pending += [t for t in await get_db().list_nfl_paper_tickets() if not t.get("result")]
     if not pending:
         return {"settled": 0, "message": "nothing pending"}
     weeks = sorted({(p["season"], p["week"]) for p in pending})

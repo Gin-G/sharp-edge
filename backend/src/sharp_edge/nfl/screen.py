@@ -527,6 +527,15 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
     if not proj.preseason:
         cands = altparlay.candidates(board.alt_rungs)
         board.alt_parlays = {k: altparlay.build(cands, k) for k in altparlay.KINDS}
+        # The paper strategies, recorded daily beside them. A moneyline row has
+        # no FanDuel event id, so its game is found through either team's props.
+        game_of_team: dict = {}
+        for r in board.tds + board.alt_rungs:
+            if r.get("team") and r.get("fd_event_id"):
+                game_of_team.setdefault(r["team"], r["fd_event_id"])
+        anchors = altparlay.anchor_legs(card_mod.td_suggestions(board.tds),
+                                        board.game_model, game_of_team)
+        board.alt_parlays.update(altparlay.build_paper(cands, anchors))
     board.props.sort(key=_prop_rank)
     board.tds.sort(key=lambda r: -(r.get("true_edge_pts")
                                    if r.get("true_edge_pts") is not None else -99))

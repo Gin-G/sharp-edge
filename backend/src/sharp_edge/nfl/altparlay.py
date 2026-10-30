@@ -65,6 +65,29 @@ KINDS = {
 # FanDuel's own parlay limit.
 MAX_LEGS = 25
 
+# Paper strategies: built and recorded daily beside the two above, never bet
+# by the board, so the record can say which way of reaching a long price
+# actually holds up. See ``build_paper``.
+#
+#   short_stack  one leg per game, the likeliest rung between -250 and -110,
+#                stacked as far as the slate allows. The leg rules leave only
+#                ten or so games with such a rung, so this tops out near 50-90x,
+#                not 1000x — which is itself the finding: "stack -140s to a
+#                thousand" is not buildable from legs we would back.
+#   anchored     the lotto rebuilt as short rungs (-300 to -100) plus at most
+#                two anchors at +100 to +400 from the strongest signals on the
+#                board: the anytime-TD picks and the game model's moneyline
+#                picks. Fewer legs at the same payout pays the margin fewer
+#                times. The anchor cap is what keeps it a stack of short legs:
+#                uncapped, the build reaches for +1600 touchdowns, where the
+#                model's untested TD edge is largest, and five legs carry it.
+PAPER = {
+    "short_stack": {"target": None, "odds": (-250, -110), "min_legs": 4, "stake": 0.1},
+    "anchored": {"target": 1000.0, "odds": (-300, -100), "min_legs": 2, "stake": 0.1,
+                 "max_anchors": 2, "anchor_odds": (100, 400)},
+}
+STRATEGIES = {**KINDS, **PAPER}
+
 _cache: dict = {"key": None, "values": {}, "fetched_at": 0.0}
 _TTL_SECONDS = 6 * 3600
 
@@ -170,7 +193,8 @@ def candidates(rungs: Iterable[dict]) -> list[dict]:
     return out
 
 
-def build(cands: Iterable[dict], kind: str) -> Optional[dict]:
+def build(cands: Iterable[dict], kind: str,
+          anchors: Iterable[dict] = ()) -> Optional[dict]:
     """The likeliest ticket that reaches ``kind``'s payout, one leg per game.
 
     Exact, not greedy: a knapsack over games, maximising the summed log
@@ -182,32 +206,45 @@ def build(cands: Iterable[dict], kind: str) -> Optional[dict]:
 
     Payout is bucketed by flooring each leg's log-decimal, so a ticket that
     reaches the target bucket is guaranteed to reach the target itself.
+
+    ``anchors`` (see ``anchor_legs``) compete for their game's slot like any
+    leg but skip the price window, up to the strategy's ``max_anchors``.
     """
-    spec = KINDS[kind]
+    spec = STRATEGIES[kind]
     lo, hi = spec["odds"]
+    max_anchors = spec.get("max_anchors", 0)
     by_game: dict = {}
     for c in cands:
         if (c.get("odds") is not None and lo <= c["odds"] <= hi
                 and c.get("p_cal") and 0 < c["p_cal"] < 1):
             by_game.setdefault(c.get("fd_event_id"), []).append(c)
+    if max_anchors:
+        a_lo, a_hi = spec["anchor_odds"]
+        for c in anchors:
+            if (c.get("odds") is not None and a_lo <= c["odds"] <= a_hi
+                    and c.get("p_cal") and 0 < c["p_cal"] < 1):
+                by_game.setdefault(c.get("fd_event_id"), []).append(c)
 
     step = 0.01
     goal = math.ceil(math.log(spec["target"]) / step)
-    # (payout bucket, legs) -> (log probability, legs chosen)
-    dp: dict = {(0, 0): (0.0, ())}
+    # (payout bucket, legs, anchors) -> (log probability, legs chosen)
+    dp: dict = {(0, 0, 0): (0.0, ())}
     for legs in by_game.values():
         nxt = dict(dp)
-        for (b, k), (v, chosen) in dp.items():
+        for (b, k, a), (v, chosen) in dp.items():
             if k >= MAX_LEGS:
                 continue
             for c in legs:
+                na = a + bool(c.get("anchor"))
+                if na > max_anchors:
+                    continue
                 key = (min(goal, b + math.floor(math.log(_decimal(c["odds"])) / step)),
-                       k + 1)
+                       k + 1, na)
                 cand = (v + math.log(c["p_cal"]), chosen + (c,))
                 if key not in nxt or cand[0] > nxt[key][0]:
                     nxt[key] = cand
         dp = nxt
-    done = [val for (b, k), val in dp.items()
+    done = [val for (b, k, a), val in dp.items()
             if b >= goal and k >= spec["min_legs"]]
     if not done:
         return None
@@ -215,10 +252,76 @@ def build(cands: Iterable[dict], kind: str) -> Optional[dict]:
     return summarise(sorted(chosen, key=lambda c: c.get("kickoff") or ""), kind)
 
 
+def stack(cands: Iterable[dict], kind: str = "short_stack") -> Optional[dict]:
+    """Every game's likeliest rung inside the price window, all of them."""
+    spec = STRATEGIES[kind]
+    lo, hi = spec["odds"]
+    best: dict = {}
+    for c in cands:
+        if (c.get("odds") is not None and lo <= c["odds"] <= hi
+                and c.get("p_cal") and 0 < c["p_cal"] < 1):
+            g = c.get("fd_event_id")
+            if g not in best or c["p_cal"] > best[g]["p_cal"]:
+                best[g] = c
+    if len(best) < spec["min_legs"]:
+        return None
+    legs = sorted(best.values(), key=lambda c: c.get("kickoff") or "")[:MAX_LEGS]
+    return summarise(legs, kind)
+
+
+def anchor_legs(td_picks: Iterable[dict], game_model: Iterable[dict],
+                game_of_team: dict) -> list[dict]:
+    """The anchored lotto's plus-money candidates, as parlay legs.
+
+    Anytime-TD picks (card.td_suggestions, already availability-checked) and
+    the game model's moneyline picks, at plus money only — a short anchor is
+    just another short leg. The strategy's ``anchor_odds`` caps the top. A moneyline row carries no FanDuel event id, so
+    its game is found through either team's other markets; one with no match
+    cannot share the one-leg-per-game rule and is left out.
+    """
+    out = []
+    for r in td_picks:
+        if r.get("odds") is None or r["odds"] < 100 or card_mod.is_locked(r):
+            continue
+        out.append({"anchor": "td", "market": "anytime_td", "player": r.get("player"),
+                    "key": r.get("key"), "team": r.get("team"),
+                    "position": r.get("position"), "line": 0.5, "threshold": 1.0,
+                    "side": "OVER", "odds": r["odds"], "p_cal": r.get("p_cal"),
+                    "implied": r.get("implied_p"), "edge_pts": r.get("true_edge_pts"),
+                    "event": r.get("event"), "fd_event_id": r.get("fd_event_id"),
+                    "kickoff": r.get("kickoff"), "fd_market_id": r.get("fd_market_id"),
+                    "over_selection_id": r.get("fd_selection_id")})
+    for g in game_model:
+        sim = g.get("sim") or {}
+        for pk in sim.get("picks") or []:
+            if pk.get("market") != "moneyline" or (pk.get("odds") or 0) < 100:
+                continue
+            team = pk.get("team")
+            game = (game_of_team.get(g.get("home_team"))
+                    or game_of_team.get(g.get("away_team")))
+            leg = {"anchor": "ml", "market": "moneyline", "player": team,
+                   "key": f"ml:{team}", "team": team,
+                   "home_team": g.get("home_team"), "away_team": g.get("away_team"),
+                   "line": 0.0, "side": pk.get("side"), "odds": pk["odds"],
+                   "p_cal": pk.get("p"), "edge_pts": pk.get("edge_pts"),
+                   "event": g.get("event"), "fd_event_id": game,
+                   "kickoff": g.get("kickoff")}
+            if game is None or card_mod.is_locked(leg):
+                continue
+            out.append(leg)
+    return out
+
+
+def build_paper(cands: list[dict], anchors: list[dict]) -> dict:
+    """Every paper strategy for this board. None where the slate cannot build it."""
+    return {"short_stack": stack(cands, "short_stack"),
+            "anchored": build(cands, "anchored", anchors)}
+
+
 def summarise(legs: list[dict], kind: str) -> dict:
     dec = math.prod(_decimal(l["odds"]) for l in legs)
     p = math.prod(l["p_cal"] for l in legs)
-    stake = KINDS[kind]["stake"]
+    stake = STRATEGIES[kind]["stake"]
     return {"kind": kind, "legs": legs, "leg_count": len(legs),
             "decimal_odds": round(dec, 2), "american": _american(dec),
             "model_p": round(p, 6), "stake": stake,

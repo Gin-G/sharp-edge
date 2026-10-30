@@ -43,22 +43,24 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                # Two calls, in this order and for different reasons. The board
+                # Three calls, in this order and for different reasons. The board
                 # fetch is what *records* the current week — the freeze happens
                 # on the read path — so it keeps the upcoming week captured even
-                # if nobody opens the page. The settle call then resolves
-                # whatever is already pending. The game predictions settle
-                # last and separately — nothing called that endpoint before, so
-                # 91 recorded predictions sat unscored for seven weeks.
+                # if nobody opens the page. The game predictions settle next —
+                # nothing called that endpoint before, so 91 recorded
+                # predictions sat unscored for seven weeks — and before the
+                # main settle, because the paper lotto's moneyline legs grade
+                # off those final scores. The settle call then resolves
+                # whatever is already pending.
                 - >-
                   set -e;
                   BASE="http://{{ .Values.app.name }}-backend:{{ .Values.backend.port }}";
                   echo "refreshing the board (records the week)";
                   curl -sS -m 120 "$BASE/nfl/screen" -o /dev/null -w 'board: %{http_code}\n' || true;
-                  echo "settling";
-                  curl -sS -m 600 -X POST "$BASE/nfl/settle" -w '\n';
                   echo "settling game predictions";
-                  curl -sS -m 120 -X POST "$BASE/nfl/games/settle" -w '\n' || true
+                  curl -sS -m 120 -X POST "$BASE/nfl/games/settle" -w '\n' || true;
+                  echo "settling";
+                  curl -sS -m 600 -X POST "$BASE/nfl/settle" -w '\n'
               resources:
                 requests:
                   cpu: 10m

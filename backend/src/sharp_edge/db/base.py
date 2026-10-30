@@ -80,6 +80,14 @@ NFL_PLACED_COLUMNS = (
     "resolved_at"
 )
 
+# Paper tickets (nfl/tracking.record_paper): every parlay strategy as the board
+# presented it, one row per strategy per day, graded but never bet.
+NFL_PAPER_COLUMNS = (
+    "season, week, strategy, day, legs, leg_count, american, decimal_odds, "
+    "model_p, stake, captured_at, result, legs_won, legs_settled, "
+    "settled_decimal, resolved_at"
+)
+
 NFL_CARD_COLUMNS = (
     "season, week, legs, leg_count, american, decimal_odds, model_p, "
     "created_at, result, legs_won, legs_settled, resolved_at"
@@ -369,6 +377,27 @@ class BetDatabase(ABC):
 
         Alt ladders cannot be fetched after the fact, so this is the archive the
         leg rules will eventually be backtested on in units."""
+
+    @abstractmethod
+    async def upsert_nfl_paper_ticket(self, row: dict) -> bool:
+        """Write a strategy's ticket for one day unless that day's is settled.
+
+        The caller refuses once any stored leg has locked; this refuses a
+        settled row."""
+
+    @abstractmethod
+    async def list_nfl_paper_tickets(
+        self, season: Optional[int] = None, week: Optional[int] = None
+    ) -> list[dict]: ...
+
+    @abstractmethod
+    async def settle_nfl_paper_ticket(
+        self, season: int, week: int, strategy: str, day: str, result: str,
+        legs_won: int, legs_settled: int, settled_decimal: Optional[float],
+        legs: str
+    ) -> None:
+        """Settle a day's ticket, with ``legs`` rewritten to carry each leg's
+        own result."""
 
     @abstractmethod
     async def insert_nfl_placed_bet(self, row: dict) -> int:

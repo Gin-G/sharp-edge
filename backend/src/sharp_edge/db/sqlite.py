@@ -8,7 +8,7 @@ from typing import Optional
 
 import aiosqlite
 
-from .base import (BetDatabase, NFL_ALT_PARLAY_COLUMNS, NFL_CARD_COLUMNS, NFL_PLACED_COLUMNS, NFL_GAME_ADDED_COLUMNS,
+from .base import (BetDatabase, NFL_ALT_PARLAY_COLUMNS, NFL_CARD_COLUMNS, NFL_PAPER_COLUMNS, NFL_PLACED_COLUMNS, NFL_GAME_ADDED_COLUMNS,
                    NFL_PICK_ADDED_COLUMNS,
                    NFL_PICK_COLUMNS, iso_utc,
                    NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
@@ -217,6 +217,25 @@ CREATE TABLE IF NOT EXISTS nfl_alt_prices (
     first_seen TEXT DEFAULT (datetime('now')),
     last_seen TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (season, week, player_key, market, line)
+);
+CREATE TABLE IF NOT EXISTS nfl_paper_tickets (
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    strategy TEXT NOT NULL,
+    day TEXT NOT NULL,
+    legs TEXT NOT NULL,
+    leg_count INTEGER NOT NULL,
+    american INTEGER,
+    decimal_odds REAL,
+    model_p REAL,
+    stake REAL NOT NULL,
+    captured_at TEXT DEFAULT (datetime('now')),
+    result TEXT,
+    legs_won INTEGER,
+    legs_settled INTEGER,
+    settled_decimal REAL,
+    resolved_at TEXT,
+    PRIMARY KEY (season, week, strategy, day)
 );
 CREATE TABLE IF NOT EXISTS nfl_placed_bets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -767,6 +786,46 @@ class SQLiteDatabase(BetDatabase):
         )
         await self._db.commit()
         return len(rows)
+
+    async def upsert_nfl_paper_ticket(self, row: dict) -> bool:
+        cursor = await self._db.execute(
+            """INSERT INTO nfl_paper_tickets (
+                season, week, strategy, day, legs, leg_count, american,
+                decimal_odds, model_p, stake
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(season, week, strategy, day) DO UPDATE SET
+                legs = excluded.legs, leg_count = excluded.leg_count,
+                american = excluded.american, decimal_odds = excluded.decimal_odds,
+                model_p = excluded.model_p, stake = excluded.stake,
+                captured_at = datetime('now')
+            WHERE nfl_paper_tickets.result IS NULL""",
+            tuple(row.get(c) for c in ("season", "week", "strategy", "day", "legs",
+                                       "leg_count", "american", "decimal_odds",
+                                       "model_p", "stake")))
+        await self._db.commit()
+        return bool(cursor.rowcount)
+
+    async def list_nfl_paper_tickets(self, season=None, week=None) -> list[dict]:
+        sql = f"SELECT {NFL_PAPER_COLUMNS} FROM nfl_paper_tickets WHERE 1=1"
+        args: list = []
+        if season is not None:
+            sql += " AND season = ?"; args.append(season)
+        if week is not None:
+            sql += " AND week = ?"; args.append(week)
+        sql += " ORDER BY day DESC, strategy"
+        cursor = await self._db.execute(sql, args)
+        return [_card_row(r) for r in await cursor.fetchall()]
+
+    async def settle_nfl_paper_ticket(self, season, week, strategy, day, result,
+                                      legs_won, legs_settled, settled_decimal,
+                                      legs) -> None:
+        await self._db.execute(
+            """UPDATE nfl_paper_tickets SET result = ?, legs_won = ?, legs_settled = ?,
+                   settled_decimal = ?, legs = ?, resolved_at = datetime('now')
+               WHERE season = ? AND week = ? AND strategy = ? AND day = ?""",
+            (result, legs_won, legs_settled, settled_decimal, legs,
+             season, week, strategy, day))
+        await self._db.commit()
 
     async def insert_nfl_placed_bet(self, row: dict) -> int:
         cursor = await self._db.execute(

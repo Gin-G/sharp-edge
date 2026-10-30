@@ -281,9 +281,13 @@ async def freeze_week(payload: dict, source: str = "live",
         })
     repaired = await _repair_card_ids(season, week, payload.get("props") or [])
     try:
-        alt = await record_alt_parlays(season, week, payload.get("alt_parlays") or {})
+        from . import altparlay
+        built = payload.get("alt_parlays") or {}
+        alt = await record_alt_parlays(
+            season, week, {k: v for k, v in built.items() if k in altparlay.KINDS})
         alt["prices_archived"] = await archive_alt_prices(season, week, alt_rungs,
                                                           built_at)
+        alt["paper"] = await record_paper(season, week, built)
     except Exception as exc:                 # must not cost the card its freeze
         logger.warning("[nfl-track] alt parlays not recorded: %s", exc)
         alt = {"error": str(exc)}
@@ -779,7 +783,30 @@ async def archive_alt_prices(season: int, week: int, rungs: Optional[list],
     return n
 
 
-def _grade_alt_parlay(legs: list[dict], actuals: dict, played: set) -> tuple:
+def _grade_leg(leg: dict, actuals: dict, played: set,
+               scores: Optional[dict] = None) -> tuple:
+    """``(WIN | LOSS | PUSH | VOID | None, actual)`` for one parlay leg.
+
+    None while its game is still to be graded. A player with no row voids, as
+    the book voids him. A moneyline leg (the paper lotto's anchors) is read off
+    the final score, ``scores[team] = (points for, points against)``.
+    """
+    if leg.get("market") == "moneyline":
+        sc = (scores or {}).get(leg.get("team"))
+        if sc is None:
+            return None, None
+        return ("WIN" if sc[0] > sc[1] else "LOSS" if sc[0] < sc[1] else "PUSH"), \
+            float(sc[0] - sc[1])
+    if leg.get("team") not in played:
+        return None, None
+    row = actuals.get(leg.get("key"))
+    if row is None:
+        return "VOID", None
+    return _result_for({**leg, "side": leg.get("side") or "OVER"}, row)
+
+
+def _grade_alt_parlay(legs: list[dict], actuals: dict, played: set,
+                      scores: Optional[dict] = None) -> tuple:
     """``(result | None, legs won, legs graded, decimal over the legs that stood)``.
 
     The card's rules: one lost leg decides it, a void leg drops out and takes
@@ -789,16 +816,12 @@ def _grade_alt_parlay(legs: list[dict], actuals: dict, played: set) -> tuple:
     pending = False
     dec = 1.0
     for leg in legs:
-        if leg.get("team") not in played:
-            pending = True
-            continue
-        row = actuals.get(leg.get("key"))
-        if row is None:
-            continue                        # did not play: void, as the book does
-        res, actual = _result_for({**leg, "side": leg.get("side") or "OVER"}, row)
+        res, _ = _grade_leg(leg, actuals, played, scores)
         if res is None:
             pending = True
             continue
+        if res in ("VOID", "PUSH"):
+            continue                        # the book drops the leg and its price
         graded += 1
         if res == "WIN":
             won += 1
@@ -826,6 +849,165 @@ async def _settle_alt_parlays(season: int, week: int, actuals: dict,
         await db.settle_nfl_alt_parlay(season, week, p["kind"], res, won, graded, dec)
         n += 1
     return n
+
+
+# --- paper tickets ----------------------------------------------------------
+#
+# Every parlay strategy (altparlay.STRATEGIES) as the board presented it, one
+# ticket per strategy per day, graded on the weekend and never bet. The alt
+# parlays above keep only the version that froze; these keep what was on the
+# page each day, which is what a bet would have been placed from. Captured on
+# the board's own refreshes (every four hours, see nfl-refresh-cronjob), so a
+# day's row is that day's last build before its first leg locked.
+
+PAPER_TZ = "America/Denver"
+PAPER_LEG_FIELDS = ("player", "key", "team", "position", "market", "line", "threshold",
+                    "side", "odds", "p_cal", "edge_pts", "hits4", "anchor", "event",
+                    "fd_event_id", "kickoff", "home_team", "away_team")
+
+
+def _paper_day(now: Optional[datetime] = None) -> str:
+    from zoneinfo import ZoneInfo
+
+    return (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(PAPER_TZ)).date().isoformat()
+
+
+async def record_paper(season: int, week: int, parlays: dict,
+                       now: Optional[datetime] = None) -> dict:
+    """Write today's ticket for each strategy the board could build.
+
+    Rewritten with the board through the day until any of its legs locks; from
+    then on that day's ticket is what was presented and stands. A strategy the
+    board cannot build today writes nothing — "no ticket" is not a loss.
+    """
+    from . import altparlay
+
+    db = _require_db()
+    day = _paper_day(now)
+    stored = {r["strategy"]: r for r in await db.list_nfl_paper_tickets(season, week)
+              if r["day"] == day}
+    out = {}
+    for strategy in altparlay.STRATEGIES:
+        p = parlays.get(strategy)
+        cur = stored.get(strategy)
+        if cur and (cur.get("result")
+                    or any(_is_locked(leg, now) for leg in cur.get("legs") or [])):
+            out[strategy] = "kept"
+            continue
+        if not p or any(_is_locked(leg, now) for leg in p.get("legs") or []):
+            out[strategy] = "none"
+            continue
+        legs = [{k: leg.get(k) for k in PAPER_LEG_FIELDS} | {"lock_at": _lock_stamp(leg)}
+                for leg in p["legs"]]
+        await db.upsert_nfl_paper_ticket({
+            "season": season, "week": week, "strategy": strategy, "day": day,
+            "legs": json.dumps(legs), "leg_count": len(legs),
+            "american": p.get("american"), "decimal_odds": p.get("decimal_odds"),
+            "model_p": p.get("model_p"), "stake": p.get("stake"),
+        })
+        out[strategy] = "written"
+    return out
+
+
+async def _week_scores(season: int, week: int) -> dict:
+    """``{team: (points for, points against)}`` for the week's finished games."""
+    out = {}
+    for g in await _require_db().list_nfl_game_predictions(season, week):
+        h, a = g.get("home_score"), g.get("away_score")
+        if h is None or a is None:
+            continue
+        out[g["home_team"]] = (h, a)
+        out[g["away_team"]] = (a, h)
+    return out
+
+
+async def _settle_paper(season: int, week: int, actuals: dict, played: set) -> int:
+    """Grade every paper ticket whose legs have all finished.
+
+    A paper ticket waits for its last leg even when an early one has already
+    lost it: the point of these is the leg-level record — which kinds of leg
+    hold up — and a ticket settled on its first loss never grades the rest.
+    """
+    db = _require_db()
+    pending = [t for t in await db.list_nfl_paper_tickets(season, week)
+               if not t.get("result")]
+    if not pending:
+        return 0
+    scores = await _week_scores(season, week)
+    n = 0
+    for t in pending:
+        legs = t.get("legs") or []
+        graded = [_grade_leg(leg, actuals, played, scores) for leg in legs]
+        if any(res is None for res, _ in graded):
+            continue
+        res, won, settled, dec = _grade_alt_parlay(legs, actuals, played, scores)
+        won = sum(1 for r, _ in graded if r == "WIN")
+        settled = sum(1 for r, _ in graded if r in ("WIN", "LOSS"))
+        marked = [{**leg, "result": r, "actual": a} for leg, (r, a) in zip(legs, graded)]
+        await db.settle_nfl_paper_ticket(season, week, t["strategy"], t["day"], res,
+                                         won, settled, dec, json.dumps(marked))
+        n += 1
+    return n
+
+
+PAPER_LABELS = {"double_up": "Double-up", "lotto": "Lotto (long rungs)",
+                "short_stack": "Short stack", "anchored": "Anchored lotto"}
+
+
+def _paper_entry(t: dict) -> dict:
+    stake = float(t.get("stake") or 0.1)
+    res = t.get("result")
+    if res == "WIN":
+        units = round(stake * ((t.get("settled_decimal") or t.get("decimal_odds") or 1) - 1), 3)
+    elif res == "LOSS":
+        units = -stake
+    elif res in ("VOID", "PUSH"):
+        units = 0.0
+    else:
+        units = None
+    return {"season": t["season"], "week": t["week"], "strategy": t["strategy"],
+            "day": t["day"], "captured_at": t.get("captured_at"),
+            "odds": t.get("american"), "decimal_odds": t.get("decimal_odds"),
+            "model_p": t.get("model_p"), "stake": stake, "result": res, "units": units,
+            "legs_won": t.get("legs_won"), "legs_settled": t.get("legs_settled"),
+            "legs": [{k: l.get(k) for k in ("player", "team", "market", "line", "threshold",
+                                           "side", "odds", "p_cal", "anchor", "event",
+                                           "kickoff", "result", "actual")}
+                     for l in t.get("legs") or []]}
+
+
+async def paper_record(season: Optional[int] = None) -> dict:
+    """Each strategy's record: tickets, units at its own stake, and its legs.
+
+    Days are separate tickets, so a strategy that presents the same ticket all
+    week counts it several times; the leg hit rate, over every leg presented,
+    is the steadier number. Legs are split into the anchors and the rest, so
+    the anchored lotto's two halves can be judged apart.
+    """
+    from . import altparlay
+
+    rows = [_paper_entry(t) for t in await _require_db().list_nfl_paper_tickets(season)]
+    out = []
+    for strategy in altparlay.STRATEGIES:
+        mine = [r for r in rows if r["strategy"] == strategy]
+        legs: dict = {}
+        for r in mine:
+            for l in r["legs"]:
+                kind = l.get("anchor") or "rung"
+                b = legs.setdefault(kind, {"won": 0, "lost": 0, "claimed": 0.0})
+                if l.get("result") in ("WIN", "LOSS"):
+                    b["won" if l["result"] == "WIN" else "lost"] += 1
+                    b["claimed"] += l.get("p_cal") or 0.0
+        for b in legs.values():
+            n = b["won"] + b["lost"]
+            b["hit_rate"] = round(100 * b["won"] / n, 1) if n else None
+            # What the model said these legs would hit at, for comparison.
+            b["claimed"] = round(100 * b["claimed"] / n, 1) if n else None
+        out.append({"strategy": strategy, "label": PAPER_LABELS.get(strategy, strategy),
+                    "stake": altparlay.STRATEGIES[strategy]["stake"],
+                    "summary": _ledger_bucket([{**r, "type": "paper"} for r in mine]),
+                    "legs": legs, "tickets": mine})
+    return {"strategies": out}
 
 
 # --- placed bets ------------------------------------------------------------
@@ -1023,6 +1205,8 @@ async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
                    if p.get("frozen") and not p.get("result")]
     alt_pending += [b for b in await db.list_nfl_placed_bets(season, week)
                     if not b.get("result")]
+    alt_pending += [t for t in await db.list_nfl_paper_tickets(season, week)
+                    if not t.get("result")]
     if not picks and not alt_pending:
         # Still re-score the card: every pick being settled is exactly when a
         # card most needs grading, not a reason to skip it.
@@ -1047,6 +1231,7 @@ async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
 
     alt_settled = await _settle_alt_parlays(season, week, actuals, played)
     placed_settled = await _settle_placed(season, week, actuals, played)
+    paper_settled = await _settle_paper(season, week, actuals, played)
     counts: dict = {"WIN": 0, "LOSS": 0, "PUSH": 0, "VOID": 0}
     waiting = 0
     for p in picks:
@@ -1077,7 +1262,7 @@ async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
     return {"season": season, "week": week,
             "settled": sum(counts.values()), "waiting_on_kickoff": waiting,
             "alt_parlays_settled": alt_settled, "placed_settled": placed_settled,
-            **counts}
+            "paper_settled": paper_settled, **counts}
 
 
 def _leg_result(leg: dict, actual: Optional[float]) -> Optional[str]:

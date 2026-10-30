@@ -229,3 +229,131 @@ def test_a_placement_that_cannot_settle_is_refused():
 def test_an_under_leg_settles_as_an_under():
     legs = [_rung(key="u", team="AAA", side="UNDER", line=40.5, odds=-110)]
     assert tracking._grade_alt_parlay(legs, {"u": {"receiving_yards": 22.0}}, {"AAA"})[0] == "WIN"
+
+
+# --- paper strategies ---------------------------------------------------------
+
+def _anchor(**kw):
+    base = {"anchor": "td", "market": "anytime_td", "player": "A Scorer",
+            "key": "a scorer", "team": "AAA", "line": 0.5, "threshold": 1.0,
+            "side": "OVER", "odds": 300, "p_cal": 0.30, "fd_event_id": "g1",
+            "kickoff": FUTURE}
+    base.update(kw)
+    return base
+
+
+def test_the_short_stack_takes_every_games_likeliest_short_rung():
+    legs = [_rung(key=f"p{i}", fd_event_id=f"g{i}", odds=-150, p_cal=0.6) for i in range(5)]
+    legs += [_rung(key="better", fd_event_id="g0", odds=-200, p_cal=0.7),
+             _rung(key="too_long", fd_event_id="g9", odds=150, p_cal=0.45)]
+    t = altparlay.stack(legs)
+    assert t["leg_count"] == 5 and "better" in {l["key"] for l in t["legs"]}
+    assert "too_long" not in {l["key"] for l in t["legs"]} and t["stake"] == 0.1
+    assert altparlay.stack(legs[:3]) is None                # under four games
+
+
+def test_the_anchored_lotto_is_short_legs_with_at_most_two_capped_anchors():
+    short = [_rung(key=f"s{i}", fd_event_id=f"g{i}", odds=-140, p_cal=0.6) for i in range(12)]
+    anchors = [_anchor(key=f"a{i}", fd_event_id=f"g{i}", odds=400, p_cal=0.25)
+               for i in range(4)]
+    anchors.append(_anchor(key="moon", fd_event_id="g5", odds=1600, p_cal=0.2))
+    t = altparlay.build(short, "anchored", anchors)
+    assert t["decimal_odds"] >= 1000
+    used = [l for l in t["legs"] if l.get("anchor")]
+    assert len(used) <= 2 and all(100 <= l["odds"] <= 400 for l in used)
+    assert len({l["fd_event_id"] for l in t["legs"]}) == t["leg_count"]
+    # The official lotto never takes an anchor: on these rungs alone it cannot
+    # reach 1000x, which the anchors would have carried it to.
+    assert altparlay.build(short, "lotto", anchors) is None
+
+
+def test_a_moneyline_anchor_finds_its_game_through_either_team():
+    gm = [{"home_team": "BBB", "away_team": "AAA", "event": "AAA @ BBB", "kickoff": FUTURE,
+           "sim": {"picks": [{"market": "moneyline", "side": "away", "team": "AAA",
+                              "odds": 172, "p": 0.39, "edge_pts": 2.3}]}},
+          {"home_team": "CCC", "away_team": "DDD", "kickoff": FUTURE,
+           "sim": {"picks": [{"market": "moneyline", "side": "home", "team": "CCC",
+                              "odds": -126, "p": 0.58}]}}]          # short: not an anchor
+    (leg,) = altparlay.anchor_legs([], gm, {"BBB": "g7"})
+    assert leg["fd_event_id"] == "g7" and leg["anchor"] == "ml" and leg["p_cal"] == 0.39
+
+
+def test_paper_tickets_are_one_per_strategy_per_day_and_settle_leg_by_leg(tmp_path):
+    from datetime import datetime, timezone
+
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    async def run():
+        db = SQLiteDatabase(str(tmp_path / "t.db"))
+        await db.connect()
+        tracking.configure(db)
+        try:
+            ml = {**_anchor(anchor="ml", market="moneyline", player="BBB", key="ml:BBB",
+                            team="BBB", side="home", odds=150, p_cal=0.45,
+                            fd_event_id="g2"), "line": 0.0}
+            first = altparlay.summarise([_rung(key="a", odds=-200, p_cal=0.68), ml],
+                                        "anchored")
+            second = altparlay.summarise([_rung(key="c", odds=-150, p_cal=0.62), ml],
+                                         "anchored")
+            fri = datetime(2026, 10, 30, 18, 0, tzinfo=timezone.utc)
+            sat = datetime(2026, 10, 31, 18, 0, tzinfo=timezone.utc)
+            out = await tracking.record_paper(2026, 8, {"anchored": first}, now=fri)
+            assert out["anchored"] == "written" and out["short_stack"] == "none"
+            # Later the same day the board moves: that day's ticket follows it.
+            await tracking.record_paper(2026, 8, {"anchored": second}, now=fri)
+            # A new day is a new ticket; Friday's stands as it was last shown.
+            await tracking.record_paper(2026, 8, {"anchored": first}, now=sat)
+            rows = await db.list_nfl_paper_tickets(2026, 8)
+            assert [(r["day"], r["legs"][0]["key"]) for r in rows] == [
+                ("2026-10-31", "a"), ("2026-10-30", "c")]
+
+            # Player legs are graded; the moneyline waits for the final score.
+            actuals = {"a": {"receiving_yards": 10.0}, "c": {"receiving_yards": 30.0}}
+            assert await tracking._settle_paper(2026, 8, actuals, {"AAA", "BBB"}) == 0
+            await db.upsert_nfl_game_predictions([{
+                "season": 2026, "week": 8, "home_team": "BBB", "away_team": "ZZZ"}])
+            await db.settle_nfl_game(2026, 8, "BBB", "ZZZ", 27, 20)
+            assert await tracking._settle_paper(2026, 8, actuals, {"AAA", "BBB"}) == 2
+
+            rec = await tracking.paper_record(2026)
+            s = next(x for x in rec["strategies"] if x["strategy"] == "anchored")
+            assert (s["summary"]["wins"], s["summary"]["losses"]) == (1, 1)
+            fri_t = next(t for t in s["tickets"] if t["day"] == "2026-10-30")
+            assert fri_t["result"] == "WIN"
+            assert fri_t["units"] == pytest.approx(0.1 * (1.6667 * 2.5 - 1), abs=0.01)
+            assert [l["result"] for l in fri_t["legs"]] == ["WIN", "WIN"]
+            assert s["legs"]["ml"]["won"] == 2 and s["legs"]["rung"]["hit_rate"] == 50.0
+        finally:
+            tracking.configure(None)
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_a_days_ticket_stands_once_a_leg_has_locked(tmp_path):
+    from datetime import datetime, timezone
+
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    async def run():
+        db = SQLiteDatabase(str(tmp_path / "t.db"))
+        await db.connect()
+        tracking.configure(db)
+        try:
+            early = "2026-11-01T18:00:00.000Z"
+            first = altparlay.summarise([_rung(key="a", kickoff=early, p_cal=0.6),
+                                         _rung(key="b", fd_event_id="g2", p_cal=0.6)],
+                                        "short_stack")
+            morning = datetime(2026, 11, 1, 9, 0, tzinfo=timezone.utc)
+            await tracking.record_paper(2026, 8, {"short_stack": first}, now=morning)
+            later = datetime(2026, 11, 1, 18, 30, tzinfo=timezone.utc)
+            out = await tracking.record_paper(2026, 8, {"short_stack": altparlay.summarise(
+                [_rung(key="z", p_cal=0.6)], "short_stack")}, now=later)
+            assert out["short_stack"] == "kept"
+            (row,) = await db.list_nfl_paper_tickets(2026, 8)
+            assert [l["key"] for l in row["legs"]] == ["a", "b"]
+        finally:
+            tracking.configure(None)
+            await db.close()
+
+    asyncio.run(run())
