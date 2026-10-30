@@ -7,9 +7,9 @@
    *  hide whether they did.
    */
   import { onMount } from 'svelte';
-  import { getNflRecommendations, getNflPlaced } from '$lib/api';
+  import { getNflRecommendations, getNflPlaced, getNflPaper } from '$lib/api';
   import { fmtOdds, fmtPct, fmtSigned, fmtKickoff } from '$lib/nflScreen';
-  import type { NflRecommendations, NflLedgerBucket, NflRecType, NflPlacedRecord } from '$lib/types';
+  import type { NflRecommendations, NflLedgerBucket, NflRecType, NflPlacedRecord, NflPaperRecord, NflPaperLeg } from '$lib/types';
 
   let data: NflRecommendations | null = null;
   let loading = true;
@@ -18,8 +18,20 @@
   // What you actually bet — recorded from the FanDuel link, never rebuilt.
   let mine: NflPlacedRecord | null = null;
 
+  // The parlay strategies on paper: each one's ticket as shown, every day.
+  let paper: NflPaperRecord | null = null;
+  let openStrategy: string | null = null;
+  const LEG_KIND: Record<string, string> = { rung: 'Alt legs', td: 'TD anchors', ml: 'ML anchors' };
+  function legText(l: NflPaperLeg): string {
+    if (l.market === 'moneyline') return `${l.player} ML`;
+    if (l.market === 'anytime_td') return `${l.player} TD`;
+    const unit = l.market === 'receptions' ? 'rec' : 'yds';
+    return `${l.player} ${l.threshold ?? l.line}+ ${unit}`;
+  }
+
   onMount(async () => {
     getNflPlaced().then((r) => (mine = r)).catch(() => (mine = null));
+    getNflPaper().then((r) => (paper = r)).catch(() => (paper = null));
     try {
       data = await getNflRecommendations();
     } catch (e) {
@@ -133,6 +145,70 @@
         </table>
       {/if}
     </section>
+
+    <!-- Strategy lab: every parlay strategy's daily ticket, graded, never bet. -->
+    {#if paper}
+      <section class="card p-0 overflow-hidden">
+        <div class="px-5 py-3 border-b border-border">
+          <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Strategy lab (paper)</h2>
+          <p class="text-xs text-slate-500 mt-1">
+            Each strategy's ticket as the page showed it, one per day, graded when every leg is in. Nothing here is bet.
+            The same ticket on several days counts several times, so the leg hit rate (against what the model claimed) is the steadier number.
+          </p>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm tabular-nums">
+            <thead><tr class="text-xs text-slate-500 uppercase tracking-wider">
+              <th class="text-left px-5 py-2 font-medium">Strategy</th>
+              <th class="text-right px-2 py-2 font-medium">Tickets</th>
+              <th class="text-right px-2 py-2 font-medium">Record</th>
+              <th class="text-right px-2 py-2 font-medium">Units</th>
+              <th class="text-right px-2 py-2 font-medium">ROI</th>
+              <th class="text-left px-5 py-2 font-medium">Legs hit (model claimed)</th>
+            </tr></thead>
+            <tbody>
+              {#each paper.strategies as st (st.strategy)}
+                <tr class="border-t border-border/40 cursor-pointer hover:bg-surface-700/40"
+                    on:click={() => (openStrategy = openStrategy === st.strategy ? null : st.strategy)}>
+                  <td class="px-5 py-2 text-slate-200">{openStrategy === st.strategy ? '▾' : '▸'} {st.label}
+                    <span class="text-xs text-slate-500"> · {st.stake}u</span></td>
+                  <td class="px-2 py-2 text-right text-slate-400">{st.summary.bets}
+                    {#if st.summary.pending}<span class="text-xs text-slate-500"> ({st.summary.pending} pending)</span>{/if}</td>
+                  <td class="px-2 py-2 text-right text-slate-200">{rec(st.summary)}</td>
+                  <td class="px-2 py-2 text-right {tone(st.summary.units)}">{units(st.summary.units)}</td>
+                  <td class="px-2 py-2 text-right {tone(st.summary.roi)}">{roi(st.summary.roi)}</td>
+                  <td class="px-5 py-2 text-xs text-slate-400">
+                    {#each Object.entries(st.legs) as [kind, b]}
+                      {#if b.hit_rate != null}
+                        <span class="mr-3">{LEG_KIND[kind] ?? kind}: {b.won}/{b.won + b.lost} = {b.hit_rate}% ({b.claimed}%)</span>
+                      {/if}
+                    {:else}—{/each}
+                  </td>
+                </tr>
+                {#if openStrategy === st.strategy}
+                  {#each st.tickets as t (t.day + t.week)}
+                    <tr class="border-t border-border/20 bg-surface-800/40 align-top">
+                      <td class="px-5 py-2 text-xs text-slate-500">Wk {t.week} · {t.day}</td>
+                      <td class="px-2 py-2 text-right text-xs text-slate-400">{t.legs.length} legs</td>
+                      <td class="px-2 py-2 text-right text-slate-300">{fmtOdds(t.odds)}</td>
+                      <td class="px-2 py-2 text-right {tone(t.units)}">{t.units == null ? '' : units(t.units)}</td>
+                      <td class="px-2 py-2"><span class="text-xs px-1.5 py-0.5 rounded border {resultClass(t.result)}">{t.result ?? 'PENDING'}</span></td>
+                      <td class="px-5 py-2 text-xs leading-relaxed">
+                        {#each t.legs as l}
+                          <span class="mr-2 whitespace-nowrap {l.result === 'WIN' ? 'text-emerald-400' : l.result === 'LOSS' ? 'text-rose-400' : 'text-slate-400'}">{l.anchor ? '★ ' : ''}{legText(l)} {fmtOdds(l.odds)}</span>
+                        {/each}
+                      </td>
+                    </tr>
+                  {:else}
+                    <tr class="border-t border-border/20"><td colspan="6" class="px-5 py-2 text-xs text-slate-500">No tickets yet.</td></tr>
+                  {/each}
+                {/if}
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {/if}
 
     <!-- Headline: record, units, ROI. -->
     <div class="grid gap-3 grid-cols-2 md:grid-cols-4">

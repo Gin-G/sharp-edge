@@ -817,3 +817,23 @@ export interface NflPlaceRequest {
   american: number; stake: number; model_p?: number | null;
   legs: Record<string, unknown>[];
 }
+
+// Paper strategies (GET /nfl/paper): each parlay strategy's daily ticket, graded, never bet.
+export interface NflPaperLeg {
+  player: string; team: string | null; market: string; line: number;
+  threshold: number | null; side: string | null; odds: number | null;
+  p_cal: number | null; anchor: 'td' | 'ml' | null; event: string | null;
+  kickoff: string | null; result: string | null; actual: number | null;
+}
+export interface NflPaperTicket {
+  season: number; week: number; strategy: string; day: string;
+  odds: number | null; decimal_odds: number | null; model_p: number | null;
+  stake: number; result: string | null; units: number | null;
+  legs_won: number | null; legs_settled: number | null; legs: NflPaperLeg[];
+}
+export interface NflPaperLegBucket { won: number; lost: number; hit_rate: number | null; claimed: number | null }
+export interface NflPaperStrategy {
+  strategy: string; label: string; stake: number; summary: NflLedgerBucket;
+  legs: Record<string, NflPaperLegBucket>; tickets: NflPaperTicket[];
+}
+export interface NflPaperRecord { strategies: NflPaperStrategy[] }

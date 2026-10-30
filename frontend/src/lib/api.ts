@@ -1,4 +1,4 @@
-import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord, ParlayRecord, NflScreen, NflTrackRecord, NflGameRecord, NflRecommendations, NflPlacedRecord, NflPlaceRequest, BookInfo, BookQuote } from './types';
+import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord, ParlayRecord, NflScreen, NflTrackRecord, NflGameRecord, NflRecommendations, NflPlacedRecord, NflPaperRecord, NflPlaceRequest, BookInfo, BookQuote } from './types';
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || 'http://localhost:8000';
 
@@ -261,6 +261,11 @@ export function getNflRecommendations(season?: number): Promise<NflRecommendatio
 export function getNflPlaced(season?: number): Promise<NflPlacedRecord> {
   const qs = season ? `?season=${season}` : '';
   return req<NflPlacedRecord>(`/nfl/placed${qs}`);
+}
+
+export function getNflPaper(season?: number): Promise<NflPaperRecord> {
+  const qs = season ? `?season=${season}` : '';
+  return req<NflPaperRecord>(`/nfl/paper${qs}`);
 }
 
 /** Record a placement. ``keepalive`` so it completes even when the click also
