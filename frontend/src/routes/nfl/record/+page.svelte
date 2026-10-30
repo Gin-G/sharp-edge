@@ -7,15 +7,19 @@
    *  hide whether they did.
    */
   import { onMount } from 'svelte';
-  import { getNflRecommendations } from '$lib/api';
+  import { getNflRecommendations, getNflPlaced } from '$lib/api';
   import { fmtOdds, fmtPct, fmtSigned, fmtKickoff } from '$lib/nflScreen';
-  import type { NflRecommendations, NflLedgerBucket, NflRecType } from '$lib/types';
+  import type { NflRecommendations, NflLedgerBucket, NflRecType, NflPlacedRecord } from '$lib/types';
 
   let data: NflRecommendations | null = null;
   let loading = true;
   let error = '';
 
+  // What you actually bet — recorded from the FanDuel link, never rebuilt.
+  let mine: NflPlacedRecord | null = null;
+
   onMount(async () => {
+    getNflPlaced().then((r) => (mine = r)).catch(() => (mine = null));
     try {
       data = await getNflRecommendations();
     } catch (e) {
@@ -95,6 +99,40 @@
       {:else if era === 'before'}Before {since} — the record the current rules were written to fix.
       {:else}Everything recorded, both rule sets together.{/if}
     </p>
+
+    <!-- Your bets, separate from the model's record. -->
+    <section class="card p-0 overflow-hidden">
+      <div class="px-5 py-3 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">My bets</h2>
+        {#if mine && mine.bets.length}
+          <span class="text-sm tabular-nums text-slate-300">
+            {rec(mine.summary)} · <span class={tone(mine.summary.units)}>{units(mine.summary.units)}</span>
+            on {mine.summary.staked ?? 0}u settled · <span class={tone(mine.summary.roi)}>{roi(mine.summary.roi)}</span>
+            {#if mine.summary.pending}<span class="text-xs text-slate-500"> · {mine.summary.pending} pending</span>{/if}
+          </span>
+        {/if}
+      </div>
+      {#if !mine || mine.bets.length === 0}
+        <div class="px-5 py-4 text-sm text-slate-500">No placed bets yet. Opening a ticket on FanDuel from the Alt parlays tab records it here.</div>
+      {:else}
+        <table class="w-full text-sm tabular-nums">
+          <tbody>
+            {#each mine.bets as b (b.id)}
+              <tr class="border-t border-border/40 align-top">
+                <td class="px-5 py-2 text-slate-500">Wk {b.week}</td>
+                <td class="px-2 py-2">
+                  <div class="text-slate-200">{b.label ?? 'Parlay'}</div>
+                  <div class="text-xs text-slate-500">{b.legs.map((l) => `${l.player} ${l.threshold ?? l.line}${l.threshold ? '+' : ''}`).join(' · ')}</div>
+                </td>
+                <td class="px-2 py-2 text-right text-slate-300">{fmtOdds(b.odds)}</td>
+                <td class="px-2 py-2"><span class="text-xs px-1.5 py-0.5 rounded border {resultClass(b.result)}">{b.result ?? 'PENDING'}</span></td>
+                <td class="px-5 py-2 text-right {tone(b.units)}">{b.units == null ? `${b.stake}u` : units(b.units)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </section>
 
     <!-- Headline: record, units, ROI. -->
     <div class="grid gap-3 grid-cols-2 md:grid-cols-4">

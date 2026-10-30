@@ -7,7 +7,7 @@ from typing import Optional
 
 import asyncpg
 
-from .base import (BetDatabase, NFL_ALT_PARLAY_COLUMNS, NFL_CARD_COLUMNS, NFL_GAME_ADDED_COLUMNS,
+from .base import (BetDatabase, NFL_ALT_PARLAY_COLUMNS, NFL_CARD_COLUMNS, NFL_PLACED_COLUMNS, NFL_GAME_ADDED_COLUMNS,
                    NFL_PICK_ADDED_COLUMNS,
                    NFL_PICK_COLUMNS,
                    NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
@@ -241,6 +241,25 @@ CREATE TABLE IF NOT EXISTS nfl_alt_prices (
     first_seen TIMESTAMPTZ DEFAULT NOW(),
     last_seen TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (season, week, player_key, market, line)
+);
+CREATE TABLE IF NOT EXISTS nfl_placed_bets (
+    id SERIAL PRIMARY KEY,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    label TEXT,
+    source TEXT,
+    legs JSONB NOT NULL,
+    leg_count INTEGER NOT NULL,
+    american INTEGER,
+    decimal_odds DOUBLE PRECISION,
+    model_p DOUBLE PRECISION,
+    stake DOUBLE PRECISION NOT NULL,
+    placed_at TIMESTAMPTZ DEFAULT NOW(),
+    result TEXT,
+    legs_won INTEGER,
+    legs_settled INTEGER,
+    settled_decimal DOUBLE PRECISION,
+    resolved_at TIMESTAMPTZ
 );
 CREATE TABLE IF NOT EXISTS nfl_cards (
     season INTEGER NOT NULL,
@@ -818,6 +837,57 @@ class PostgresDatabase(BetDatabase):
                 [tuple(r.get(c) for c in cols) for r in rows],
             )
         return len(rows)
+
+    async def insert_nfl_placed_bet(self, row: dict) -> int:
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                """INSERT INTO nfl_placed_bets (
+                    season, week, label, source, legs, leg_count, american,
+                    decimal_odds, model_p, stake
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id""",
+                *[row.get(c) for c in ("season", "week", "label", "source", "legs",
+                                       "leg_count", "american", "decimal_odds",
+                                       "model_p", "stake")])
+
+    async def list_nfl_placed_bets(self, season=None, week=None) -> list[dict]:
+        sql = f"SELECT {NFL_PLACED_COLUMNS} FROM nfl_placed_bets WHERE TRUE"
+        args: list = []
+        if season is not None:
+            args.append(season); sql += f" AND season = ${len(args)}"
+        if week is not None:
+            args.append(week); sql += f" AND week = ${len(args)}"
+        sql += " ORDER BY placed_at DESC"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+        out = []
+        for r in rows:
+            d = _nfl_row(r)
+            if d.get("placed_at") is not None and not isinstance(d["placed_at"], str):
+                d["placed_at"] = d["placed_at"].isoformat()
+            out.append(d)
+        return out
+
+    async def delete_nfl_placed_bet(self, bet_id: int) -> bool:
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                "DELETE FROM nfl_placed_bets WHERE id = $1 AND result IS NULL", bet_id)
+        return int(status.rsplit(" ", 1)[-1]) > 0
+
+    async def update_nfl_placed_stake(self, bet_id: int, stake: float) -> bool:
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                "UPDATE nfl_placed_bets SET stake = $1 WHERE id = $2 AND result IS NULL",
+                stake, bet_id)
+        return int(status.rsplit(" ", 1)[-1]) > 0
+
+    async def settle_nfl_placed_bet(self, bet_id, result, legs_won, legs_settled,
+                                    settled_decimal) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE nfl_placed_bets SET result = $1, legs_won = $2,
+                       legs_settled = $3, settled_decimal = $4, resolved_at = NOW()
+                   WHERE id = $5""",
+                result, legs_won, legs_settled, settled_decimal, bet_id)
 
     async def update_nfl_card_legs(self, season: int, week: int,
                                    legs: str) -> bool:

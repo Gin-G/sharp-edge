@@ -8,7 +8,7 @@ from typing import Optional
 
 import aiosqlite
 
-from .base import (BetDatabase, NFL_ALT_PARLAY_COLUMNS, NFL_CARD_COLUMNS, NFL_GAME_ADDED_COLUMNS,
+from .base import (BetDatabase, NFL_ALT_PARLAY_COLUMNS, NFL_CARD_COLUMNS, NFL_PLACED_COLUMNS, NFL_GAME_ADDED_COLUMNS,
                    NFL_PICK_ADDED_COLUMNS,
                    NFL_PICK_COLUMNS, iso_utc,
                    NFL_SNAPSHOT_COLUMNS, PARLAY_COLUMNS, PICK_COLUMNS)
@@ -217,6 +217,25 @@ CREATE TABLE IF NOT EXISTS nfl_alt_prices (
     first_seen TEXT DEFAULT (datetime('now')),
     last_seen TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (season, week, player_key, market, line)
+);
+CREATE TABLE IF NOT EXISTS nfl_placed_bets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    label TEXT,
+    source TEXT,
+    legs TEXT NOT NULL,
+    leg_count INTEGER NOT NULL,
+    american INTEGER,
+    decimal_odds REAL,
+    model_p REAL,
+    stake REAL NOT NULL,
+    placed_at TEXT DEFAULT (datetime('now')),
+    result TEXT,
+    legs_won INTEGER,
+    legs_settled INTEGER,
+    settled_decimal REAL,
+    resolved_at TEXT
 );
 CREATE TABLE IF NOT EXISTS nfl_cards (
     season INTEGER NOT NULL,
@@ -748,6 +767,51 @@ class SQLiteDatabase(BetDatabase):
         )
         await self._db.commit()
         return len(rows)
+
+    async def insert_nfl_placed_bet(self, row: dict) -> int:
+        cursor = await self._db.execute(
+            """INSERT INTO nfl_placed_bets (
+                season, week, label, source, legs, leg_count, american,
+                decimal_odds, model_p, stake
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            tuple(row.get(c) for c in ("season", "week", "label", "source", "legs",
+                                       "leg_count", "american", "decimal_odds",
+                                       "model_p", "stake")))
+        await self._db.commit()
+        return cursor.lastrowid
+
+    async def list_nfl_placed_bets(self, season=None, week=None) -> list[dict]:
+        sql = f"SELECT {NFL_PLACED_COLUMNS} FROM nfl_placed_bets WHERE 1=1"
+        args: list = []
+        if season is not None:
+            sql += " AND season = ?"; args.append(season)
+        if week is not None:
+            sql += " AND week = ?"; args.append(week)
+        sql += " ORDER BY placed_at DESC, id DESC"
+        cursor = await self._db.execute(sql, args)
+        return [_card_row(r) for r in await cursor.fetchall()]
+
+    async def delete_nfl_placed_bet(self, bet_id: int) -> bool:
+        cursor = await self._db.execute(
+            "DELETE FROM nfl_placed_bets WHERE id = ? AND result IS NULL", (bet_id,))
+        await self._db.commit()
+        return bool(cursor.rowcount)
+
+    async def update_nfl_placed_stake(self, bet_id: int, stake: float) -> bool:
+        cursor = await self._db.execute(
+            "UPDATE nfl_placed_bets SET stake = ? WHERE id = ? AND result IS NULL",
+            (stake, bet_id))
+        await self._db.commit()
+        return bool(cursor.rowcount)
+
+    async def settle_nfl_placed_bet(self, bet_id, result, legs_won, legs_settled,
+                                    settled_decimal) -> None:
+        await self._db.execute(
+            """UPDATE nfl_placed_bets SET result = ?, legs_won = ?, legs_settled = ?,
+                   settled_decimal = ?, resolved_at = datetime('now')
+               WHERE id = ?""",
+            (result, legs_won, legs_settled, settled_decimal, bet_id))
+        await self._db.commit()
 
     async def update_nfl_card_legs(self, season: int, week: int,
                                    legs: str) -> bool:

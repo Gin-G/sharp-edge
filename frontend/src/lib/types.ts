@@ -794,3 +794,26 @@ export interface NflAltParlay {
   decimal_odds: number; american: number; model_p: number;
   stake: number; to_win: number; ev: number; betslip_url: string | null;
 }
+
+export interface NflPlacedLeg {
+  player: string; market: string; line: number; threshold?: number | null;
+  side: string; odds: number | null; event?: string | null; kickoff?: string | null;
+}
+
+export interface NflPlacedBet {
+  id: number; season: number; week: number; placed_at: string | null;
+  label: string | null; source: string | null; odds: number | null; stake: number;
+  result: string | null; units: number | null; model_p: number | null;
+  actual: string | null; legs: NflPlacedLeg[];
+}
+
+export interface NflPlacedRecord {
+  summary: NflLedgerBucket;
+  bets: NflPlacedBet[];
+}
+
+export interface NflPlaceRequest {
+  season: number; week: number; label: string; source: string;
+  american: number; stake: number; model_p?: number | null;
+  legs: Record<string, unknown>[];
+}

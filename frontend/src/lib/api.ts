@@ -1,4 +1,4 @@
-import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord, ParlayRecord, NflScreen, NflTrackRecord, NflGameRecord, NflRecommendations, BookInfo, BookQuote } from './types';
+import type { Stats, BreakdownRow, CalendarDay, ChatMessage, AuthStatus, InsightsResponse, BatterScreen, HomerScreen, TrackRecord, ParlayRecord, NflScreen, NflTrackRecord, NflGameRecord, NflRecommendations, NflPlacedRecord, NflPlaceRequest, BookInfo, BookQuote } from './types';
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || 'http://localhost:8000';
 
@@ -254,4 +254,25 @@ export function getNflTrackRecord(season?: number): Promise<NflTrackRecord> {
 export function getNflRecommendations(season?: number): Promise<NflRecommendations> {
   const qs = season ? `?season=${season}` : '';
   return req<NflRecommendations>(`/nfl/recommendations${qs}`);
+}
+
+// --- Placed bets: what was actually bet, as it was on screen ---
+
+export function getNflPlaced(season?: number): Promise<NflPlacedRecord> {
+  const qs = season ? `?season=${season}` : '';
+  return req<NflPlacedRecord>(`/nfl/placed${qs}`);
+}
+
+/** Record a placement. ``keepalive`` so it completes even when the click also
+ *  navigates away to FanDuel. */
+export function placeNflBet(bet: NflPlaceRequest): Promise<{ id: number }> {
+  return req('/nfl/placed', { method: 'POST', body: JSON.stringify(bet), keepalive: true });
+}
+
+export function setNflPlacedStake(id: number, stake: number): Promise<unknown> {
+  return req(`/nfl/placed/${id}`, { method: 'PATCH', body: JSON.stringify({ stake }) });
+}
+
+export function undoNflPlaced(id: number): Promise<unknown> {
+  return req(`/nfl/placed/${id}`, { method: 'DELETE' });
 }

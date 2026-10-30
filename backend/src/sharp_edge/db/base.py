@@ -72,6 +72,14 @@ NFL_ALT_PARLAY_COLUMNS = (
     "settled_decimal, resolved_at"
 )
 
+# Bets the owner actually placed (POST /nfl/placed): the ticket as it was on
+# screen when the FanDuel link was opened, never rebuilt afterwards.
+NFL_PLACED_COLUMNS = (
+    "id, season, week, label, source, legs, leg_count, american, decimal_odds, "
+    "model_p, stake, placed_at, result, legs_won, legs_settled, settled_decimal, "
+    "resolved_at"
+)
+
 NFL_CARD_COLUMNS = (
     "season, week, legs, leg_count, american, decimal_odds, model_p, "
     "created_at, result, legs_won, legs_settled, resolved_at"
@@ -361,6 +369,29 @@ class BetDatabase(ABC):
 
         Alt ladders cannot be fetched after the fact, so this is the archive the
         leg rules will eventually be backtested on in units."""
+
+    @abstractmethod
+    async def insert_nfl_placed_bet(self, row: dict) -> int:
+        """Record a placed bet. Returns its id."""
+
+    @abstractmethod
+    async def list_nfl_placed_bets(
+        self, season: Optional[int] = None, week: Optional[int] = None
+    ) -> list[dict]: ...
+
+    @abstractmethod
+    async def delete_nfl_placed_bet(self, bet_id: int) -> bool:
+        """Undo a placement. Refuses a settled bet."""
+
+    @abstractmethod
+    async def update_nfl_placed_stake(self, bet_id: int, stake: float) -> bool:
+        """Correct the stake on an unsettled bet."""
+
+    @abstractmethod
+    async def settle_nfl_placed_bet(
+        self, bet_id: int, result: str, legs_won: int, legs_settled: int,
+        settled_decimal: Optional[float]
+    ) -> None: ...
 
     @abstractmethod
     async def delete_picks(

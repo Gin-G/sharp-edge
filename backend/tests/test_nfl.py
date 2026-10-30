@@ -623,6 +623,9 @@ class _PendingDB:
     async def list_nfl_alt_parlays(self, season=None, week=None):
         return []
 
+    async def list_nfl_placed_bets(self, season=None, week=None):
+        return []
+
 
 def _pending(*weeks, season=2026):
     return [{"season": season, "week": w, "result": None} for w in weeks]

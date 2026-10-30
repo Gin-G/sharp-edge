@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import Body, FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
@@ -929,6 +929,45 @@ async def nfl_recommendations(season: Optional[int] = None):
     return await nfl_tracking.recommendations(season)
 
 
+@app.post("/nfl/placed")
+async def nfl_place_bet(bet: dict = Body(...)):
+    """Record a bet the owner placed, as it was on screen. Never rebuilt."""
+    from .nfl import tracking as nfl_tracking
+    try:
+        return await nfl_tracking.record_placed(bet)
+    except (ValueError, KeyError, TypeError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/nfl/placed")
+async def nfl_placed(season: Optional[int] = None):
+    """Every placed bet, its result, and the units and ROI they add up to."""
+    from .nfl import tracking as nfl_tracking
+    return await nfl_tracking.placed_record(season)
+
+
+@app.patch("/nfl/placed/{bet_id}")
+async def nfl_placed_stake(bet_id: int, body: dict = Body(...)):
+    """Correct the stake on an unsettled placed bet."""
+    try:
+        stake = float(body.get("stake"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "stake must be a number")
+    if stake <= 0:
+        raise HTTPException(400, "stake must be positive")
+    if not await get_db().update_nfl_placed_stake(bet_id, stake):
+        raise HTTPException(404, "no unsettled bet with that id")
+    return {"id": bet_id, "stake": stake}
+
+
+@app.delete("/nfl/placed/{bet_id}")
+async def nfl_placed_undo(bet_id: int):
+    """Undo a placement recorded by mistake. A settled bet cannot be removed."""
+    if not await get_db().delete_nfl_placed_bet(bet_id):
+        raise HTTPException(404, "no unsettled bet with that id")
+    return {"deleted": bet_id}
+
+
 @app.post("/nfl/settle")
 async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None,
                      regrade: bool = False):
@@ -959,6 +998,7 @@ async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None,
     # A frozen alt parlay can be waiting on a week whose picks have all settled.
     pending += [p for p in await get_db().list_nfl_alt_parlays()
                 if p.get("frozen") and not p.get("result")]
+    pending += [b for b in await get_db().list_nfl_placed_bets() if not b.get("result")]
     if not pending:
         return {"settled": 0, "message": "nothing pending"}
     weeks = sorted({(p["season"], p["week"]) for p in pending})

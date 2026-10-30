@@ -795,7 +795,7 @@ def _grade_alt_parlay(legs: list[dict], actuals: dict, played: set) -> tuple:
         row = actuals.get(leg.get("key"))
         if row is None:
             continue                        # did not play: void, as the book does
-        res, actual = _result_for({**leg, "side": "OVER"}, row)
+        res, actual = _result_for({**leg, "side": leg.get("side") or "OVER"}, row)
         if res is None:
             pending = True
             continue
@@ -826,6 +826,114 @@ async def _settle_alt_parlays(season: int, week: int, actuals: dict,
         await db.settle_nfl_alt_parlay(season, week, p["kind"], res, won, graded, dec)
         n += 1
     return n
+
+
+# --- placed bets ------------------------------------------------------------
+#
+# What the owner actually bet, as opposed to what the board recommended. The
+# alt parlays rebuild with the board until their first leg locks, so the
+# ticket on screen when a bet is placed is often not the one the record ends
+# up holding: week 8's double-up was bet as Tuten 5+ / Stevenson 15+ at +101,
+# the page later showed Emmett Johnson 5+ / Stevenson 10+, and the record froze
+# a third ticket nobody saw. A placed bet is written once, from the screen,
+# and never rebuilt.
+
+PLACED_LEG_FIELDS = ("player", "key", "team", "market", "line", "threshold", "side",
+                     "odds", "p_cal", "event", "fd_event_id", "kickoff",
+                     "fd_market_id", "over_selection_id", "under_selection_id")
+
+
+def _placed_row(bet: dict) -> dict:
+    """Validate and normalise a placement. Raises ValueError on a bad one."""
+    legs = bet.get("legs") or []
+    if not legs:
+        raise ValueError("a placed bet needs at least one leg")
+    clean = []
+    for leg in legs:
+        market = leg.get("market")
+        if market not in SETTLE_COLUMN and market != TD_MARKET:
+            raise ValueError(f"cannot settle a {market!r} leg")
+        if leg.get("line") is None or not (leg.get("key") or leg.get("player")):
+            raise ValueError("every leg needs a player and a line")
+        out = {k: leg.get(k) for k in PLACED_LEG_FIELDS}
+        out["key"] = out["key"] or norm_name(out["player"])
+        out["side"] = (out["side"] or "OVER").upper()
+        clean.append(out)
+    american = bet.get("american")
+    dec = bet.get("decimal_odds")
+    if dec is None and american is not None:
+        a = int(american)
+        dec = 1 + (a / 100 if a > 0 else 100 / -a)
+    if dec is None:
+        dec = 1.0
+        for leg in clean:
+            o = leg.get("odds")
+            dec *= 1 + (o / 100 if o > 0 else 100 / -o) if o else 1.0
+    if american is None:
+        american = round((dec - 1) * 100) if dec >= 2 else round(-100 / (dec - 1))
+    stake = float(bet.get("stake") if bet.get("stake") is not None else 1.0)
+    if stake <= 0:
+        raise ValueError("stake must be positive")
+    return {"season": int(bet["season"]), "week": int(bet["week"]),
+            "label": bet.get("label"), "source": bet.get("source") or "manual",
+            "legs": json.dumps(clean), "leg_count": len(clean),
+            "american": int(american), "decimal_odds": round(float(dec), 4),
+            "model_p": bet.get("model_p"), "stake": stake}
+
+
+async def record_placed(bet: dict) -> dict:
+    row = _placed_row(bet)
+    bet_id = await _require_db().insert_nfl_placed_bet(row)
+    return {"id": bet_id, **{k: row[k] for k in ("season", "week", "label", "american",
+                                                 "decimal_odds", "stake", "leg_count")}}
+
+
+async def _settle_placed(season: int, week: int, actuals: dict, played: set) -> int:
+    db = _require_db()
+    n = 0
+    for b in await db.list_nfl_placed_bets(season, week):
+        if b.get("result"):
+            continue
+        legs = b.get("legs") or []
+        res, won, graded, dec = _grade_alt_parlay(legs, actuals, played)
+        if res is None:
+            continue
+        # The price taken stands unless a leg voided; then the book reprices
+        # the ticket on the legs that remained.
+        if res == "WIN" and graded == len(legs):
+            dec = b.get("decimal_odds") or dec
+        await db.settle_nfl_placed_bet(b["id"], res, won, graded, dec)
+        n += 1
+    return n
+
+
+def _placed_entry(b: dict) -> dict:
+    stake = float(b.get("stake") or 1.0)
+    res = b.get("result")
+    if res == "WIN":
+        units = round(stake * ((b.get("settled_decimal") or b.get("decimal_odds") or 1) - 1), 3)
+    elif res == "LOSS":
+        units = -stake
+    elif res in ("VOID", "PUSH"):
+        units = 0.0
+    else:
+        units = None
+    legs = b.get("legs") or []
+    return {"id": b.get("id"), "season": b["season"], "week": b["week"],
+            "placed_at": b.get("placed_at"), "label": b.get("label"),
+            "source": b.get("source"), "odds": b.get("american"), "stake": stake,
+            "result": res, "units": units, "model_p": b.get("model_p"),
+            "actual": (f"{b.get('legs_won')}/{b.get('legs_settled')} legs"
+                       if b.get("legs_settled") is not None else None),
+            "legs": [{k: l.get(k) for k in ("player", "market", "line", "threshold",
+                                           "side", "odds", "event", "kickoff")}
+                     for l in legs]}
+
+
+async def placed_record(season: Optional[int] = None) -> dict:
+    rows = [_placed_entry(b) for b in await _require_db().list_nfl_placed_bets(season)]
+    return {"summary": _ledger_bucket([{**r, "type": "placed"} for r in rows]),
+            "bets": rows}
 
 
 async def purge_late_picks(season: Optional[int] = None,
@@ -913,6 +1021,8 @@ async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
              if not p.get("result")]
     alt_pending = [p for p in await db.list_nfl_alt_parlays(season, week)
                    if p.get("frozen") and not p.get("result")]
+    alt_pending += [b for b in await db.list_nfl_placed_bets(season, week)
+                    if not b.get("result")]
     if not picks and not alt_pending:
         # Still re-score the card: every pick being settled is exactly when a
         # card most needs grading, not a reason to skip it.
@@ -936,6 +1046,7 @@ async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
                 "message": f"week {week} not in the published data yet"}
 
     alt_settled = await _settle_alt_parlays(season, week, actuals, played)
+    placed_settled = await _settle_placed(season, week, actuals, played)
     counts: dict = {"WIN": 0, "LOSS": 0, "PUSH": 0, "VOID": 0}
     waiting = 0
     for p in picks:
@@ -965,7 +1076,8 @@ async def settle_week(season: int, week: int, regrade: bool = False) -> dict:
     await _settle_card(season, week, regrade=regrade)
     return {"season": season, "week": week,
             "settled": sum(counts.values()), "waiting_on_kickoff": waiting,
-            "alt_parlays_settled": alt_settled, **counts}
+            "alt_parlays_settled": alt_settled, "placed_settled": placed_settled,
+            **counts}
 
 
 def _leg_result(leg: dict, actual: Optional[float]) -> Optional[str]:

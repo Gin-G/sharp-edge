@@ -8,12 +8,12 @@
    */
   import { onMount, onDestroy } from 'svelte';
   import { peek } from '$lib/cache';
-  import { getNflRecommendations } from '$lib/api';
+  import { getNflRecommendations, getNflPlaced, placeNflBet, setNflPlacedStake, undoNflPlaced } from '$lib/api';
   import {
     NFL_CACHE_KEY, load as loadScreen, initialState,
     fmtOdds, fmtPct, fmtSigned, fmtKickoff, MARKET_LABEL, shortEvent,
   } from '$lib/nflScreen';
-  import type { NflScreen, NflAltKind, NflAltParlay, NflRecommendations, NflLedgerBucket } from '$lib/types';
+  import type { NflScreen, NflAltKind, NflAltParlay, NflRecommendations, NflLedgerBucket, NflPlacedBet } from '$lib/types';
 
   let s = initialState(peek<NflScreen>(NFL_CACHE_KEY));
   $: ({ data, loading, error, warming, warmingElapsed } = s);
@@ -27,7 +27,46 @@
   onMount(() => {
     go();
     getNflRecommendations().then((r) => (rec = r)).catch(() => (rec = null));
+    loadPlaced();
   });
+
+  // What was actually bet. The tickets above rebuild with the board until a
+  // leg locks; a placed bet is written once, as it was on screen, and kept.
+  let placed: NflPlacedBet[] = [];
+  let placeError = '';
+  function loadPlaced() {
+    getNflPlaced().then((r) => (placed = r.bets)).catch(() => (placed = []));
+  }
+  $: thisWeek = placed.filter((b) => data && b.season === data.season && b.week === data.week);
+  const sig = (legs: { player: string; market: string; line: number }[]) =>
+    legs.map((l) => `${l.player}|${l.market}|${l.line}`).sort().join('~');
+  $: placedSigs = new Set(thisWeek.map((b) => sig(b.legs)));
+
+  async function place(k: NflAltKind, t: NflAltParlay) {
+    if (!data || placedSigs.has(sig(t.legs))) return;
+    placeError = '';
+    try {
+      await placeNflBet({
+        season: data.season, week: data.week,
+        label: k === 'lotto' ? 'Alt lotto' : 'Alt double-up', source: `alt:${k}`,
+        american: t.american, stake: t.stake, model_p: t.model_p,
+        legs: t.legs.map((l) => ({ ...l })),
+      });
+      loadPlaced();
+    } catch (e) {
+      placeError = e instanceof Error ? e.message : String(e);
+    }
+  }
+  async function changeStake(b: NflPlacedBet, v: string) {
+    const stake = parseFloat(v);
+    if (!(stake > 0) || stake === b.stake) return;
+    await setNflPlacedStake(b.id, stake).catch(() => {});
+    loadPlaced();
+  }
+  async function undo(b: NflPlacedBet) {
+    await undoNflPlaced(b.id).catch(() => {});
+    loadPlaced();
+  }
   onDestroy(() => cancel?.());
 
   const KINDS: { key: NflAltKind; title: string; blurb: string }[] = [
@@ -105,6 +144,42 @@
       Record: {recLine(parlayRec)}.
     </div>
 
+    <section class="card p-0 overflow-hidden">
+      <div class="px-5 py-3 border-b border-border flex items-baseline justify-between flex-wrap gap-2">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Your bets this week</h2>
+        <span class="text-xs text-slate-500">recorded when you open a ticket on FanDuel; kept as placed</span>
+      </div>
+      {#if placeError}<div class="px-5 py-2 text-xs text-red-300">{placeError}</div>{/if}
+      {#if thisWeek.length === 0}
+        <div class="px-5 py-4 text-sm text-slate-500">Nothing placed yet this week.</div>
+      {:else}
+        <div class="divide-y divide-border/50">
+          {#each thisWeek as b (b.id)}
+            <div class="px-5 py-3 text-sm">
+              <div class="flex items-center gap-3 flex-wrap">
+                <span class="text-slate-100 font-medium">{b.label ?? 'Parlay'} {fmtOdds(b.odds)}</span>
+                <span class="text-xs px-1.5 py-0.5 rounded border border-border {b.result === 'WIN' ? 'text-emerald-300' : b.result === 'LOSS' ? 'text-rose-300' : 'text-slate-400'}">{b.result ?? 'PENDING'}{#if b.actual} · {b.actual}{/if}</span>
+                <span class="ml-auto flex items-center gap-2 text-xs text-slate-400">
+                  {#if b.result}
+                    {b.stake}u · <span class={b.units != null && b.units >= 0 ? 'text-emerald-400' : 'text-red-400'}>{b.units != null ? `${fmtSigned(b.units, 2)}u` : ''}</span>
+                  {:else}
+                    stake
+                    <input type="number" min="0.01" step="0.1" value={b.stake}
+                      class="w-16 px-1.5 py-0.5 rounded bg-surface-700 text-slate-200 text-right"
+                      on:change={(e) => changeStake(b, e.currentTarget.value)} />u
+                    <button class="px-2 py-0.5 rounded bg-surface-700 hover:bg-surface-600" on:click={() => undo(b)}>undo</button>
+                  {/if}
+                </span>
+              </div>
+              <div class="text-xs text-slate-500 mt-1">
+                {b.legs.map((l) => `${l.player} ${l.threshold ?? l.line}${l.threshold ? '+' : ''} ${MARKET_LABEL[l.market] ?? l.market} (${fmtOdds(l.odds)})`).join(' · ')}
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
     <div class="grid gap-4 lg:grid-cols-2">
       {#each KINDS as k}
         {@const t = ticket(k.key)}
@@ -150,11 +225,21 @@
               </table>
             </div>
             {#if t.betslip_url}
-              <div class="px-5 py-3 border-t border-border flex gap-2">
+              {@const done = placedSigs.has(sig(t.legs))}
+              <div class="px-5 py-3 border-t border-border flex gap-2 flex-wrap items-center">
                 <a href={t.betslip_url} target="_blank" rel="noopener"
+                   on:click={() => t && place(k.key, t)}
+                   title="Opens the slip on FanDuel and records this ticket as placed"
                    class="px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-500">Open on FanDuel</a>
                 <button class="px-3 py-1.5 rounded-lg text-xs font-medium bg-surface-700 text-slate-300 hover:bg-surface-600"
                         on:click={() => t?.betslip_url && copy(k.key, t.betslip_url)}>{copied === k.key ? 'Copied' : 'Copy link'}</button>
+                {#if done}
+                  <span class="text-xs text-emerald-400">✓ placed — in Your bets</span>
+                {:else}
+                  <button class="px-3 py-1.5 rounded-lg text-xs font-medium bg-surface-700 text-slate-300 hover:bg-surface-600"
+                          title="Record this ticket as placed without opening FanDuel"
+                          on:click={() => t && place(k.key, t)}>I placed this</button>
+                {/if}
               </div>
             {/if}
           {/if}
