@@ -262,9 +262,10 @@ def test_the_anchored_lotto_is_short_legs_with_at_most_two_capped_anchors():
     used = [l for l in t["legs"] if l.get("anchor")]
     assert len(used) <= 2 and all(100 <= l["odds"] <= 400 for l in used)
     assert len({l["fd_event_id"] for l in t["legs"]}) == t["leg_count"]
-    # The official lotto never takes an anchor: on these rungs alone it cannot
-    # reach 1000x, which the anchors would have carried it to.
-    assert altparlay.build(short, "lotto", anchors) is None
+    # The official lotto never takes an anchor: on these rungs alone it gets
+    # only as close as it can, where the anchors would have carried it past.
+    lotto = altparlay.build(short, "lotto", anchors)
+    assert lotto["short_of_target"] and not any(l.get("anchor") for l in lotto["legs"])
 
 
 def test_a_moneyline_anchor_finds_its_game_through_either_team():
@@ -414,3 +415,23 @@ def test_the_confidence_model_rewards_cushion_and_role():
     assert hi > lo
     assert altparlay.confidence_p(_role_rung(snap_min=0.9, ts_mean=0.28)) > \
         altparlay.confidence_p(_role_rung(snap_min=0.5, ts_mean=0.12))
+
+
+def test_the_role_lotto_gets_as_close_as_the_slate_allows():
+    # Ten -110 legs pay ~617x: short of 1000x, over the 250x floor.
+    legs = [_rung(key=f"p{i}", fd_event_id=f"g{i}", odds=-110, p_cal=0.55) for i in range(10)]
+    t = altparlay.build(legs, "lotto")
+    assert t["short_of_target"] and 250 <= t["decimal_odds"] < 1000
+    assert altparlay.build(legs[:5], "lotto") is None             # ~25x: under the floor
+    assert altparlay.build(legs, "lotto_streak") is None          # the control has no floor
+
+
+def test_two_per_game_takes_different_players_and_marks_the_price():
+    legs = [_rung(key=f"p{g}{i}", fd_event_id=f"g{g}", odds=-110, p_cal=0.55)
+            for g in range(6) for i in range(2)]
+    legs.append(_rung(key="p00", fd_event_id="g0", odds=-120, p_cal=0.56, line=34.5))
+    t = altparlay.build(legs, "lotto_multi")
+    # 1000x at -110 takes eleven legs; six games can only give them two apiece.
+    assert t["decimal_odds"] >= 1000 and t["leg_count"] == 11 and t["price_estimated"]
+    assert len({l["key"] for l in t["legs"]}) == 11               # one rung per player
+    assert not altparlay.build(legs, "double_up")["price_estimated"]

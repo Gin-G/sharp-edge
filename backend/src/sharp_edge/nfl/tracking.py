@@ -974,6 +974,7 @@ async def _settle_paper(season: int, week: int, actuals: dict, played: set) -> i
 
 PAPER_LABELS = {"double_up": "Double-up", "lotto": "Role lotto",
                 "lotto_streak": "Streak lotto (old rule)",
+                "lotto_multi": "Role lotto, 2 per game (price est.)",
                 "short_stack": "Short stack", "anchored": "Anchored lotto"}
 
 

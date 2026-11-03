@@ -797,6 +797,7 @@ export interface NflAltParlay {
   kind: NflAltKind; legs: NflAltRung[]; leg_count: number;
   decimal_odds: number; american: number; model_p: number;
   stake: number; to_win: number; ev: number; betslip_url: string | null;
+  short_of_target?: boolean; price_estimated?: boolean;
 }
 
 export interface NflPlacedLeg {

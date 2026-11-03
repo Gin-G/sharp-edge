@@ -202,6 +202,11 @@
               {/if}
             </div>
           {:else}
+            {#if t.short_of_target}
+              <div class="px-5 py-2 text-xs text-amber-300/90 border-b border-border/50">
+                This slate can't reach 1000x from qualifying legs, so this is as close as it gets ({Math.round(t.decimal_odds).toLocaleString()}x).
+              </div>
+            {/if}
             <div class="px-5 py-3 grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm border-b border-border/50">
               <div><div class="text-xs text-slate-500">Legs</div><div class="tabular-nums text-slate-200">{t.leg_count}</div></div>
               <div><div class="text-xs text-slate-500">Chance</div><div class="tabular-nums text-slate-200">{fmtChance(t.model_p)}</div></div>

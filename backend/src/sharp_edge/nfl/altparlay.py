@@ -98,7 +98,8 @@ CONF_KEEP = 0.5
 # floor and reaches further up the ladder for payout.
 KINDS = {
     "double_up": {"target": 2.0, "odds": (-500, 150), "min_legs": 2, "stake": 1.0},
-    "lotto": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2, "stake": 0.1},
+    "lotto": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2, "stake": 0.1,
+              "floor": 250.0},
 }
 # FanDuel's own parlay limit.
 MAX_LEGS = 25
@@ -123,6 +124,11 @@ PAPER = {
     # The lotto as it was built through week 8 — the 3-of-4 streak rule, any
     # role — kept on paper as the control for the role lotto.
     "lotto_streak": {"target": 1000.0, "odds": (-500, 400), "min_legs": 2, "stake": 0.1},
+    # The role lotto with up to two players from a game, for 20-leg tickets.
+    # FanDuel prices same-game legs as a same-game parlay, so its odds here are
+    # an estimate (the product of the legs) until a betslip quotes it.
+    "lotto_multi": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2, "stake": 0.1,
+                    "per_game": 2},
     "short_stack": {"target": None, "odds": (-250, -110), "min_legs": 4, "stake": 0.1},
     "anchored": {"target": 1000.0, "odds": (-300, -100), "min_legs": 2, "stake": 0.1,
                  "max_anchors": 2, "anchor_odds": (100, 400)},
@@ -323,16 +329,49 @@ def role_candidates(rungs: Iterable[dict]) -> list[dict]:
     return out
 
 
+def _game_options(legs: list[dict], per_game: int, step: float) -> list[tuple]:
+    """Every way to take 1..``per_game`` legs from one game, one rung per player.
+
+    As ``(payout bucket, legs)``, keeping only the likeliest option per bucket
+    and leg count — the rest can never be part of the best ticket.
+    """
+    from itertools import combinations
+
+    best: dict = {}
+    for n in range(1, per_game + 1):
+        for combo in combinations(legs, n):
+            if len({c.get("key") for c in combo}) < n:
+                continue
+            b = sum(math.floor(math.log(_decimal(c["odds"])) / step) for c in combo)
+            lp = sum(math.log(c["p_cal"]) for c in combo)
+            a = sum(bool(c.get("anchor")) for c in combo)
+            k = (b, n, a)
+            if k not in best or lp > best[k][0]:
+                best[k] = (lp, combo)
+    return [(b, n, a, lp, combo) for (b, n, a), (lp, combo) in best.items()]
+
+
 def build(cands: Iterable[dict], kind: str,
           anchors: Iterable[dict] = ()) -> Optional[dict]:
-    """The likeliest ticket that reaches ``kind``'s payout, one leg per game.
+    """The likeliest ticket that reaches ``kind``'s payout.
 
     Exact, not greedy: a knapsack over games, maximising the summed log
     probability subject to the summed log payout reaching the target. Greedy
     by probability-per-payout overshot the week-8 double-up to +283 — a 24%
     ticket built to be a coin flip — because the last leg it added was the
-    longest price it had. One leg per game keeps the legs independent, which is
-    what makes multiplying their chances honest.
+    longest price it had.
+
+    One leg per game unless the strategy's ``per_game`` says more. One per
+    game keeps the legs independent, which is what makes multiplying their
+    chances — and their prices — honest: FanDuel prices two legs from one game
+    as a same-game parlay, at its own correlated price, so a ticket built with
+    ``per_game`` > 1 carries ``price_estimated`` and its odds are the product
+    of the legs, not a quote.
+
+    A strategy with a ``floor`` that cannot reach its target on this slate
+    gets as close as it can instead: the likeliest ticket within a quarter of
+    the highest payout the slate allows, if that is at least the floor. It is
+    marked ``short_of_target``.
 
     Payout is bucketed by flooring each leg's log-decimal, so a ticket that
     reaches the target bucket is guaranteed to reach the target itself.
@@ -343,6 +382,7 @@ def build(cands: Iterable[dict], kind: str,
     spec = STRATEGIES[kind]
     lo, hi = spec["odds"]
     max_anchors = spec.get("max_anchors", 0)
+    per_game = spec.get("per_game", 1)
     by_game: dict = {}
     for c in cands:
         if (c.get("odds") is not None and lo <= c["odds"] <= hi
@@ -360,26 +400,34 @@ def build(cands: Iterable[dict], kind: str,
     # (payout bucket, legs, anchors) -> (log probability, legs chosen)
     dp: dict = {(0, 0, 0): (0.0, ())}
     for legs in by_game.values():
+        options = _game_options(legs, per_game, step)
         nxt = dict(dp)
         for (b, k, a), (v, chosen) in dp.items():
-            if k >= MAX_LEGS:
-                continue
-            for c in legs:
-                na = a + bool(c.get("anchor"))
-                if na > max_anchors:
+            for ob, on, oa, olp, combo in options:
+                if k + on > MAX_LEGS or a + oa > max_anchors:
                     continue
-                key = (min(goal, b + math.floor(math.log(_decimal(c["odds"])) / step)),
-                       k + 1, na)
-                cand = (v + math.log(c["p_cal"]), chosen + (c,))
+                key = (min(goal, b + ob), k + on, a + oa)
+                cand = (v + olp, chosen + combo)
                 if key not in nxt or cand[0] > nxt[key][0]:
                     nxt[key] = cand
         dp = nxt
     done = [val for (b, k, a), val in dp.items()
             if b >= goal and k >= spec["min_legs"]]
+    short = False
+    if not done and spec.get("floor"):
+        reach = [(b, val) for (b, k, a), val in dp.items() if k >= spec["min_legs"]]
+        top = max((b for b, _ in reach), default=0)
+        if top >= math.log(spec["floor"]) / step:
+            near = top - math.log(1.25) / step
+            done = [val for b, val in reach if b >= near]
+            short = True
     if not done:
         return None
     _, chosen = max(done, key=lambda t: t[0])
-    return summarise(sorted(chosen, key=lambda c: c.get("kickoff") or ""), kind)
+    out = summarise(sorted(chosen, key=lambda c: c.get("kickoff") or ""), kind)
+    out["short_of_target"] = short
+    out["price_estimated"] = len({c.get("fd_event_id") for c in chosen}) < len(chosen)
+    return out
 
 
 def stack(cands: Iterable[dict], kind: str = "short_stack") -> Optional[dict]:
@@ -450,6 +498,7 @@ def build_paper(cands: list[dict], role: list[dict], anchors: list[dict]) -> dic
     keeps the old rule as the control.
     """
     return {"lotto_streak": build(cands, "lotto_streak"),
+            "lotto_multi": build(role, "lotto_multi"),
             "short_stack": stack(role, "short_stack"),
             "anchored": build(role, "anchored", anchors)}
 
