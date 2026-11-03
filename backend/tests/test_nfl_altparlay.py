@@ -357,3 +357,24 @@ def test_a_days_ticket_stands_once_a_leg_has_locked(tmp_path):
             await db.close()
 
     asyncio.run(run())
+
+
+def test_a_player_who_played_and_caught_nothing_loses_rather_than_voids(monkeypatch):
+    # Week 8: Isaac TeSlaa, 26 snaps, no target, so no stats row. The book
+    # grades his 5+ yards a loss; only a player who did not play is void.
+    import pandas as pd
+
+    stats = pd.DataFrame([{"player_display_name": "Some Receiver", "team": "DET",
+                           "week": 8, "season_type": "REG", "receiving_yards": 40.0}])
+    snaps = pd.DataFrame([
+        {"player": "Isaac TeSlaa", "team": "DET", "week": 8, "game_type": "REG",
+         "offense_snaps": 26.0, "st_snaps": 0.0},
+        {"player": "Healthy Scratch", "team": "DET", "week": 8, "game_type": "REG",
+         "offense_snaps": 0.0, "st_snaps": 0.0}])
+    monkeypatch.setattr(pd, "read_parquet",
+                        lambda url: snaps if "snap_counts" in url else stats)
+    actuals, played = tracking._load_actuals(2026, 8)
+    leg = {"key": "isaac teslaa", "team": "DET", "market": "receiving_yards",
+           "line": 4.5, "side": "OVER", "odds": -450}
+    assert tracking._grade_leg(leg, actuals, played) == ("LOSS", 0.0)
+    assert tracking._grade_leg({**leg, "key": "healthy scratch"}, actuals, played)[0] == "VOID"

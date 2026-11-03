@@ -74,6 +74,10 @@ NFLVERSE_WEEKLY = (
     "https://github.com/nflverse/nflverse-data/releases/download/stats_player/"
     "stats_player_week_{season}.parquet"
 )
+NFLVERSE_SNAPS = (
+    "https://github.com/nflverse/nflverse-data/releases/download/snap_counts/"
+    "snap_counts_{season}.parquet"
+)
 
 _db = None
 
@@ -482,16 +486,32 @@ def _load_actuals(season: int, week: int):
     # incrementally — a Thursday game lands days before Sunday's — so a
     # player with no row is only "did not play" if his *team* is in the file.
     played = {t for t in df.team.dropna().unique() if isinstance(t, str)}
+    # And a player who took the field but recorded nothing has no stats row
+    # either — a tight end on 26 snaps with no target. The book grades his
+    # over a loss; only a player who did not play is void. Week 8 voided four
+    # such legs, and turned a lost double-up into a win. Snap counts say who
+    # played; such a player settles on an empty row, every stat zero.
+    try:
+        snaps = pd.read_parquet(NFLVERSE_SNAPS.format(season=season))
+        snaps = snaps[(snaps.week == week) & (snaps.game_type == "REG")]
+        on = snaps[(snaps.offense_snaps.fillna(0) > 0) | (snaps.st_snaps.fillna(0) > 0)]
+        for name, team in zip(on.player, on.team):
+            key = norm_name(name)
+            if key not in out and team in played:
+                out[key] = {}
+    except Exception as e:
+        logger.warning("[nfl-track] snap counts unavailable for %s wk%s: %s",
+                       season, week, e)
     return out, played
 
 
 def _result_for(pick: dict, row) -> tuple[Optional[str], Optional[float]]:
     """WIN / LOSS / PUSH for one pick, and the actual value.
 
-    A player with no row for the week did not record a stat — inactive, or
-    never targeted. That is a VOID rather than a LOSS: the sportsbook voids the
-    prop, so counting it as a loss would make the record worse than the bet
-    actually was. It is handled by the caller, which knows the row is missing.
+    A player with no row for the week did not play: ``_load_actuals`` gives
+    everyone who took a snap a row, zeros if he recorded nothing. That is a
+    VOID rather than a LOSS, as the sportsbook voids the prop. It is handled by
+    the caller, which knows the row is missing.
     """
     if row is None:
         return None, None
