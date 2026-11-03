@@ -415,7 +415,10 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             })
             # The same player's alt ladder, priced off the same adjusted
             # projection, centring and shrink as the main line above.
-            last4 = (recent.get(key) or {}).get(market) or []
+            mine = recent.get(key) or {}
+            last5 = mine.get(market) or []
+            last4 = last5[-altparlay.RECORD_GAMES:]
+            role = mine.get("_role") if (mine.get("_role") or {}).get("team") == p.get("team") else None
             for rung in fd.ladder(market, key):
                 rfair = altparlay.rung_fair(rung.over, ln.over, fair)
                 if rfair is None:
@@ -436,6 +439,10 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                     "odds": rung.over, "adjusted": round(adjusted, 1),
                     "last4": last4,
                     "hits4": sum(1 for v in last4 if v > rung.line),
+                    "last5": last5,
+                    "hits5": sum(1 for v in last5 if v > rung.line),
+                    **{k: (role or {}).get(k) for k in ("snap_min", "ts_mean",
+                                                        "tgt_mean", "tgt_cv")},
                     "fd_market_id": rung.market_id,
                     "over_selection_id": rung.over_selection,
                     "role_conflict_verdict": None,
@@ -526,7 +533,9 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
         r["role_conflict_verdict"] = verdicts.get((r["key"], r["market"]))
     if not proj.preseason:
         cands = altparlay.candidates(board.alt_rungs)
-        board.alt_parlays = {k: altparlay.build(cands, k) for k in altparlay.KINDS}
+        role = altparlay.role_candidates(board.alt_rungs)
+        board.alt_parlays = {"double_up": altparlay.build(cands, "double_up"),
+                             "lotto": altparlay.build(role, "lotto")}
         # The paper strategies, recorded daily beside them. A moneyline row has
         # no FanDuel event id, so its game is found through either team's props.
         game_of_team: dict = {}
@@ -535,7 +544,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 game_of_team.setdefault(r["team"], r["fd_event_id"])
         anchors = altparlay.anchor_legs(card_mod.td_suggestions(board.tds),
                                         board.game_model, game_of_team)
-        board.alt_parlays.update(altparlay.build_paper(cands, anchors))
+        board.alt_parlays.update(altparlay.build_paper(cands, role, anchors))
     board.props.sort(key=_prop_rank)
     board.tds.sort(key=lambda r: -(r.get("true_edge_pts")
                                    if r.get("true_edge_pts") is not None else -99))
@@ -826,11 +835,15 @@ def as_payload(board: NFLBoard) -> dict:
             for k, v in board.alt_parlays.items()
         },
         "alt_candidates": altparlay.candidates(board.alt_rungs),
+        "role_candidates": altparlay.role_candidates(board.alt_rungs),
         "alt_rules": {
             "rungs_priced": len(board.alt_rungs),
             "record_games": altparlay.RECORD_GAMES, "min_hits": altparlay.MIN_HITS,
             "min_edge_pts": card_mod.MIN_EDGE_PTS, "max_edge_pts": card_mod.MAX_EDGE_PTS,
             "kinds": altparlay.KINDS, "max_legs": altparlay.MAX_LEGS,
+            "role": {"games": altparlay.ROLE_GAMES, "min_hits": altparlay.ROLE_MIN_HITS,
+                     "snap_min": altparlay.ROLE_SNAP_MIN, "ts_min": altparlay.ROLE_TS_MIN,
+                     "min_edge": altparlay.CONF_MIN_EDGE},
         },
         "tds": board.tds,
         "td_picks": card_mod.td_suggestions(board.tds),

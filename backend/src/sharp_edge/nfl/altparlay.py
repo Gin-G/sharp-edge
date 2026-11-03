@@ -49,10 +49,48 @@ NFLVERSE_WEEKLY = (
     "https://github.com/nflverse/nflverse-data/releases/download/stats_player/"
     "stats_player_week_{season}.parquet"
 )
+NFLVERSE_SNAPS = (
+    "https://github.com/nflverse/nflverse-data/releases/download/snap_counts/"
+    "snap_counts_{season}.parquet"
+)
 
 # A rung counts as "has been hitting" at three of the player's last four.
 RECORD_GAMES = 4
 MIN_HITS = 3
+
+# --- the role lotto ----------------------------------------------------------
+#
+# The lotto's legs, from week 9 on: players in a steady role, at rungs their
+# own last five games and opportunity say they clear, priced above the book.
+#
+# Week 8's lotto drew backups — 26-snap tight ends at 5+ yards — because the
+# streak rule cannot tell a role from a run of short rungs. Measured on every
+# 2024-26 WR/TE/RB player-week at FanDuel's rung spacing (scripts in
+# EXPERIMENTS_NFL.md, "the role lotto"):
+#
+# * Cushion — median of the last five over the rung — carries most of it; the
+#   five-game streak adds to it, and so do target share and the snap floor.
+#   Among legs streak and cushion alone rate 60-75%, the low-role quarter hit
+#   59% and the steady-role quarter 70%.
+# * The logistic fit below, trained on 2024-25, is calibrated on 2026 it never
+#   saw: said 65 / hit 66, said 75 / hit 75, said 85 / hit 85.
+# * Against week 8's archived ladders (the only priced week), the rungs where
+#   our model saw an edge on a low-role player hit 29%; the same edge on a
+#   player over the role floor hit 50% against 52% implied. The book knows who
+#   is a backup. So the floor is a rule, not a weight.
+ROLE_GAMES = 5
+ROLE_MIN_HITS = 4
+ROLE_SNAP_MIN = 0.50          # every one of his last five games
+ROLE_TS_MIN = 0.12            # average target share over them
+CONF_INTERCEPT = -1.835
+CONF_COEF = {"hits5": 0.2313, "lcush": 1.3499, "rec": 0.4416, "tgt_mean": -0.0344,
+             "snap_min": 0.4644, "ts_mean": 3.1899, "tgt_cv": 0.3594}
+# Edge over the rung's fair price, on the confidence model, before a leg counts.
+CONF_MIN_EDGE = 0.03
+# The confidence model is calibrated on outcomes, not against the book; on the
+# one priced week its edges came in at about half. Legs are priced halfway
+# (in logits) between the book's fair price and the model.
+CONF_KEEP = 0.5
 
 # Payout targets, as decimal odds, and the price window each draws legs from.
 # The double-up stops at -500 because shorter than that the book prices the
@@ -60,7 +98,7 @@ MIN_HITS = 3
 # floor and reaches further up the ladder for payout.
 KINDS = {
     "double_up": {"target": 2.0, "odds": (-500, 150), "min_legs": 2, "stake": 1.0},
-    "lotto": {"target": 1000.0, "odds": (-500, 400), "min_legs": 2, "stake": 0.1},
+    "lotto": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2, "stake": 0.1},
 }
 # FanDuel's own parlay limit.
 MAX_LEGS = 25
@@ -82,6 +120,9 @@ MAX_LEGS = 25
 #                uncapped, the build reaches for +1600 touchdowns, where the
 #                model's untested TD edge is largest, and five legs carry it.
 PAPER = {
+    # The lotto as it was built through week 8 — the 3-of-4 streak rule, any
+    # role — kept on paper as the control for the role lotto.
+    "lotto_streak": {"target": 1000.0, "odds": (-500, 400), "min_legs": 2, "stake": 0.1},
     "short_stack": {"target": None, "odds": (-250, -110), "min_legs": 4, "stake": 0.1},
     "anchored": {"target": 1000.0, "odds": (-300, -100), "min_legs": 2, "stake": 0.1,
                  "max_anchors": 2, "anchor_odds": (100, 400)},
@@ -101,10 +142,21 @@ def _american(dec: float) -> int:
 
 
 def recent_values(season: int, week: int, force: bool = False) -> dict:
-    """``{player_key: {market: [last four values]}}`` from games before ``week``.
+    """``{player_key: {market: [last five values], "_role": {...} | None}}``.
 
-    Reaches into the prior season for players with fewer than four games this
-    year, the same way the trailing form the projections use spans seasons.
+    Built from games before ``week``, reaching into the prior season for
+    players with fewer than five this year, the same way the trailing form the
+    projections use spans seasons.
+
+    **A game is a game he played, not a game he recorded a stat in.** The log
+    is snap counts joined to the box score, with zeros where he took the field
+    and did nothing. Built from box-score rows alone, a backup's "4 for 4"
+    skipped the weeks he was on the field for 20 snaps and never targeted.
+
+    ``_role`` is his opportunity over the same five games — the snap floor,
+    target share, targets a game and how steady they were — and None unless all
+    five were for his current team (a mover's old role says little about his
+    new one) and every one has a snap count.
     """
     key = (season, week)
     now = time.time()
@@ -115,6 +167,7 @@ def recent_values(season: int, week: int, force: bool = False) -> dict:
 
     from .names import norm_name
 
+    stats_cols = ["receiving_yards", "receptions", "rushing_yards", "targets", "target_share"]
     frames = []
     for s in (season - 1, season):
         try:
@@ -125,16 +178,40 @@ def recent_values(season: int, week: int, force: bool = False) -> dict:
         df = df[df.season_type == "REG"]
         if s == season:
             df = df[df.week < week]
-        frames.append(df)
+        df = df.assign(key=df.player_display_name.map(norm_name), season=s)
+        st = df[["key", "season", "week", "team"] + stats_cols]
+        try:
+            sn = pd.read_parquet(NFLVERSE_SNAPS.format(season=s))
+            sn = sn[(sn.game_type == "REG") & (sn.offense_snaps.fillna(0) > 0)]
+            if s == season:
+                sn = sn[sn.week < week]
+            sn = sn.assign(key=sn.player.map(norm_name), season=s)[
+                ["key", "season", "week", "team", "offense_pct"]]
+        except Exception as e:
+            logger.warning("[nfl-alt] snap counts %s unavailable: %s", s, e)
+            sn = pd.DataFrame(columns=["key", "season", "week", "team", "offense_pct"])
+        g = st.merge(sn, on=["key", "season", "week"], how="outer", suffixes=("", "_snap"))
+        g["team"] = g["team"].fillna(g.pop("team_snap"))
+        g[stats_cols] = g[stats_cols].fillna(0.0)
+        frames.append(g)
     if not frames:
         return {}
     df = pd.concat(frames).sort_values(["season", "week"])
-    df["key"] = df.player_display_name.map(norm_name)
     out: dict = {}
     for k, g in df.groupby("key"):
-        g = g.tail(RECORD_GAMES)
-        out[k] = {m: [float(v) if v == v else 0.0 for v in g[m]]
-                  for m in ("receiving_yards", "receptions", "rushing_yards")}
+        g = g.tail(ROLE_GAMES)
+        entry = {m: [float(v) for v in g[m]]
+                 for m in ("receiving_yards", "receptions", "rushing_yards")}
+        role = None
+        if len(g) == ROLE_GAMES and g.team.nunique() == 1 and g.offense_pct.notna().all():
+            t = g.targets.astype(float)
+            role = {"team": g.team.iloc[-1],
+                    "snap_min": round(float(g.offense_pct.min()), 3),
+                    "ts_mean": round(float(g.target_share.mean()), 3),
+                    "tgt_mean": round(float(t.mean()), 2),
+                    "tgt_cv": round(float(t.std() / max(t.mean(), 0.1)), 3)}
+        entry["_role"] = role
+        out[k] = entry
     _cache.update({"key": key, "values": out, "fetched_at": now})
     return out
 
@@ -190,6 +267,59 @@ def candidates(rungs: Iterable[dict]) -> list[dict]:
         if card_mod.is_locked(r):
             continue                # its game is inside the lock: not a leg we can add
         out.append(r)
+    return out
+
+
+def role_ok(r: dict) -> bool:
+    """Over the role floor in every one of his last five games."""
+    return (r.get("snap_min") is not None and r["snap_min"] >= ROLE_SNAP_MIN
+            and (r.get("ts_mean") or 0) >= ROLE_TS_MIN)
+
+
+def confidence_p(r: dict) -> Optional[float]:
+    """The chance he clears the rung, from his last five games and his role.
+
+    None without five games for his current team.
+    """
+    last5 = r.get("last5") or []
+    thr = r.get("threshold")
+    if len(last5) < ROLE_GAMES or not thr or r.get("snap_min") is None:
+        return None
+    med = sorted(last5)[len(last5) // 2]
+    x = {"hits5": sum(1 for v in last5 if v >= thr),
+         "lcush": math.log(min(10.0, max(0.05, med / thr))),
+         "rec": 1.0 if r.get("market") == "receptions" else 0.0,
+         "tgt_mean": r.get("tgt_mean") or 0.0, "snap_min": r["snap_min"],
+         "ts_mean": r.get("ts_mean") or 0.0, "tgt_cv": r.get("tgt_cv") or 0.0}
+    z = CONF_INTERCEPT + sum(CONF_COEF[k] * v for k, v in x.items())
+    return 1 / (1 + math.exp(-z))
+
+
+def role_candidates(rungs: Iterable[dict]) -> list[dict]:
+    """The role lotto's legs: a steady role, a record, and a price we beat.
+
+    Each comes back with ``p_cal`` replaced by the confidence chance read
+    toward the book (CONF_KEEP), the props model's own kept as ``p_props``.
+    The props model is not asked to see an edge — on alt rungs it has not
+    earned that — only not to disagree.
+    """
+    out = []
+    for r in rungs:
+        if r.get("market") not in model.BETTABLE or not role_ok(r):
+            continue
+        if (r.get("hits5") or 0) < ROLE_MIN_HITS:
+            continue
+        if r.get("role_conflict_verdict") == "market" or not card_mod._available(r):
+            continue
+        if card_mod.is_locked(r) or (r.get("edge_pts") or 0) < 0:
+            continue
+        pc, fair = confidence_p(r), r.get("fair")
+        if pc is None or not fair or not (0 < fair < 1) or pc - fair < CONF_MIN_EDGE:
+            continue
+        lf = math.log(fair / (1 - fair))
+        z = lf + CONF_KEEP * (math.log(pc / (1 - pc)) - lf)
+        out.append({**r, "p_props": r.get("p_cal"), "p_conf": round(pc, 4),
+                    "p_cal": round(1 / (1 + math.exp(-z)), 4)})
     return out
 
 
@@ -312,10 +442,16 @@ def anchor_legs(td_picks: Iterable[dict], game_model: Iterable[dict],
     return out
 
 
-def build_paper(cands: list[dict], anchors: list[dict]) -> dict:
-    """Every paper strategy for this board. None where the slate cannot build it."""
-    return {"short_stack": stack(cands, "short_stack"),
-            "anchored": build(cands, "anchored", anchors)}
+def build_paper(cands: list[dict], role: list[dict], anchors: list[dict]) -> dict:
+    """Every paper strategy for this board. None where the slate cannot build it.
+
+    ``cands`` are the streak-rule legs, ``role`` the role lotto's; the short
+    stack and the anchored lotto draw from the role legs, and the streak lotto
+    keeps the old rule as the control.
+    """
+    return {"lotto_streak": build(cands, "lotto_streak"),
+            "short_stack": stack(role, "short_stack"),
+            "anchored": build(role, "anchored", anchors)}
 
 
 def summarise(legs: list[dict], kind: str) -> dict:

@@ -787,6 +787,10 @@ export interface NflAltRung {
   line: number; threshold: number; odds: number; implied: number; fair: number;
   model_p: number; p_cal: number; edge_pts: number;
   last4: number[]; hits4: number; avail: string | null;
+  // The role lotto's view: five games, his opportunity over them, and the
+  // confidence model's chance (p_cal is then that chance read toward the book).
+  last5?: number[]; hits5?: number; snap_min?: number | null; ts_mean?: number | null;
+  tgt_mean?: number | null; p_conf?: number; p_props?: number;
 }
 
 export interface NflAltParlay {

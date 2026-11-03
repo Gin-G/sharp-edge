@@ -48,7 +48,7 @@
     try {
       await placeNflBet({
         season: data.season, week: data.week,
-        label: k === 'lotto' ? 'Alt lotto' : 'Alt double-up', source: `alt:${k}`,
+        label: k === 'lotto' ? 'Role lotto' : 'Alt double-up', source: `alt:${k}`,
         american: t.american, stake: t.stake, model_p: t.model_p,
         legs: t.legs.map((l) => ({ ...l })),
       });
@@ -72,8 +72,8 @@
   const KINDS: { key: NflAltKind; title: string; blurb: string }[] = [
     { key: 'double_up', title: 'Double-up',
       blurb: 'The likeliest ticket that pays at least even money.' },
-    { key: 'lotto', title: 'Lotto',
-      blurb: 'The likeliest ticket that pays at least 1000x. Needs a full slate to reach.' },
+    { key: 'lotto', title: 'Role lotto',
+      blurb: 'The likeliest 1000x ticket from players in a steady role: on the field for at least half the snaps in each of their last five games, with 12%+ of the targets, clearing the rung in 4 of 5, at a price our role model beats.' },
   ];
 
   $: rules = data?.alt_rules;
@@ -215,7 +215,13 @@
                     <tr class="border-t border-border/40">
                       <td class="px-5 py-2">
                         <div class="text-slate-200">{l.player} {l.threshold}+ {MARKET_LABEL[l.market] ?? l.market}</div>
-                        <div class="text-xs text-slate-500">{shortEvent(l.event)} · {fmtKickoff(l.kickoff)} · last 4: {last4(l.last4)}</div>
+                        <div class="text-xs text-slate-500">{shortEvent(l.event)} · {fmtKickoff(l.kickoff)} ·
+                          {#if l.last5 && l.snap_min != null}
+                            last 5: {last4(l.last5)} · snaps ≥{Math.round(100 * l.snap_min)}% · {Math.round(100 * (l.ts_mean ?? 0))}% of targets
+                          {:else}
+                            last 4: {last4(l.last4)}
+                          {/if}
+                        </div>
                       </td>
                       <td class="px-2 py-2 text-right text-slate-300">{fmtOdds(l.odds)}</td>
                       <td class="px-5 py-2 text-right text-slate-400" title="Record-calibrated chance">{fmtPct(l.p_cal, 0)}</td>

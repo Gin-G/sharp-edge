@@ -378,3 +378,39 @@ def test_a_player_who_played_and_caught_nothing_loses_rather_than_voids(monkeypa
            "line": 4.5, "side": "OVER", "odds": -450}
     assert tracking._grade_leg(leg, actuals, played) == ("LOSS", 0.0)
     assert tracking._grade_leg({**leg, "key": "healthy scratch"}, actuals, played)[0] == "VOID"
+
+
+# --- the role lotto -----------------------------------------------------------
+
+def _role_rung(**kw):
+    base = _rung(last5=[30.0, 40.0, 26.0, 51.0, 35.0], hits5=5, threshold=25.0,
+                 line=24.5, odds=-140, fair=0.55, edge_pts=2.0,
+                 snap_min=0.78, ts_mean=0.21, tgt_mean=7.0, tgt_cv=0.3)
+    base.update(kw)
+    return base
+
+
+def test_the_role_lotto_takes_steady_roles_and_leaves_backups():
+    assert len(altparlay.role_candidates([_role_rung()])) == 1
+    # Week 8's kind of leg: a streak at a small rung, on 26 snaps.
+    assert altparlay.role_candidates([_role_rung(snap_min=0.36, ts_mean=0.08)]) == []
+    assert altparlay.role_candidates([_role_rung(ts_mean=0.10)]) == []
+    assert altparlay.role_candidates([_role_rung(hits5=3)]) == []
+    assert altparlay.role_candidates([_role_rung(edge_pts=-1.0)]) == []   # props model against
+    assert altparlay.role_candidates([_role_rung(snap_min=None)]) == []   # no five games
+    # Priced at the book: the confidence model has to clear the fair price.
+    assert altparlay.role_candidates([_role_rung(fair=0.95)]) == []
+
+
+def test_a_role_legs_chance_is_read_halfway_toward_the_book():
+    (c,) = altparlay.role_candidates([_role_rung()])
+    assert c["p_props"] == 0.68 and c["p_conf"] > 0.58
+    assert 0.55 < c["p_cal"] < c["p_conf"]
+
+
+def test_the_confidence_model_rewards_cushion_and_role():
+    lo = altparlay.confidence_p(_role_rung(last5=[26.0, 27.0, 25.0, 28.0, 26.0]))
+    hi = altparlay.confidence_p(_role_rung(last5=[50.0, 61.0, 45.0, 58.0, 52.0]))
+    assert hi > lo
+    assert altparlay.confidence_p(_role_rung(snap_min=0.9, ts_mean=0.28)) > \
+        altparlay.confidence_p(_role_rung(snap_min=0.5, ts_mean=0.12))

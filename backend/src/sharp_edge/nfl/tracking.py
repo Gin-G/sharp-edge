@@ -771,7 +771,8 @@ async def record_alt_parlays(season: int, week: int, parlays: dict,
         legs = [{**{k: leg.get(k) for k in (
                     "player", "key", "team", "position", "market", "line",
                     "threshold", "side", "odds", "implied", "fair", "model_p",
-                    "p_cal", "edge_pts", "hits4", "last4", "event", "fd_event_id",
+                    "p_cal", "edge_pts", "hits4", "last4", "hits5", "last5", "p_conf",
+                    "p_props", "snap_min", "ts_mean", "tgt_mean", "event", "fd_event_id",
                     "kickoff", "fd_market_id", "over_selection_id")},
                  "lock_at": _lock_stamp(leg)} for leg in p["legs"]]
         await db.upsert_nfl_alt_parlay({
@@ -882,7 +883,8 @@ async def _settle_alt_parlays(season: int, week: int, actuals: dict,
 
 PAPER_TZ = "America/Denver"
 PAPER_LEG_FIELDS = ("player", "key", "team", "position", "market", "line", "threshold",
-                    "side", "odds", "p_cal", "edge_pts", "hits4", "anchor", "event",
+                    "side", "odds", "p_cal", "p_conf", "p_props", "edge_pts", "hits4",
+                    "hits5", "snap_min", "ts_mean", "tgt_mean", "anchor", "event",
                     "fd_event_id", "kickoff", "home_team", "away_team")
 
 
@@ -970,7 +972,8 @@ async def _settle_paper(season: int, week: int, actuals: dict, played: set) -> i
     return n
 
 
-PAPER_LABELS = {"double_up": "Double-up", "lotto": "Lotto (long rungs)",
+PAPER_LABELS = {"double_up": "Double-up", "lotto": "Role lotto",
+                "lotto_streak": "Streak lotto (old rule)",
                 "short_stack": "Short stack", "anchored": "Anchored lotto"}
 
 

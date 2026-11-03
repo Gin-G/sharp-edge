@@ -1160,3 +1160,20 @@ kubectl create job -n nfl-api --from=cronjob/nfl-api-projections proj-manual
 It takes ~35 minutes (a 5-seed ensemble). Afterwards the board must be rebuilt
 with `?force=true`, because the screen caches the projections it fetched for ten
 minutes and would otherwise serve the pre-fix numbers.
+
+## The role lotto (2026-11-03)
+
+**Question.** Week 8's lotto drew backups (TeSlaa 26 snaps, Sample 29, Boerkircher, Meyers) at 5+ yard rungs on a 3-of-4 streak. Does a player's opportunity — snap floor, target share, target volume and steadiness — predict a rung cashing beyond the streak and the cushion?
+
+**Data.** Every 2024-26 WR/TE/RB player-week with five prior games for the same team, at FanDuel's rung spacing (receptions 2-6, receiving yards 10-80): 136k rung-weeks, 31.6k with 3+ of 5 hits. Game logs from snap counts joined to box scores, zeros where he played and recorded nothing. Scripts: `backend/scripts/role_lotto/` (`build_frame.py` → `compare_features.py`, `fit_confidence.py`, `price_test.py`; the last needs `nfl_alt_prices` exported to `prices.csv`).
+
+**Findings.**
+- Cushion (median of five / rung) dominates: 5/5 streaks hit 65% at cushion 1.0-1.3, 89% above 2.2.
+- Opportunity adds little overall (train 2024, test 2025-26: AUC 0.6925 → 0.6935) but separates the borderline: among legs streak+cushion rate 60-75%, the low-role quarter (41% snap floor, 4.5 targets) hit 59%, the steady-role quarter (72%, 8.1) hit 70%.
+- Opponent receiving yards allowed to the position (prior five) adds nothing measurable.
+- Confidence logit (trained 2024-25) is calibrated on 2026 holdout: 55/59, 65/66, 75/75, 85/85, 93/93 (said/hit).
+- **Against prices** (week 8 archive only, 638 rungs): calibrated overall (62.5 said / 62.7 hit) but the book priced them at 70.6% — flat -12%. Where the model saw a 5+ pt edge: low-role legs hit ~29%, role-floor legs 50% against 52% implied (+1% flat ROI, n=76, 26 players). The book knows who is a backup.
+
+**Shipped.** Lotto legs: snap share ≥50% in each of the last five, target share ≥12%, 4+ of 5 cleared, confidence model ≥3 pts over the rung's fair price, props model not below fair, -300 to +150; chance read halfway (logit) from fair to the confidence model. The old streak lotto stays on paper as `lotto_streak`, the control. Short stack and anchored lotto now draw from the role legs.
+
+**Not established.** That role legs beat the price: one priced week, correlated legs. Judge on `nfl_paper_tickets` leg hit rate vs `p_cal` and implied after 3+ weeks.
