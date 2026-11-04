@@ -833,9 +833,11 @@ def _grade_alt_parlay(legs: list[dict], actuals: dict, played: set,
     The card's rules: one lost leg decides it, a void leg drops out and takes
     its price with it, and a win needs every leg in.
     """
+    from .altparlay import ticket_decimal
+
     won = graded = 0
     pending = False
-    dec = 1.0
+    stood = []
     for leg in legs:
         res, _ = _grade_leg(leg, actuals, played, scores)
         if res is None:
@@ -846,15 +848,15 @@ def _grade_alt_parlay(legs: list[dict], actuals: dict, played: set,
         graded += 1
         if res == "WIN":
             won += 1
-            o = leg.get("odds")
-            dec *= 1 + (o / 100 if o > 0 else 100 / -o) if o else 1.0
+            if leg.get("odds"):
+                stood.append(leg)
         elif res == "LOSS":
             return "LOSS", won, graded, None
     if pending:
         return None, won, graded, None
     if graded == 0:
         return "VOID", 0, 0, 1.0
-    return "WIN", won, graded, round(dec, 4)
+    return "WIN", won, graded, round(ticket_decimal(stood), 4)
 
 
 async def _settle_alt_parlays(season: int, week: int, actuals: dict,
@@ -974,7 +976,7 @@ async def _settle_paper(season: int, week: int, actuals: dict, played: set) -> i
 
 PAPER_LABELS = {"double_up": "Double-up", "lotto": "Role lotto",
                 "lotto_streak": "Streak lotto (old rule)",
-                "lotto_multi": "Role lotto, 2 per game (price est.)",
+                "lotto_one": "Role lotto, one per game",
                 "short_stack": "Short stack", "anchored": "Anchored lotto"}
 
 

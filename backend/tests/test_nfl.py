@@ -1349,7 +1349,7 @@ async def test_build_board_executes_end_to_end(monkeypatch):
     assert rungs[25.0]["hits4"] == 4 and rungs[60.0]["hits4"] == 1
     assert rungs[25.0]["model_p"] > rungs[40.0]["model_p"] > rungs[60.0]["model_p"]
     assert payload["alt_rules"]["rungs_priced"] == 3
-    assert set(payload["alt_parlays"]) == {"double_up", "lotto", "lotto_streak", "lotto_multi", "short_stack", "anchored"}
+    assert set(payload["alt_parlays"]) == {"double_up", "lotto", "lotto_streak", "lotto_one", "short_stack", "anchored"}
 
 
 # ---------------------------------------------------------------------------

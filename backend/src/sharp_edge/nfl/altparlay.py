@@ -99,10 +99,16 @@ CONF_KEEP = 0.5
 KINDS = {
     "double_up": {"target": 2.0, "odds": (-500, 150), "min_legs": 2, "stake": 1.0},
     "lotto": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2, "stake": 0.1,
-              "floor": 250.0},
+              "floor": 250.0, "per_game": 4},
 }
 # FanDuel's own parlay limit.
 MAX_LEGS = 25
+# FanDuel bundles the legs a parlay takes from one game into a same-game
+# parlay and prices that bundle itself, below the product of its legs. This is
+# the assumed price of each bundle against that product — a placeholder until
+# a betslip quote calibrates it. A ticket with a bundle carries
+# ``price_estimated``.
+SGP_SHADE = 0.85
 
 # Paper strategies: built and recorded daily beside the two above, never bet
 # by the board, so the record can say which way of reaching a long price
@@ -124,11 +130,10 @@ PAPER = {
     # The lotto as it was built through week 8 — the 3-of-4 streak rule, any
     # role — kept on paper as the control for the role lotto.
     "lotto_streak": {"target": 1000.0, "odds": (-500, 400), "min_legs": 2, "stake": 0.1},
-    # The role lotto with up to two players from a game, for 20-leg tickets.
-    # FanDuel prices same-game legs as a same-game parlay, so its odds here are
-    # an estimate (the product of the legs) until a betslip quotes it.
-    "lotto_multi": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2, "stake": 0.1,
-                    "per_game": 2},
+    # The role lotto held to one leg per game: every price a straight quote,
+    # every leg independent — the control for the lotto's same-game bundles.
+    "lotto_one": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2, "stake": 0.1,
+                  "floor": 250.0},
     "short_stack": {"target": None, "odds": (-250, -110), "min_legs": 4, "stake": 0.1},
     "anchored": {"target": 1000.0, "odds": (-300, -100), "min_legs": 2, "stake": 0.1,
                  "max_anchors": 2, "anchor_odds": (100, 400)},
@@ -332,23 +337,43 @@ def role_candidates(rungs: Iterable[dict]) -> list[dict]:
 def _game_options(legs: list[dict], per_game: int, step: float) -> list[tuple]:
     """Every way to take 1..``per_game`` legs from one game, one rung per player.
 
-    As ``(payout bucket, legs)``, keeping only the likeliest option per bucket
-    and leg count — the rest can never be part of the best ticket.
+    As ``(payout bucket, legs, anchors, log p, legs chosen)``, keeping only the
+    options no other beats on both payout and chance — the rest can never be
+    part of the best ticket. Built player by player, so a game with six
+    players on six rungs apiece is not 50,000 combinations.
     """
-    from itertools import combinations
-
-    best: dict = {}
-    for n in range(1, per_game + 1):
-        for combo in combinations(legs, n):
-            if len({c.get("key") for c in combo}) < n:
+    players: dict = {}
+    for c in legs:
+        players.setdefault(c.get("key"), []).append(c)
+    # (payout bucket, legs, anchors) -> (log probability, legs chosen)
+    opts: dict = {(0, 0, 0): (0.0, ())}
+    for rungs in players.values():
+        nxt = dict(opts)
+        for (b, n, a), (lp, combo) in opts.items():
+            if n == per_game:
                 continue
-            b = sum(math.floor(math.log(_decimal(c["odds"])) / step) for c in combo)
-            lp = sum(math.log(c["p_cal"]) for c in combo)
-            a = sum(bool(c.get("anchor")) for c in combo)
-            k = (b, n, a)
-            if k not in best or lp > best[k][0]:
-                best[k] = (lp, combo)
-    return [(b, n, a, lp, combo) for (b, n, a), (lp, combo) in best.items()]
+            for c in rungs:
+                key = (b + math.floor(math.log(_decimal(c["odds"])) / step), n + 1,
+                       a + bool(c.get("anchor")))
+                cand = (lp + math.log(c["p_cal"]), combo + (c,))
+                if key not in nxt or cand[0] > nxt[key][0]:
+                    nxt[key] = cand
+        opts = _frontier(nxt)
+    shade = math.floor(math.log(SGP_SHADE) / step)
+    return [(b + (shade if n > 1 else 0), n, a, lp, combo)
+            for (b, n, a), (lp, combo) in opts.items() if n]
+
+
+def _frontier(table: dict) -> dict:
+    """``{(payout bucket, *rest): (log p, ...)}`` cut to the entries no other
+    with the same ``rest`` beats on both payout and chance."""
+    out: dict = {}
+    best_lp: dict = {}
+    for key in sorted(table, key=lambda k: -k[0]):
+        if table[key][0] > best_lp.get(key[1:], -math.inf):
+            best_lp[key[1:]] = table[key][0]
+            out[key] = table[key]
+    return out
 
 
 def build(cands: Iterable[dict], kind: str,
@@ -361,12 +386,12 @@ def build(cands: Iterable[dict], kind: str,
     ticket built to be a coin flip — because the last leg it added was the
     longest price it had.
 
-    One leg per game unless the strategy's ``per_game`` says more. One per
-    game keeps the legs independent, which is what makes multiplying their
-    chances — and their prices — honest: FanDuel prices two legs from one game
-    as a same-game parlay, at its own correlated price, so a ticket built with
-    ``per_game`` > 1 carries ``price_estimated`` and its odds are the product
-    of the legs, not a quote.
+    One leg per game unless the strategy's ``per_game`` says more, and never
+    two rungs of one player. FanDuel prices the legs from one game as a
+    same-game bundle, so a ticket with one is priced at ``SGP_SHADE`` per
+    bundle and carries ``price_estimated``. Its chance is still the product of
+    the legs: two players' yards in one game are close enough to independent
+    for that, which one player's two rungs are not.
 
     A strategy with a ``floor`` that cannot reach its target on this slate
     gets as close as it can instead: the likeliest ticket within a quarter of
@@ -397,25 +422,29 @@ def build(cands: Iterable[dict], kind: str,
 
     step = 0.01
     goal = math.ceil(math.log(spec["target"]) / step)
-    # (payout bucket, legs, anchors) -> (log probability, legs chosen)
+    # (payout bucket, anchors, legs up to min_legs) -> (log probability, legs
+    # chosen). Leg count past the minimum is not in the key — a ticket is only
+    # ever cut for having more legs than FanDuel takes, and the likeliest way
+    # to a payout is rarely the longest — which keeps a slate of four-leg game
+    # bundles under a second.
+    m = spec["min_legs"]
     dp: dict = {(0, 0, 0): (0.0, ())}
     for legs in by_game.values():
         options = _game_options(legs, per_game, step)
         nxt = dict(dp)
-        for (b, k, a), (v, chosen) in dp.items():
+        for (b, a, _), (v, chosen) in dp.items():
             for ob, on, oa, olp, combo in options:
-                if k + on > MAX_LEGS or a + oa > max_anchors:
+                if len(chosen) + on > MAX_LEGS or a + oa > max_anchors:
                     continue
-                key = (min(goal, b + ob), k + on, a + oa)
+                key = (min(goal, b + ob), a + oa, min(m, len(chosen) + on))
                 cand = (v + olp, chosen + combo)
                 if key not in nxt or cand[0] > nxt[key][0]:
                     nxt[key] = cand
-        dp = nxt
-    done = [val for (b, k, a), val in dp.items()
-            if b >= goal and k >= spec["min_legs"]]
+        dp = _frontier(nxt)
+    done = [val for (b, a, k), val in dp.items() if b >= goal and k >= m]
     short = False
     if not done and spec.get("floor"):
-        reach = [(b, val) for (b, k, a), val in dp.items() if k >= spec["min_legs"]]
+        reach = [(b, val) for (b, a, k), val in dp.items() if k >= m]
         top = max((b for b, _ in reach), default=0)
         if top >= math.log(spec["floor"]) / step:
             near = top - math.log(1.25) / step
@@ -498,13 +527,24 @@ def build_paper(cands: list[dict], role: list[dict], anchors: list[dict]) -> dic
     keeps the old rule as the control.
     """
     return {"lotto_streak": build(cands, "lotto_streak"),
-            "lotto_multi": build(role, "lotto_multi"),
+            "lotto_one": build(role, "lotto_one"),
             "short_stack": stack(role, "short_stack"),
             "anchored": build(role, "anchored", anchors)}
 
 
+def ticket_decimal(legs: list[dict]) -> float:
+    """The parlay's decimal odds: the product of the legs, each same-game
+    bundle at ``SGP_SHADE``."""
+    per_game: dict = {}
+    for l in legs:
+        g = l.get("fd_event_id")
+        per_game[g] = per_game.get(g, 0) + 1
+    bundles = sum(1 for g, n in per_game.items() if g is not None and n > 1)
+    return math.prod(_decimal(l["odds"]) for l in legs) * SGP_SHADE ** bundles
+
+
 def summarise(legs: list[dict], kind: str) -> dict:
-    dec = math.prod(_decimal(l["odds"]) for l in legs)
+    dec = ticket_decimal(legs)
     p = math.prod(l["p_cal"] for l in legs)
     stake = STRATEGIES[kind]["stake"]
     return {"kind": kind, "legs": legs, "leg_count": len(legs),

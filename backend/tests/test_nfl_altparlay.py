@@ -95,7 +95,7 @@ def test_the_lotto_is_strict_about_its_target():
 
 def test_a_parlay_grades_like_the_book():
     legs = [_rung(key="a", team="AAA", odds=-200, line=24.5),
-            _rung(key="b", team="BBB", odds=150, line=39.5)]
+            _rung(key="b", team="BBB", odds=150, line=39.5, fd_event_id="g2")]
     rows = {"a": {"receiving_yards": 31.0}, "b": {"receiving_yards": 52.0}}
     assert tracking._grade_alt_parlay(legs, rows, {"AAA", "BBB"})[0] == "WIN"
     assert tracking._grade_alt_parlay(legs, rows, {"AAA", "BBB"})[3] == pytest.approx(1.5 * 2.5)
@@ -426,12 +426,33 @@ def test_the_role_lotto_gets_as_close_as_the_slate_allows():
     assert altparlay.build(legs, "lotto_streak") is None          # the control has no floor
 
 
-def test_two_per_game_takes_different_players_and_marks_the_price():
+def test_several_per_game_takes_different_players_and_marks_the_price():
     legs = [_rung(key=f"p{g}{i}", fd_event_id=f"g{g}", odds=-110, p_cal=0.55)
-            for g in range(6) for i in range(2)]
+            for g in range(6) for i in range(3)]
     legs.append(_rung(key="p00", fd_event_id="g0", odds=-120, p_cal=0.56, line=34.5))
-    t = altparlay.build(legs, "lotto_multi")
-    # 1000x at -110 takes eleven legs; six games can only give them two apiece.
-    assert t["decimal_odds"] >= 1000 and t["leg_count"] == 11 and t["price_estimated"]
-    assert len({l["key"] for l in t["legs"]}) == 11               # one rung per player
+    t = altparlay.build(legs, "lotto")
+    # 1000x at -110 takes eleven legs, more once the bundles are shaded; six
+    # games give them three apiece.
+    assert t["decimal_odds"] >= 1000 and not t["short_of_target"] and t["price_estimated"]
+    assert 12 <= t["leg_count"] <= 18
+    assert len({l["key"] for l in t["legs"]}) == t["leg_count"]   # one rung per player
+    assert t["decimal_odds"] == round(altparlay.ticket_decimal(t["legs"]), 2)
     assert not altparlay.build(legs, "double_up")["price_estimated"]
+    assert altparlay.build(legs, "lotto_one") is None             # six legs, ~50x
+
+
+def test_four_games_can_carry_a_long_ticket():
+    legs = [_rung(key=f"p{g}{i}", fd_event_id=f"g{g}", odds=-110, p_cal=0.55)
+            for g in range(4) for i in range(5)]
+    t = altparlay.build(legs, "lotto")
+    assert t["decimal_odds"] >= 1000 and not t["short_of_target"]
+    assert len({l["fd_event_id"] for l in t["legs"]}) == 4
+    assert max(sum(l["fd_event_id"] == g for l in t["legs"]) for g in "g0 g1 g2 g3".split()) <= 4
+
+
+def test_same_game_bundles_are_shaded():
+    a = _rung(key="a", fd_event_id="g1", odds=100)
+    b = _rung(key="b", fd_event_id="g1", odds=100)
+    c = _rung(key="c", fd_event_id="g2", odds=100)
+    assert altparlay.ticket_decimal([a, c]) == 4.0
+    assert altparlay.ticket_decimal([a, b, c]) == 8 * altparlay.SGP_SHADE

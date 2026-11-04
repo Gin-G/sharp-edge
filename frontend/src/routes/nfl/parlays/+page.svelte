@@ -73,7 +73,7 @@
     { key: 'double_up', title: 'Double-up',
       blurb: 'The likeliest ticket that pays at least even money.' },
     { key: 'lotto', title: 'Role lotto',
-      blurb: 'The likeliest 1000x ticket from players in a steady role: on the field for at least half the snaps in each of their last five games, with 12%+ of the targets, clearing the rung in 4 of 5, at a price our role model beats.' },
+      blurb: 'The likeliest 1000x ticket from players in a steady role: on the field for at least half the snaps in each of their last five games, with 12%+ of the targets, clearing the rung in 4 of 5, at a price our role model beats. Up to four players a game; FanDuel bundles those into a same-game parlay.' },
   ];
 
   $: rules = data?.alt_rules;
@@ -196,7 +196,7 @@
           {#if !t}
             <div class="px-5 py-4 text-sm text-slate-500">
               {#if k.key === 'lotto'}
-                Not enough qualifying legs across separate games to reach 1000x yet. Most weeks this fills in once Sunday's ladders are posted.
+                Not enough qualifying legs to get near 1000x yet. Most weeks this fills in once Sunday's ladders are posted.
               {:else}
                 No two legs from separate games qualify right now.
               {/if}
@@ -205,6 +205,11 @@
             {#if t.short_of_target}
               <div class="px-5 py-2 text-xs text-amber-300/90 border-b border-border/50">
                 This slate can't reach 1000x from qualifying legs, so this is as close as it gets ({Math.round(t.decimal_odds).toLocaleString()}x).
+              </div>
+            {/if}
+            {#if t.price_estimated}
+              <div class="px-5 py-2 text-xs text-slate-400 border-b border-border/50">
+                Several legs share a game, which FanDuel prices as a same-game bundle. The odds here assume each bundle at 85% of its legs multiplied; the betslip quotes the real price.
               </div>
             {/if}
             <div class="px-5 py-3 grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm border-b border-border/50">
