@@ -21,11 +21,12 @@
   // The parlay strategies on paper: each one's ticket as shown, every day.
   let paper: NflPaperRecord | null = null;
   let openStrategy: string | null = null;
-  const LEG_KIND: Record<string, string> = { rung: 'Alt legs', td: 'TD anchors', ml: 'ML anchors' };
+  const LEG_KIND: Record<string, string> = { rung: 'Receiving legs', rush: 'Rushing legs', td: 'TD legs', ml: 'ML legs', game: 'Spread/total legs' };
   function legText(l: NflPaperLeg): string {
     if (l.market === 'moneyline') return `${l.player} ML`;
     if (l.market === 'anytime_td') return `${l.player} TD`;
-    const unit = l.market === 'receptions' ? 'rec' : 'yds';
+    if (l.market === 'alt_spread' || l.market === 'alt_total') return l.player;
+    const unit = l.market === 'receptions' ? 'rec' : l.market === 'rushing_yards' ? 'rush yds' : 'rec yds';
     return `${l.player} ${l.threshold ?? l.line}+ ${unit}`;
   }
 

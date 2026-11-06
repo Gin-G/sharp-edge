@@ -791,6 +791,10 @@ export interface NflAltRung {
   // confidence model's chance (p_cal is then that chance read toward the book).
   last5?: number[]; hits5?: number; snap_min?: number | null; ts_mean?: number | null;
   tgt_mean?: number | null; p_conf?: number; p_props?: number;
+  // A runner's role, and the touchdown and game-line legs (priced at the
+  // book's own chance; p_model is ours, shown beside it).
+  cs_mean?: number | null; p_model?: number | null; side?: string;
+  home_team?: string | null; away_team?: string | null;
 }
 
 export interface NflAltParlay {

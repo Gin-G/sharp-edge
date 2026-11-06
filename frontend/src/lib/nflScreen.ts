@@ -111,6 +111,9 @@ export const MARKET_LABEL: Record<string, string> = {
   rushing_yards: 'Rushing yds',
   passing_yards: 'Passing yds',
   receptions: 'Receptions',
+  anytime_td: 'Anytime TD',
+  alt_spread: 'Alt spread',
+  alt_total: 'Alt total',
 };
 
 /** Which family a market belongs to.

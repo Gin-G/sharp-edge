@@ -92,6 +92,30 @@ CONF_MIN_EDGE = 0.03
 # (in logits) between the book's fair price and the model.
 CONF_KEEP = 0.5
 
+# Rushing, back in the lotto on its own model (2026-11-06). Rushing left the
+# board in Finding 14 because the props model loses on it; that model gets no
+# say here. Fitted the same way on every 2024-25 RB/QB/WR rushing player-week
+# (scripts/role_lotto/rush_frame.py, fit_rush.py) and held out on 2026: said
+# 55 / hit 54, said 75 / hit 71, said 85 / hit 85. Role is carry share: legs
+# rated 55-80% hit 69% for a back with 40%+ of his team's carries and 65%
+# without; the snap floor added nothing. Against week 8's alt rushing prices
+# the role legs hit 53% at 61% implied — no edge on the one priced week.
+ROLE_CS_MIN = 0.40            # average share of his team's carries
+RUSH_INTERCEPT = -1.8101
+RUSH_COEF = {"hits5": 0.3174, "lcush": 1.4916, "car_mean": -0.0472, "snap_min": 0.6164,
+             "cs_mean": 1.8977, "car_cv": 0.222, "qb": -0.3739}
+RUSH = "rushing_yards"
+ROLE_MARKETS = ("receiving_yards", "receptions", RUSH)
+
+# Anytime touchdowns, for the likely scorers only: a fair chance of at least
+# TD_MIN_FAIR, which on FanDuel is about even money or shorter. Priced at the
+# book's own chance, not ours — the TD model is ungraded past one week, and on
+# the short end it sits *below* the book (Gibbs -400: book 80%, model 69%).
+# FanDuel posts no "No" side to de-vig against, so TD_FAIR_SHADE is an assumed
+# margin on a favourite's quote.
+TD_MIN_FAIR = 0.45
+TD_FAIR_SHADE = 0.92
+
 # Payout targets, as decimal odds, and the price window each draws legs from.
 # The double-up stops at -500 because shorter than that the book prices the
 # streak above what it earns (see the docstring); the lotto takes the same
@@ -134,6 +158,10 @@ PAPER = {
     # every leg independent — the control for the lotto's same-game bundles.
     "lotto_one": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2, "stake": 0.1,
                   "floor": 250.0},
+    # The role lotto as it was through week 9: receiving rungs only, no
+    # rushing, touchdowns or game lines — the control for adding them.
+    "lotto_receiving": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2,
+                        "stake": 0.1, "floor": 250.0, "per_game": 4},
     "short_stack": {"target": None, "odds": (-250, -110), "min_legs": 4, "stake": 0.1},
     "anchored": {"target": 1000.0, "odds": (-300, -100), "min_legs": 2, "stake": 0.1,
                  "max_anchors": 2, "anchor_odds": (100, 400)},
@@ -165,9 +193,9 @@ def recent_values(season: int, week: int, force: bool = False) -> dict:
     skipped the weeks he was on the field for 20 snaps and never targeted.
 
     ``_role`` is his opportunity over the same five games — the snap floor,
-    target share, targets a game and how steady they were — and None unless all
-    five were for his current team (a mover's old role says little about his
-    new one) and every one has a snap count.
+    target share, targets a game and how steady they were, and the same for
+    carries — and None unless all five were for his current team (a mover's
+    old role says little about his new one) and every one has a snap count.
     """
     key = (season, week)
     now = time.time()
@@ -178,7 +206,8 @@ def recent_values(season: int, week: int, force: bool = False) -> dict:
 
     from .names import norm_name
 
-    stats_cols = ["receiving_yards", "receptions", "rushing_yards", "targets", "target_share"]
+    stats_cols = ["receiving_yards", "receptions", "rushing_yards", "targets", "target_share",
+                  "carries", "carry_share"]
     frames = []
     for s in (season - 1, season):
         try:
@@ -190,6 +219,8 @@ def recent_values(season: int, week: int, force: bool = False) -> dict:
         if s == season:
             df = df[df.week < week]
         df = df.assign(key=df.player_display_name.map(norm_name), season=s)
+        team_carries = df.groupby(["team", "week"]).carries.transform("sum")
+        df["carry_share"] = df.carries.fillna(0) / team_carries.clip(lower=1)
         st = df[["key", "season", "week", "team"] + stats_cols]
         try:
             sn = pd.read_parquet(NFLVERSE_SNAPS.format(season=s))
@@ -221,6 +252,10 @@ def recent_values(season: int, week: int, force: bool = False) -> dict:
                     "ts_mean": round(float(g.target_share.mean()), 3),
                     "tgt_mean": round(float(t.mean()), 2),
                     "tgt_cv": round(float(t.std() / max(t.mean(), 0.1)), 3)}
+            c = g.carries.astype(float)
+            role.update({"cs_mean": round(float(g.carry_share.mean()), 3),
+                         "car_mean": round(float(c.mean()), 2),
+                         "car_cv": round(float(c.std() / max(c.mean(), 0.1)), 3)})
         entry["_role"] = role
         out[k] = entry
     _cache.update({"key": key, "values": out, "fetched_at": now})
@@ -282,9 +317,16 @@ def candidates(rungs: Iterable[dict]) -> list[dict]:
 
 
 def role_ok(r: dict) -> bool:
-    """Over the role floor in every one of his last five games."""
-    return (r.get("snap_min") is not None and r["snap_min"] >= ROLE_SNAP_MIN
-            and (r.get("ts_mean") or 0) >= ROLE_TS_MIN)
+    """Over the role floor across his last five games.
+
+    A receiver's floor is snaps in every game and target share; a runner's is
+    his share of the team's carries.
+    """
+    if r.get("snap_min") is None:
+        return False
+    if r.get("market") == RUSH:
+        return (r.get("cs_mean") or 0) >= ROLE_CS_MIN
+    return r["snap_min"] >= ROLE_SNAP_MIN and (r.get("ts_mean") or 0) >= ROLE_TS_MIN
 
 
 def confidence_p(r: dict) -> Optional[float]:
@@ -297,32 +339,41 @@ def confidence_p(r: dict) -> Optional[float]:
     if len(last5) < ROLE_GAMES or not thr or r.get("snap_min") is None:
         return None
     med = sorted(last5)[len(last5) // 2]
-    x = {"hits5": sum(1 for v in last5 if v >= thr),
-         "lcush": math.log(min(10.0, max(0.05, med / thr))),
-         "rec": 1.0 if r.get("market") == "receptions" else 0.0,
-         "tgt_mean": r.get("tgt_mean") or 0.0, "snap_min": r["snap_min"],
-         "ts_mean": r.get("ts_mean") or 0.0, "tgt_cv": r.get("tgt_cv") or 0.0}
-    z = CONF_INTERCEPT + sum(CONF_COEF[k] * v for k, v in x.items())
+    hist = {"hits5": sum(1 for v in last5 if v >= thr),
+            "lcush": math.log(min(10.0, max(0.05, med / thr)))}
+    if r.get("market") == RUSH:
+        x = {**hist, "car_mean": r.get("car_mean") or 0.0, "snap_min": r["snap_min"],
+             "cs_mean": r.get("cs_mean") or 0.0, "car_cv": r.get("car_cv") or 0.0,
+             "qb": 1.0 if r.get("position") == "QB" else 0.0}
+        z = RUSH_INTERCEPT + sum(RUSH_COEF[k] * v for k, v in x.items())
+    else:
+        x = {**hist, "rec": 1.0 if r.get("market") == "receptions" else 0.0,
+             "tgt_mean": r.get("tgt_mean") or 0.0, "snap_min": r["snap_min"],
+             "ts_mean": r.get("ts_mean") or 0.0, "tgt_cv": r.get("tgt_cv") or 0.0}
+        z = CONF_INTERCEPT + sum(CONF_COEF[k] * v for k, v in x.items())
     return 1 / (1 + math.exp(-z))
 
 
 def role_candidates(rungs: Iterable[dict]) -> list[dict]:
-    """The role lotto's legs: a steady role, a record, and a price we beat.
+    """The role lotto's player legs: a steady role, a record, and a price we beat.
 
     Each comes back with ``p_cal`` replaced by the confidence chance read
     toward the book (CONF_KEEP), the props model's own kept as ``p_props``.
-    The props model is not asked to see an edge — on alt rungs it has not
-    earned that — only not to disagree.
+    On receiving the props model is not asked to see an edge — on alt rungs it
+    has not earned that — only not to disagree. On rushing, where it loses
+    (Finding 14), it is not asked at all.
     """
     out = []
     for r in rungs:
-        if r.get("market") not in model.BETTABLE or not role_ok(r):
+        if r.get("market") not in ROLE_MARKETS or not role_ok(r):
             continue
         if (r.get("hits5") or 0) < ROLE_MIN_HITS:
             continue
         if r.get("role_conflict_verdict") == "market" or not card_mod._available(r):
             continue
-        if card_mod.is_locked(r) or (r.get("edge_pts") or 0) < 0:
+        if card_mod.is_locked(r):
+            continue
+        if r["market"] != RUSH and (r.get("edge_pts") or 0) < 0:
             continue
         pc, fair = confidence_p(r), r.get("fair")
         if pc is None or not fair or not (0 < fair < 1) or pc - fair < CONF_MIN_EDGE:
@@ -332,6 +383,91 @@ def role_candidates(rungs: Iterable[dict]) -> list[dict]:
         out.append({**r, "p_props": r.get("p_cal"), "p_conf": round(pc, 4),
                     "p_cal": round(1 / (1 + math.exp(-z)), 4)})
     return out
+
+
+def td_legs(tds: Iterable[dict]) -> list[dict]:
+    """Anytime-TD legs for the likely scorers, at the book's own chance.
+
+    ``fair`` is the quote less TD_FAIR_SHADE; a leg needs TD_MIN_FAIR. The
+    model's chance rides along as ``p_model`` for the page, not the price.
+    """
+    from ..fanduel.odds import american_to_implied
+
+    out = []
+    for r in tds:
+        if r.get("odds") is None or not card_mod._available(r) or card_mod.is_locked(r):
+            continue
+        fair = american_to_implied(r["odds"]) * TD_FAIR_SHADE
+        if fair < TD_MIN_FAIR:
+            continue
+        out.append({"market": "anytime_td", "player": r.get("player"), "key": r.get("key"),
+                    "team": r.get("team"), "position": r.get("position"),
+                    "line": 0.5, "threshold": 1.0, "side": "OVER", "odds": r["odds"],
+                    "implied": r.get("implied_p"), "fair": round(fair, 4),
+                    "p_cal": round(fair, 4), "p_model": r.get("p_cal"),
+                    "avail": r.get("avail"), "event": r.get("event"),
+                    "fd_event_id": r.get("fd_event_id"), "kickoff": r.get("kickoff"),
+                    "fd_market_id": r.get("fd_market_id"),
+                    "over_selection_id": r.get("fd_selection_id")})
+    return out
+
+
+def game_legs(alt_games: Iterable[dict]) -> list[dict]:
+    """Alternate spread and total rungs, each at its fair price.
+
+    The fair price is the rung against its own opposite — Broncos +2.5 against
+    the other side at -2.5, over 41.5 against under 41.5 — with the pair's
+    margin split evenly. No model reads these: the game model adds nothing to
+    the closing spread (Finding 14), so a game leg is the book's chance and
+    the vig, and it makes the ticket only where nothing likelier pays as much.
+
+    Every game line of one game shares a key, so a ticket takes at most one
+    of them per game — a spread and a total from one game move together.
+    """
+    from ..fanduel.odds import american_to_implied
+    from .names import TEAM_ABBR
+
+    rows = list(alt_games)
+    by_event: dict = {}
+    for g in rows:
+        by_event.setdefault(g.get("fd_event_id"), []).append(g)
+    out = []
+    for eid, gs in by_event.items():
+        teams = {}
+        for g in gs:
+            if g["market"] == "alt_spread":
+                teams[g.get("side")] = TEAM_ABBR.get(g["name"], g["name"])
+        home, away = teams.get("HOME"), teams.get("AWAY")
+        if not home or not away:
+            continue
+        index = {(g["market"], g.get("side"), g["line"]): g for g in gs}
+        for g in gs:
+            if g["market"] == "alt_spread":
+                other = index.get(("alt_spread", "AWAY" if g.get("side") == "HOME" else "HOME",
+                                   -g["line"]))
+                team = home if g.get("side") == "HOME" else away
+                label = f"{team} {g['line']:+g}"
+            else:
+                other = index.get(("alt_total", "UNDER" if g.get("side") == "OVER" else "OVER",
+                                   g["line"]))
+                team = home
+                label = f"{'Over' if g.get('side') == 'OVER' else 'Under'} {g['line']:g}"
+            if other is None:
+                continue
+            a, b = american_to_implied(g["odds"]), american_to_implied(other["odds"])
+            if not a or not b:
+                continue
+            fair = a / (a + b)
+            out.append({"market": g["market"], "player": label, "key": f"game:{eid}",
+                        "team": team, "home_team": home, "away_team": away,
+                        "line": g["line"], "side": "UNDER" if g.get("side") == "UNDER" else "OVER",
+                        "odds": g["odds"], "implied": round(a, 4), "fair": round(fair, 4),
+                        "p_cal": round(fair, 4), "event": g.get("event"),
+                        "fd_event_id": eid, "kickoff": g.get("kickoff"),
+                        "fd_market_id": g.get("fd_market_id"),
+                        "over_selection_id": g.get("fd_selection_id"),
+                        "under_selection_id": g.get("fd_selection_id")})
+    return [l for l in out if not card_mod.is_locked(l)]
 
 
 def _game_options(legs: list[dict], per_game: int, step: float) -> list[tuple]:
@@ -519,15 +655,21 @@ def anchor_legs(td_picks: Iterable[dict], game_model: Iterable[dict],
     return out
 
 
-def build_paper(cands: list[dict], role: list[dict], anchors: list[dict]) -> dict:
+def build_paper(cands: list[dict], role: list[dict], anchors: list[dict],
+                extra: list[dict] = ()) -> dict:
     """Every paper strategy for this board. None where the slate cannot build it.
 
-    ``cands`` are the streak-rule legs, ``role`` the role lotto's; the short
-    stack and the anchored lotto draw from the role legs, and the streak lotto
-    keeps the old rule as the control.
+    ``cands`` are the streak-rule legs, ``role`` the role lotto's player legs
+    and ``extra`` its touchdown and game-line legs. The short stack and the
+    anchored lotto draw from the role legs, the streak lotto keeps the old
+    rule as the control, and the receiving lotto is the role lotto before
+    rushing, touchdowns and game lines joined it.
     """
+    extra = list(extra)
     return {"lotto_streak": build(cands, "lotto_streak"),
-            "lotto_one": build(role, "lotto_one"),
+            "lotto_one": build(role + extra, "lotto_one"),
+            "lotto_receiving": build([r for r in role if r.get("market") != RUSH],
+                                     "lotto_receiving"),
             "short_stack": stack(role, "short_stack"),
             "anchored": build(role, "anchored", anchors)}
 

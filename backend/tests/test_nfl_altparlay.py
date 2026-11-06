@@ -218,7 +218,10 @@ def test_a_placement_that_cannot_settle_is_refused():
     with pytest.raises(ValueError):
         tracking._placed_row(_placed(legs=[]))
     with pytest.raises(ValueError):
-        tracking._placed_row(_placed(legs=[{"player": "X", "market": "moneyline", "line": 0}]))
+        tracking._placed_row(_placed(legs=[{"player": "X", "market": "passing_tds", "line": 1.5}]))
+    with pytest.raises(ValueError):
+        tracking._placed_row(_placed(legs=[{"player": "Over 41.5", "market": "alt_total",
+                                            "line": 41.5}]))
     with pytest.raises(ValueError):
         tracking._placed_row(_placed(stake=0))
     # A price can be left off; the legs supply it.
@@ -456,3 +459,87 @@ def test_same_game_bundles_are_shaded():
     c = _rung(key="c", fd_event_id="g2", odds=100)
     assert altparlay.ticket_decimal([a, c]) == 4.0
     assert altparlay.ticket_decimal([a, b, c]) == 8 * altparlay.SGP_SHADE
+
+
+# --- rushing, touchdowns and game lines in the lotto -----------------------
+
+def _game_runner(name, odds, side, sel):
+    return {"runnerName": name, "runnerStatus": "ACTIVE", "selectionId": sel,
+            "handicap": 0, "result": {"type": side},
+            "winRunnerOdds": {"americanDisplayOdds": {"americanOddsInt": odds}}}
+
+
+def _alt_games(eid="g1"):
+    from sharp_edge.nfl import odds
+
+    board = odds.Board()
+    ev = {"event_id": eid, "name": "Denver Broncos @ Las Vegas Raiders", "kickoff": FUTURE}
+    odds._absorb(board, ev, {"marketId": "m1", "marketType": "ALTERNATE_HANDICAP",
+                             "marketStatus": "OPEN", "runners": [
+        _game_runner("Denver Broncos (+2.5)", -188, "AWAY", 1),
+        _game_runner("Las Vegas Raiders (-2.5)", 150, "HOME", 2),
+        _game_runner("Las Vegas Raiders (+6.5)", -400, "HOME", 3),
+    ]})
+    odds._absorb(board, ev, {"marketId": "m2", "marketType": "ALTERNATE_TOTAL",
+                             "marketStatus": "OPEN", "runners": [
+        _game_runner("Over (41.5)", -172, "OVER", 4),
+        _game_runner("Under (41.5)", 136, "UNDER", 5),
+    ]})
+    return board.alt_games
+
+
+def test_alt_game_lines_are_priced_against_their_own_opposite():
+    legs = altparlay.game_legs(_alt_games())
+    by = {l["player"]: l for l in legs}
+    # +6.5 has no -6.5 posted against it: no fair price, no leg.
+    assert set(by) == {"DEN +2.5", "LV -2.5", "Over 41.5", "Under 41.5"}
+    a, b = 188 / 288, 100 / 250
+    assert by["DEN +2.5"]["p_cal"] == pytest.approx(a / (a + b), abs=1e-4)
+    assert by["Under 41.5"]["side"] == "UNDER" and by["Under 41.5"]["under_selection_id"] == 5
+    assert {l["key"] for l in legs} == {"game:g1"}            # one game line per game
+
+
+def test_a_ticket_takes_one_game_line_per_game():
+    legs = altparlay.game_legs(_alt_games()) + [
+        _rung(key=f"p{i}", fd_event_id="g1", odds=-110, p_cal=0.6) for i in range(3)]
+    t = altparlay.build(legs, "lotto_receiving")
+    assert t is None or sum(l["market"].startswith("alt_") for l in t["legs"]) <= 1
+    combos = altparlay._game_options(legs, 4, 0.01)
+    assert all(sum(l["market"].startswith("alt_") for l in c) <= 1 for *_, c in combos)
+
+
+def test_td_legs_are_the_likely_scorers_at_the_book_price():
+    tds = [{"player": "Jahmyr Gibbs", "key": "jahmyr gibbs", "team": "DET", "odds": -230,
+            "implied_p": 0.697, "p_cal": 0.62, "avail": "ACTIVE", "fd_event_id": "g1",
+            "kickoff": FUTURE, "fd_market_id": "t", "fd_selection_id": 9},
+           {"player": "Backup", "key": "backup", "team": "DET", "odds": 400,
+            "implied_p": 0.2, "p_cal": 0.3, "avail": "ACTIVE", "fd_event_id": "g1",
+            "kickoff": FUTURE},
+           {"player": "Hurt", "key": "hurt", "team": "DET", "odds": -150,
+            "avail": "OUT", "fd_event_id": "g1", "kickoff": FUTURE}]
+    legs = altparlay.td_legs(tds)
+    assert [l["key"] for l in legs] == ["jahmyr gibbs"]
+    assert legs[0]["p_cal"] == pytest.approx(0.697 * altparlay.TD_FAIR_SHADE, abs=1e-3)
+    assert legs[0]["p_model"] == 0.62 and legs[0]["over_selection_id"] == 9
+
+
+def test_a_runner_qualifies_on_carry_share_and_not_on_the_props_model():
+    base = dict(market="rushing_yards", threshold=40.0, line=39.5, odds=-120,
+                last5=[55.0, 62.0, 48.0, 71.0, 44.0], hits5=5, snap_min=0.45,
+                car_mean=17.0, car_cv=0.2, fair=0.52, edge_pts=-4.0, position="RB")
+    lead = _rung(key="lead", cs_mean=0.55, **base)
+    split = _rung(key="split", cs_mean=0.30, **base)
+    out = altparlay.role_candidates([lead, split])
+    assert [r["key"] for r in out] == ["lead"]               # a negative props edge is fine
+    assert out[0]["p_conf"] > 0.55 and 0.52 < out[0]["p_cal"] < out[0]["p_conf"]
+
+
+def test_game_legs_grade_off_the_final_score():
+    scores = {"LV": (20, 17), "DEN": (17, 20)}
+    spread = {"market": "alt_spread", "team": "DEN", "line": 2.5}
+    assert tracking._grade_leg(spread, {}, set(), scores)[0] == "LOSS"   # lost by 3
+    assert tracking._grade_leg({**spread, "line": 3.0}, {}, set(), scores)[0] == "PUSH"
+    over = {"market": "alt_total", "team": "LV", "line": 36.5, "side": "OVER"}
+    assert tracking._grade_leg(over, {}, set(), scores) == ("WIN", 37.0)
+    assert tracking._grade_leg({**over, "side": "UNDER"}, {}, set(), scores)[0] == "LOSS"
+    assert tracking._grade_leg(over, {}, set(), {})[0] is None           # not final yet

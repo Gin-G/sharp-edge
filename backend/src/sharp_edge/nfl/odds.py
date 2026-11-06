@@ -58,6 +58,16 @@ GAME_MARKETS = {
     "MATCH_HANDICAP_(2-WAY)": "spread",
 }
 
+# The alternate game lines, on the event's "popular" tab. Each is a ladder of
+# runners named "Denver Broncos (+2.5)" or "Over (41.5)", every rung posted on
+# both sides, so a rung's fair price is read against its own opposite.
+GAME_TAB = "popular"
+ALT_GAME_MARKETS = {
+    "ALTERNATE_HANDICAP": "alt_spread",
+    "ALTERNATE_TOTAL": "alt_total",
+}
+_GAME_RUNG = re.compile(r"^(.*?)\s*\(([+-]?\d+(?:\.\d+)?)\)\s*$")
+
 _TIER_SUFFIX = re.compile(r"_(HIGH|MEDIUM|LOW)$")
 # The threshold of an alt rung, from its runner name: "25+ Yards" -> 25.
 _ALT_RUNG = re.compile(r"(\d+)\+\s+[A-Za-z ]+\s*$")
@@ -69,7 +79,7 @@ _SIDE_SUFFIX = re.compile(
     r"\s+(?:Over|Under|\d+\+\s+[A-Za-z ]+)\s*$", re.IGNORECASE
 )
 
-# A full week is 16 games; at 4 tabs each that is 64 requests. Five at a time
+# A full week is 16 games; at 5 tabs each that is 80 requests. Five at a time
 # keeps it brisk without looking like a scrape.
 _MAX_CONCURRENCY = 5
 
@@ -110,6 +120,7 @@ class Board:
     lines: list[Line] = field(default_factory=list)
     tds: list[dict] = field(default_factory=list)
     games: list[dict] = field(default_factory=list)
+    alt_games: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
     error: Optional[str] = None
 
@@ -202,7 +213,7 @@ class FanDuelNFLOdds:
 
             # The game markets (moneyline, total, spread) ride along on every
             # prop tab, so no extra request is needed for them.
-            jobs = [one(ev, tab) for ev in events for tab in PROP_TABS]
+            jobs = [one(ev, tab) for ev in events for tab in PROP_TABS + (GAME_TAB,)]
             results = await asyncio.gather(*jobs)
 
         seen: set = set()
@@ -283,6 +294,24 @@ def _absorb(board: Board, ev: dict, m: dict) -> None:
             })
         return
 
+    if mt in ALT_GAME_MARKETS:
+        for r in m.get("runners") or []:
+            if r.get("runnerStatus") not in (None, "ACTIVE"):
+                continue
+            odds = _american(r)
+            rung = _GAME_RUNG.match(r.get("runnerName") or "")
+            if odds is None or not rung:
+                continue
+            board.alt_games.append({
+                "market": ALT_GAME_MARKETS[mt], "name": rung.group(1),
+                "side": (r.get("result") or {}).get("type"),
+                "line": float(rung.group(2)), "odds": odds,
+                "fd_market_id": m.get("marketId"),
+                "fd_selection_id": r.get("selectionId"),
+                "sgm": bool(m.get("sgmMarket")), **ctx,
+            })
+        return
+
     if mt in GAME_MARKETS:
         board.games.append({
             "market": GAME_MARKETS[mt], "fd_market_id": m.get("marketId"), **ctx,
@@ -328,7 +357,7 @@ def events_in_window(events: Iterable[dict],
 # Slate cache
 # ---------------------------------------------------------------------------
 #
-# Prices move, so this is a short TTL — but a week's board is 64 requests
+# Prices move, so this is a short TTL — but a week's board is 80 requests
 # rather than baseball's 15, so it is a longer one than the MLB cache uses. A
 # failed refresh keeps serving the last good board: stale prices beat none, and
 # the fetched-at stamp lets the UI say how old they are.

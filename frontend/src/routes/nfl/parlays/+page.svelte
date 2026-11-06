@@ -13,7 +13,7 @@
     NFL_CACHE_KEY, load as loadScreen, initialState,
     fmtOdds, fmtPct, fmtSigned, fmtKickoff, MARKET_LABEL, shortEvent,
   } from '$lib/nflScreen';
-  import type { NflScreen, NflAltKind, NflAltParlay, NflRecommendations, NflLedgerBucket, NflPlacedBet } from '$lib/types';
+  import type { NflScreen, NflAltKind, NflAltParlay, NflAltRung, NflRecommendations, NflLedgerBucket, NflPlacedBet } from '$lib/types';
 
   let s = initialState(peek<NflScreen>(NFL_CACHE_KEY));
   $: ({ data, loading, error, warming, warmingElapsed } = s);
@@ -73,7 +73,7 @@
     { key: 'double_up', title: 'Double-up',
       blurb: 'The likeliest ticket that pays at least even money.' },
     { key: 'lotto', title: 'Role lotto',
-      blurb: 'The likeliest 1000x ticket from players in a steady role: on the field for at least half the snaps in each of their last five games, with 12%+ of the targets, clearing the rung in 4 of 5, at a price our role model beats. Up to four players a game; FanDuel bundles those into a same-game parlay.' },
+      blurb: 'The likeliest 1000x ticket from players in a steady role: on the field for at least half the snaps in each of their last five games, with 12%+ of the targets, clearing the rung in 4 of 5, at a price our role model beats; runners need 40%+ of their team\'s carries. Touchdowns join when the book makes them about even money or shorter, and alt spreads and totals at the book\'s own price, one per game. Up to four legs a game; FanDuel bundles those into a same-game parlay.' },
   ];
 
   $: rules = data?.alt_rules;
@@ -94,6 +94,25 @@
     return `${b.wins}-${b.losses} · ${fmtSigned(b.units, 2)}u on ${b.staked ?? 0}u staked · ${roi}`;
   }
   const last4 = (v: number[]) => v.map((x) => (Number.isInteger(x) ? x : x.toFixed(1))).join(' · ');
+  const GAME_MARKETS = ['alt_spread', 'alt_total', 'moneyline'];
+  // "Puka Nacua 6+ Receptions", "Jahmyr Gibbs Anytime TD", "DEN +2.5".
+  function legTitle(l: NflAltRung): string {
+    if (GAME_MARKETS.includes(l.market)) return `${l.player} ${MARKET_LABEL[l.market] ?? l.market}`;
+    if (l.market === 'anytime_td') return `${l.player} ${MARKET_LABEL[l.market]}`;
+    return `${l.player} ${l.threshold}+ ${MARKET_LABEL[l.market] ?? l.market}`;
+  }
+  function legDetail(l: NflAltRung): string {
+    if (GAME_MARKETS.includes(l.market)) return 'priced at the book\'s own chance';
+    if (l.market === 'anytime_td')
+      return `book's chance${l.p_model != null ? ` · our model ${Math.round(100 * l.p_model)}%` : ''}`;
+    if (l.last5 && l.snap_min != null) {
+      const role = l.market === 'rushing_yards'
+        ? `${Math.round(100 * (l.cs_mean ?? 0))}% of carries`
+        : `snaps ≥${Math.round(100 * l.snap_min)}% · ${Math.round(100 * (l.ts_mean ?? 0))}% of targets`;
+      return `last 5: ${last4(l.last5)} · ${role}`;
+    }
+    return `last 4: ${last4(l.last4 ?? [])}`;
+  }
 
   let copied: NflAltKind | null = null;
   async function copy(k: NflAltKind, url: string) {
@@ -172,7 +191,7 @@
                 </span>
               </div>
               <div class="text-xs text-slate-500 mt-1">
-                {b.legs.map((l) => `${l.player} ${l.threshold ?? l.line}${l.threshold ? '+' : ''} ${MARKET_LABEL[l.market] ?? l.market} (${fmtOdds(l.odds)})`).join(' · ')}
+                {b.legs.map((l) => `${GAME_MARKETS.includes(l.market) || l.market === 'anytime_td' ? `${l.player} ${MARKET_LABEL[l.market] ?? l.market}` : `${l.player} ${l.threshold ?? l.line}${l.threshold ? '+' : ''} ${MARKET_LABEL[l.market] ?? l.market}`} (${fmtOdds(l.odds)})`).join(' · ')}
               </div>
             </div>
           {/each}
@@ -224,14 +243,8 @@
                   {#each t.legs as l}
                     <tr class="border-t border-border/40">
                       <td class="px-5 py-2">
-                        <div class="text-slate-200">{l.player} {l.threshold}+ {MARKET_LABEL[l.market] ?? l.market}</div>
-                        <div class="text-xs text-slate-500">{shortEvent(l.event)} · {fmtKickoff(l.kickoff)} ·
-                          {#if l.last5 && l.snap_min != null}
-                            last 5: {last4(l.last5)} · snaps ≥{Math.round(100 * l.snap_min)}% · {Math.round(100 * (l.ts_mean ?? 0))}% of targets
-                          {:else}
-                            last 4: {last4(l.last4)}
-                          {/if}
-                        </div>
+                        <div class="text-slate-200">{legTitle(l)}</div>
+                        <div class="text-xs text-slate-500">{shortEvent(l.event)} · {fmtKickoff(l.kickoff)} · {legDetail(l)}</div>
                       </td>
                       <td class="px-2 py-2 text-right text-slate-300">{fmtOdds(l.odds)}</td>
                       <td class="px-5 py-2 text-right text-slate-400" title="Record-calibrated chance">{fmtPct(l.p_cal, 0)}</td>

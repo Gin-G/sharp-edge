@@ -57,6 +57,8 @@ from .names import norm_name
 logger = logging.getLogger(__name__)
 
 # Which nflverse column settles each market.
+# Legs read off the final score rather than a box score (see _grade_leg).
+GAME_LEG_MARKETS = ("moneyline", "alt_spread", "alt_total")
 SETTLE_COLUMN = {
     "receiving_yards": "receiving_yards",
     "rushing_yards": "rushing_yards",
@@ -772,8 +774,9 @@ async def record_alt_parlays(season: int, week: int, parlays: dict,
                     "player", "key", "team", "position", "market", "line",
                     "threshold", "side", "odds", "implied", "fair", "model_p",
                     "p_cal", "edge_pts", "hits4", "last4", "hits5", "last5", "p_conf",
-                    "p_props", "snap_min", "ts_mean", "tgt_mean", "event", "fd_event_id",
-                    "kickoff", "fd_market_id", "over_selection_id")},
+                    "p_props", "snap_min", "ts_mean", "tgt_mean", "cs_mean", "p_model",
+                    "home_team", "away_team", "event", "fd_event_id", "kickoff",
+                    "fd_market_id", "over_selection_id", "under_selection_id")},
                  "lock_at": _lock_stamp(leg)} for leg in p["legs"]]
         await db.upsert_nfl_alt_parlay({
             "season": season, "week": week, "kind": kind,
@@ -809,15 +812,25 @@ def _grade_leg(leg: dict, actuals: dict, played: set,
     """``(WIN | LOSS | PUSH | VOID | None, actual)`` for one parlay leg.
 
     None while its game is still to be graded. A player with no row voids, as
-    the book voids him. A moneyline leg (the paper lotto's anchors) is read off
-    the final score, ``scores[team] = (points for, points against)``.
+    the book voids him. A game leg — a moneyline (the paper lotto's anchors),
+    an alternate spread or an alternate total — is read off the final score,
+    ``scores[team] = (points for, points against)``.
     """
-    if leg.get("market") == "moneyline":
+    market = leg.get("market")
+    if market in ("moneyline", "alt_spread", "alt_total"):
         sc = (scores or {}).get(leg.get("team"))
         if sc is None:
             return None, None
-        return ("WIN" if sc[0] > sc[1] else "LOSS" if sc[0] < sc[1] else "PUSH"), \
-            float(sc[0] - sc[1])
+        if market == "alt_total":
+            total = float(sc[0] + sc[1])
+            margin = total - float(leg["line"])
+            if leg.get("side") == "UNDER":
+                margin = -margin
+            actual = total
+        else:
+            actual = float(sc[0] - sc[1])
+            margin = actual + (float(leg["line"]) if market == "alt_spread" else 0.0)
+        return ("WIN" if margin > 0 else "LOSS" if margin < 0 else "PUSH"), actual
     if leg.get("team") not in played:
         return None, None
     row = actuals.get(leg.get("key"))
@@ -866,7 +879,8 @@ async def _settle_alt_parlays(season: int, week: int, actuals: dict,
     for p in await db.list_nfl_alt_parlays(season, week):
         if p.get("result") or not p.get("frozen"):
             continue
-        res, won, graded, dec = _grade_alt_parlay(p.get("legs") or [], actuals, played)
+        res, won, graded, dec = _grade_alt_parlay(p.get("legs") or [], actuals, played,
+                                                  await _week_scores(season, week))
         if res is None:
             continue
         await db.settle_nfl_alt_parlay(season, week, p["kind"], res, won, graded, dec)
@@ -886,8 +900,9 @@ async def _settle_alt_parlays(season: int, week: int, actuals: dict,
 PAPER_TZ = "America/Denver"
 PAPER_LEG_FIELDS = ("player", "key", "team", "position", "market", "line", "threshold",
                     "side", "odds", "p_cal", "p_conf", "p_props", "edge_pts", "hits4",
-                    "hits5", "snap_min", "ts_mean", "tgt_mean", "anchor", "event",
-                    "fd_event_id", "kickoff", "home_team", "away_team")
+                    "hits5", "snap_min", "ts_mean", "tgt_mean", "cs_mean", "fair",
+                    "p_model", "anchor", "event", "fd_event_id", "kickoff", "home_team",
+                    "away_team")
 
 
 def _paper_day(now: Optional[datetime] = None) -> str:
@@ -974,9 +989,14 @@ async def _settle_paper(season: int, week: int, actuals: dict, played: set) -> i
     return n
 
 
+# How the record splits a strategy's legs, so each kind is judged on its own.
+_LEG_KIND = {"rushing_yards": "rush", "anytime_td": "td", "moneyline": "ml",
+             "alt_spread": "game", "alt_total": "game"}
+
 PAPER_LABELS = {"double_up": "Double-up", "lotto": "Role lotto",
                 "lotto_streak": "Streak lotto (old rule)",
                 "lotto_one": "Role lotto, one per game",
+                "lotto_receiving": "Role lotto, receiving only (control)",
                 "short_stack": "Short stack", "anchored": "Anchored lotto"}
 
 
@@ -1019,7 +1039,7 @@ async def paper_record(season: Optional[int] = None) -> dict:
         legs: dict = {}
         for r in mine:
             for l in r["legs"]:
-                kind = l.get("anchor") or "rung"
+                kind = l.get("anchor") or _LEG_KIND.get(l.get("market"), "rung")
                 b = legs.setdefault(kind, {"won": 0, "lost": 0, "claimed": 0.0})
                 if l.get("result") in ("WIN", "LOSS"):
                     b["won" if l["result"] == "WIN" else "lost"] += 1
@@ -1048,6 +1068,7 @@ async def paper_record(season: Optional[int] = None) -> dict:
 
 PLACED_LEG_FIELDS = ("player", "key", "team", "market", "line", "threshold", "side",
                      "odds", "p_cal", "event", "fd_event_id", "kickoff",
+                     "home_team", "away_team",
                      "fd_market_id", "over_selection_id", "under_selection_id")
 
 
@@ -1059,12 +1080,15 @@ def _placed_row(bet: dict) -> dict:
     clean = []
     for leg in legs:
         market = leg.get("market")
-        if market not in SETTLE_COLUMN and market != TD_MARKET:
+        if market not in SETTLE_COLUMN and market not in (TD_MARKET,) + GAME_LEG_MARKETS:
             raise ValueError(f"cannot settle a {market!r} leg")
         if leg.get("line") is None or not (leg.get("key") or leg.get("player")):
             raise ValueError("every leg needs a player and a line")
+        if market in GAME_LEG_MARKETS and not leg.get("team"):
+            raise ValueError("a game leg needs the team it is graded from")
         out = {k: leg.get(k) for k in PLACED_LEG_FIELDS}
-        out["key"] = out["key"] or norm_name(out["player"])
+        out["key"] = out["key"] or (None if market in GAME_LEG_MARKETS
+                                    else norm_name(out["player"]))
         out["side"] = (out["side"] or "OVER").upper()
         clean.append(out)
     american = bet.get("american")
@@ -1103,7 +1127,8 @@ async def _settle_placed(season: int, week: int, actuals: dict, played: set) -> 
         if b.get("result"):
             continue
         legs = b.get("legs") or []
-        res, won, graded, dec = _grade_alt_parlay(legs, actuals, played)
+        res, won, graded, dec = _grade_alt_parlay(legs, actuals, played,
+                                                  await _week_scores(season, week))
         if res is None:
             continue
         # The price taken stands unless a leg voided; then the book reprices

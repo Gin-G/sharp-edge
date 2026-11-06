@@ -1177,3 +1177,16 @@ minutes and would otherwise serve the pre-fix numbers.
 **Shipped.** Lotto legs: snap share ≥50% in each of the last five, target share ≥12%, 4+ of 5 cleared, confidence model ≥3 pts over the rung's fair price, props model not below fair, -300 to +150; chance read halfway (logit) from fair to the confidence model. The old streak lotto stays on paper as `lotto_streak`, the control. Short stack and anchored lotto now draw from the role legs.
 
 **Not established.** That role legs beat the price: one priced week, correlated legs. Judge on `nfl_paper_tickets` leg hit rate vs `p_cal` and implied after 3+ weeks.
+
+## The lotto widens: rushing, touchdowns, alt spreads and totals (2026-11-06)
+
+The owner asked for the lotto to draw on rushing again, on likely touchdowns, and on FanDuel's alternate spreads and totals. What the data said about each, and what shipped:
+
+- **Rushing** (`scripts/role_lotto/rush_frame.py`, `fit_rush.py`, `rush_price_check.py`). Same method as the receiving study, carry share in place of target share. Fitted on 2024-25, held out on 2026 (n=1,942 rungs): said 55 / hit 54, 65 / 61, 75 / 71, 85 / 85; role adds to history (AUC 0.745 → 0.760). Carry share ≥40% calibrates the 55-80% band (said 68.6 / hit 68.7); the snap floor added nothing. **Against week 8's alt rushing prices** (195 rungs, 54 players): role legs at -300..+150 hit 53% vs 61% implied, model-edge legs 48% vs 59%, no-role legs 34%. No edge on the one priced week, and a bad week for every short leg.
+  Shipped: rushing rungs join the role lotto on carry share ≥40%, 4+ of 5, the rushing confidence model ≥3 pts over fair. The props model, which is what lost on rushing in Finding 14, is not consulted.
+- **Touchdowns.** Only week 8's 15 TD picks are graded, so there is no record to fit. On the week-9 board our TD model sits *below* the book on every short price (Gibbs -400: book 80%, model 69%; McCaffrey -320: 76% vs 55%), the reverse of its longshot edges. Short favourites are where books are sharpest.
+  Shipped: anytime TDs whose quote, less an assumed 8% margin (FanDuel posts no "No" side), gives at least 45%, about even money or shorter, priced at that book chance. Our model's number is shown, not used.
+- **Alt spreads and totals** (`ALTERNATE_HANDICAP`, `ALTERNATE_TOTAL` on the event's "popular" tab). Every rung is posted on both sides, so each is de-vigged against its own opposite. No model: the game model adds nothing to the closing spread (Finding 14).
+  Shipped: at the fair price, at most one game line per game, as a spread and a total from one game move together.
+
+TD and game legs carry no claimed edge, so the knapsack takes one only where nothing likelier pays as much; they are filler for thin slates, not picks. The paper strategy `lotto_receiving` is the role lotto as it was (receiving only), the control. The strategy lab now splits each strategy's legs into receiving, rushing, TD and spread/total, each with hit rate against the chance it was priced at. Judge each kind there after 3+ weeks.

@@ -121,6 +121,7 @@ class NFLBoard:
     props: list[dict] = field(default_factory=list)
     tds: list[dict] = field(default_factory=list)
     games: list[dict] = field(default_factory=list)
+    alt_games: list[dict] = field(default_factory=list)
     #: Our own score/total/margin view of each game.
     game_model: list[dict] = field(default_factory=list)
     #: Each game simulated from our projection and from FanDuel's own lines:
@@ -222,6 +223,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
 
     by_key = proj.by_key()
     board.games = fd.games
+    board.alt_games = fd.alt_games
 
     # Our own view of each game, fitted on results only so it can be compared
     # with the line rather than derived from it, then simulated against
@@ -441,8 +443,9 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                     "hits4": sum(1 for v in last4 if v > rung.line),
                     "last5": last5,
                     "hits5": sum(1 for v in last5 if v > rung.line),
-                    **{k: (role or {}).get(k) for k in ("snap_min", "ts_mean",
-                                                        "tgt_mean", "tgt_cv")},
+                    **{k: (role or {}).get(k) for k in ("snap_min", "ts_mean", "tgt_mean",
+                                                        "tgt_cv", "cs_mean", "car_mean",
+                                                        "car_cv")},
                     "fd_market_id": rung.market_id,
                     "over_selection_id": rung.over_selection,
                     "role_conflict_verdict": None,
@@ -534,8 +537,9 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
     if not proj.preseason:
         cands = altparlay.candidates(board.alt_rungs)
         role = altparlay.role_candidates(board.alt_rungs)
+        extra = altparlay.td_legs(board.tds) + altparlay.game_legs(board.alt_games)
         board.alt_parlays = {"double_up": altparlay.build(cands, "double_up"),
-                             "lotto": altparlay.build(role, "lotto")}
+                             "lotto": altparlay.build(role + extra, "lotto")}
         # The paper strategies, recorded daily beside them. A moneyline row has
         # no FanDuel event id, so its game is found through either team's props.
         game_of_team: dict = {}
@@ -544,7 +548,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
                 game_of_team.setdefault(r["team"], r["fd_event_id"])
         anchors = altparlay.anchor_legs(card_mod.td_suggestions(board.tds),
                                         board.game_model, game_of_team)
-        board.alt_parlays.update(altparlay.build_paper(cands, role, anchors))
+        board.alt_parlays.update(altparlay.build_paper(cands, role, anchors, extra))
     board.props.sort(key=_prop_rank)
     board.tds.sort(key=lambda r: -(r.get("true_edge_pts")
                                    if r.get("true_edge_pts") is not None else -99))
@@ -836,6 +840,7 @@ def as_payload(board: NFLBoard) -> dict:
         },
         "alt_candidates": altparlay.candidates(board.alt_rungs),
         "role_candidates": altparlay.role_candidates(board.alt_rungs),
+        "lotto_extra_legs": altparlay.td_legs(board.tds) + altparlay.game_legs(board.alt_games),
         "alt_rules": {
             "rungs_priced": len(board.alt_rungs),
             "record_games": altparlay.RECORD_GAMES, "min_hits": altparlay.MIN_HITS,
@@ -843,7 +848,8 @@ def as_payload(board: NFLBoard) -> dict:
             "kinds": altparlay.KINDS, "max_legs": altparlay.MAX_LEGS,
             "role": {"games": altparlay.ROLE_GAMES, "min_hits": altparlay.ROLE_MIN_HITS,
                      "snap_min": altparlay.ROLE_SNAP_MIN, "ts_min": altparlay.ROLE_TS_MIN,
-                     "min_edge": altparlay.CONF_MIN_EDGE},
+                     "cs_min": altparlay.ROLE_CS_MIN, "min_edge": altparlay.CONF_MIN_EDGE,
+                     "td_min_fair": altparlay.TD_MIN_FAIR},
         },
         "tds": board.tds,
         "td_picks": card_mod.td_suggestions(board.tds),
