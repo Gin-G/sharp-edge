@@ -21,11 +21,48 @@
   let hideThin = true;
   let positive = false;
 
-  $: rows = (data?.tds ?? []).filter((r) => {
-    if (hideThin && r.thin) return false;
-    if (positive && !((r.true_edge_pts ?? -1) > 0)) return false;
-    return true;
-  });
+  // Click a column header to sort by it; click again to flip. Null sorts
+  // last either way. Numbers start high-first, text starts A-Z.
+  type Row = NflScreen['tds'][number];
+  const SORT: Record<string, (r: Row) => number | string | null | undefined> = {
+    player: (r) => r.player,
+    position: (r) => r.position,
+    team: (r) => r.team,
+    projected_tds: (r) => r.projected_tds,
+    p_cal: (r) => r.p_cal,
+    // A longer price is a smaller implied chance, so price sorts on that.
+    odds: (r) => (r.implied_p != null ? -r.implied_p : null),
+    implied_p: (r) => r.implied_p,
+    true_edge_pts: (r) => r.true_edge_pts,
+    ev: (r) => r.ev,
+    edge_pts: (r) => r.edge_pts,
+    kickoff: (r) => r.kickoff,
+  };
+  let sortKey: string | null = null;
+  let sortDesc = true;
+  function sortBy(k: string) {
+    if (sortKey === k) sortDesc = !sortDesc;
+    else { sortKey = k; sortDesc = !['player', 'position', 'team', 'kickoff'].includes(k); }
+  }
+  const arrow = (k: string, key: string | null, desc: boolean) =>
+    key === k ? (desc ? ' ▼' : ' ▲') : '';
+
+  $: rows = (() => {
+    const out = (data?.tds ?? []).filter((r) => {
+      if (hideThin && r.thin) return false;
+      if (positive && !((r.true_edge_pts ?? -1) > 0)) return false;
+      return true;
+    });
+    if (!sortKey) return out;
+    const get = SORT[sortKey];
+    const dir = sortDesc ? -1 : 1;
+    return [...out].sort((a, b) => {
+      const x = get(a), y = get(b);
+      if (x == null) return y == null ? 0 : 1;
+      if (y == null) return -1;
+      return (x < y ? -1 : x > y ? 1 : 0) * dir;
+    });
+  })();
 
   // The market's total overround, which is the thing to know before reading
   // any edge on this page. FanDuel books every scorer in a game, so the book's
@@ -142,20 +179,30 @@
           <table class="w-full text-sm">
             <thead class="sticky top-0 bg-surface-800">
               <tr class="border-b border-border text-xs font-medium text-slate-400 uppercase tracking-wider">
-                <th class="text-left px-4 py-3">Player</th>
-                <th class="text-left px-4 py-3">Pos</th>
-                <th class="text-left px-4 py-3">Team</th>
-                <th class="text-right px-4 py-3" title="Projected rushing + receiving touchdowns">Proj TD</th>
-                <th class="text-right px-4 py-3" title="Probability of scoring, calibrated on 2,318 player-games this season with each week held out in turn">Scores</th>
-                <th class="text-right px-4 py-3">Price</th>
-                <th class="text-right px-4 py-3" title="Implied by the price, vig included">Implied</th>
-                <th class="text-right px-4 py-3" title="Scores minus Implied. Positive means the price is long enough to beat the vig.">Edge</th>
-                <th class="text-right px-4 py-3">EV</th>
+                <th class="cursor-pointer select-none hover:text-slate-200 text-left px-4 py-3"
+                  on:click={() => sortBy('player')}>Player{arrow('player', sortKey, sortDesc)}</th>
+                <th class="cursor-pointer select-none hover:text-slate-200 text-left px-4 py-3"
+                  on:click={() => sortBy('position')}>Pos{arrow('position', sortKey, sortDesc)}</th>
+                <th class="cursor-pointer select-none hover:text-slate-200 text-left px-4 py-3"
+                  on:click={() => sortBy('team')}>Team{arrow('team', sortKey, sortDesc)}</th>
+                <th class="cursor-pointer select-none hover:text-slate-200 text-right px-4 py-3" title="Projected rushing + receiving touchdowns"
+                  on:click={() => sortBy('projected_tds')}>Proj TD{arrow('projected_tds', sortKey, sortDesc)}</th>
+                <th class="cursor-pointer select-none hover:text-slate-200 text-right px-4 py-3" title="Probability of scoring, calibrated on 2,318 player-games this season with each week held out in turn"
+                  on:click={() => sortBy('p_cal')}>Scores{arrow('p_cal', sortKey, sortDesc)}</th>
+                <th class="cursor-pointer select-none hover:text-slate-200 text-right px-4 py-3"
+                  on:click={() => sortBy('odds')}>Price{arrow('odds', sortKey, sortDesc)}</th>
+                <th class="cursor-pointer select-none hover:text-slate-200 text-right px-4 py-3" title="Implied by the price, vig included"
+                  on:click={() => sortBy('implied_p')}>Implied{arrow('implied_p', sortKey, sortDesc)}</th>
+                <th class="cursor-pointer select-none hover:text-slate-200 text-right px-4 py-3" title="Scores minus Implied. Positive means the price is long enough to beat the vig."
+                  on:click={() => sortBy('true_edge_pts')}>Edge{arrow('true_edge_pts', sortKey, sortDesc)}</th>
+                <th class="cursor-pointer select-none hover:text-slate-200 text-right px-4 py-3"
+                  on:click={() => sortBy('ev')}>EV{arrow('ev', sortKey, sortDesc)}</th>
                 <th
-                  class="text-right px-4 py-3"
+                  class="cursor-pointer select-none hover:text-slate-200 text-right px-4 py-3"
                   title="Relative read: the model shifted until the game's field totals what the book's does. Says which players the field under-prices, not whether any of them is a bet."
-                >Field</th>
-                <th class="text-left px-4 py-3">Game</th>
+                  on:click={() => sortBy('edge_pts')}>Field{arrow('edge_pts', sortKey, sortDesc)}</th>
+                <th class="cursor-pointer select-none hover:text-slate-200 text-left px-4 py-3"
+                  on:click={() => sortBy('kickoff')}>Game{arrow('kickoff', sortKey, sortDesc)}</th>
               </tr>
             </thead>
             <tbody>
