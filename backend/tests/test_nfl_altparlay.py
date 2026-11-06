@@ -484,6 +484,8 @@ def _alt_games(eid="g1"):
                              "marketStatus": "OPEN", "runners": [
         _game_runner("Over (41.5)", -172, "OVER", 4),
         _game_runner("Under (41.5)", 136, "UNDER", 5),
+        _game_runner("Over (47.5)", 120, "OVER", 6),
+        _game_runner("Under (47.5)", -150, "UNDER", 7),
     ]})
     return board.alt_games
 
@@ -492,10 +494,11 @@ def test_alt_game_lines_are_priced_against_their_own_opposite():
     legs = altparlay.game_legs(_alt_games())
     by = {l["player"]: l for l in legs}
     # +6.5 has no -6.5 posted against it: no fair price, no leg.
-    assert set(by) == {"DEN +2.5", "LV -2.5", "Over 41.5", "Under 41.5"}
+    # The underdog sides (LV -2.5, Under 41.5) fall short of an even chance.
+    assert set(by) == {"DEN +2.5", "Over 41.5", "Under 47.5"}
+    assert by["Under 47.5"]["side"] == "UNDER" and by["Under 47.5"]["under_selection_id"] == 7
     a, b = 188 / 288, 100 / 250
     assert by["DEN +2.5"]["p_cal"] == pytest.approx(a / (a + b), abs=1e-4)
-    assert by["Under 41.5"]["side"] == "UNDER" and by["Under 41.5"]["under_selection_id"] == 5
     assert {l["key"] for l in legs} == {"game:g1"}            # one game line per game
 
 

@@ -772,6 +772,7 @@ def warm_async(force: bool = False) -> dict:
 
 def as_payload(board: NFLBoard) -> dict:
     """The board as the API serves it."""
+    lo, hi = altparlay.KINDS["lotto"]["odds"]
     # Stamp every row with its own commitment point before anything reads the
     # board, so the page can show what is committed without re-deriving the
     # deadline. One copy of that arithmetic, in card.LOCK_LEAD — the same
@@ -840,7 +841,10 @@ def as_payload(board: NFLBoard) -> dict:
         },
         "alt_candidates": altparlay.candidates(board.alt_rungs),
         "role_candidates": altparlay.role_candidates(board.alt_rungs),
-        "lotto_extra_legs": altparlay.td_legs(board.tds) + altparlay.game_legs(board.alt_games),
+        # Only the rungs the lotto could take: a game has ~200 alt rungs.
+        "lotto_extra_legs": [l for l in altparlay.td_legs(board.tds)
+                             + altparlay.game_legs(board.alt_games)
+                             if lo <= l["odds"] <= hi],
         "alt_rules": {
             "rungs_priced": len(board.alt_rungs),
             "record_games": altparlay.RECORD_GAMES, "min_hits": altparlay.MIN_HITS,

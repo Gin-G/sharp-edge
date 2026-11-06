@@ -115,6 +115,11 @@ ROLE_MARKETS = ("receiving_yards", "receptions", RUSH)
 # margin on a favourite's quote.
 TD_MIN_FAIR = 0.45
 TD_FAIR_SHADE = 0.92
+# Alt spreads and totals, held to the same kind of bar: a fair chance of at
+# least half, about -115 or shorter. Uncapped, the first week-9 build took two
+# plus-money totals at 38% and 42% to fill games with no role leg — a slot
+# filled with a coin flip, which is the leg this lotto exists to avoid.
+GAME_MIN_FAIR = 0.50
 
 # Payout targets, as decimal odds, and the price window each draws legs from.
 # The double-up stops at -500 because shorter than that the book prices the
@@ -421,7 +426,8 @@ def game_legs(alt_games: Iterable[dict]) -> list[dict]:
     the closing spread (Finding 14), so a game leg is the book's chance and
     the vig, and it makes the ticket only where nothing likelier pays as much.
 
-    Every game line of one game shares a key, so a ticket takes at most one
+    Only rungs with a fair chance of GAME_MIN_FAIR or better. Every game
+    line of one game shares a key, so a ticket takes at most one
     of them per game — a spread and a total from one game move together.
     """
     from ..fanduel.odds import american_to_implied
@@ -458,6 +464,8 @@ def game_legs(alt_games: Iterable[dict]) -> list[dict]:
             if not a or not b:
                 continue
             fair = a / (a + b)
+            if fair < GAME_MIN_FAIR:
+                continue
             out.append({"market": g["market"], "player": label, "key": f"game:{eid}",
                         "team": team, "home_team": home, "away_team": away,
                         "line": g["line"], "side": "UNDER" if g.get("side") == "UNDER" else "OVER",
