@@ -19,8 +19,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # FanDuel-only build, drop it and remove playwright from requirements.txt —
 # the DraftKings routes then answer 501 naming the missing browser and nothing
 # else changes.
-RUN playwright install --with-deps chromium && \
-    apt-get update && apt-get install -y --no-install-recommends xvfb && \
+#
+# libatomic1 first: from playwright 1.65 the bundled node driver links it, the
+# slim base does not carry it, and without it `playwright install` itself
+# fails with exit 127 before it can pull any dependencies (2026-11-23).
+RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 && \
+    playwright install --with-deps chromium && \
+    apt-get install -y --no-install-recommends xvfb && \
     rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
