@@ -198,10 +198,13 @@ def cushion(r: dict) -> Optional[float]:
 # known, at a rung well under what they usually do -- "Malachi Fields 15+ when
 # his line is ~30". Measured on the archive: a steady role at 1.6x+ cushion,
 # yards markets, -500..-150, returned -13% a leg against -21% for the old
-# props-edge legs. Receptions are left out: 2-for-1 the worst market (-28%).
-# Negative still -- nothing beats the price -- but the least of it.
+# props-edge legs. Negative still -- nothing beats the price -- but the least
+# of it. Receptions are in (owner's call, 2026-11-23; with them -15%, within
+# noise), and a leg needs the rung cleared in 4 of his last five: the owner's
+# "consistency" (Reggie Virgil, 5+ yards, failed), and on the archive -12% a leg.
 DOUBLE_UP_CUSHION = 1.6
-DOUBLE_UP_MARKETS = ("receiving_yards", RUSH)
+DOUBLE_UP_MIN_HITS = 4
+DOUBLE_UP_MARKETS = ROLE_MARKETS
 
 
 def _priced_measured(r: dict) -> Optional[dict]:
@@ -221,6 +224,8 @@ def double_up_legs(rungs: Iterable[dict]) -> list[dict]:
     out = []
     for r in rungs:
         if r.get("market") not in DOUBLE_UP_MARKETS or not role_ok(r) or not _leg_ok(r):
+            continue
+        if (r.get("hits5") or 0) < DOUBLE_UP_MIN_HITS:
             continue
         c = cushion(r)
         if c is None or c < DOUBLE_UP_CUSHION:
@@ -254,8 +259,10 @@ def lotto_legs(rungs: Iterable[dict]) -> list[dict]:
 # floor and reaches further up the ladder for payout.
 KINDS = {
     # 2-3 legs to about even money (owner's call, 2026-11-23).
+    # Two legs may share a game: the owner plays these as same-game parlays,
+    # and a one-game night (Monday, Thursday) has no other way to build one.
     "double_up": {"target": 2.0, "odds": (-500, -150), "min_legs": 2, "max_legs": 3,
-                  "stake": 1.0},
+                  "stake": 1.0, "per_game": 2},
     # One leg per game: FanDuel prices a same-game bundle below the product of
     # its legs (SGP_SHADE), a margin on top of the legs' own. The window reaches
     # +199; past +200 a rung returns -31% (Finding 16).
@@ -266,10 +273,13 @@ KINDS = {
 MAX_LEGS = 25
 # FanDuel bundles the legs a parlay takes from one game into a same-game
 # parlay and prices that bundle itself, below the product of its legs. This is
-# the assumed price of each bundle against that product — a placeholder until
-# a betslip quote calibrates it. A ticket with a bundle carries
-# ``price_estimated``.
-SGP_SHADE = 0.85
+# the price of each bundle against that product. It was a placeholder 0.85
+# until the first real betslip quote (2026-11-23, Monday night): Chase Brown
+# 40+ rushing (-160) with Treylon Burks 2+ receptions (-245), product +129,
+# paid +123 -- 0.975. One quote, two players' unrelated markets; a same-player
+# or obviously correlated pair would be shaded harder. A ticket with a bundle
+# carries ``price_estimated``.
+SGP_SHADE = 0.975
 
 # Paper strategies: built and recorded daily beside the two above, never bet
 # by the board, so the record can say which way of reaching a long price

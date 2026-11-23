@@ -437,7 +437,7 @@ def test_several_per_game_takes_different_players_and_marks_the_price():
     # 1000x at -110 takes eleven legs, more once the bundles are shaded; six
     # games give them three apiece.
     assert t["decimal_odds"] >= 1000 and not t["short_of_target"] and t["price_estimated"]
-    assert 12 <= t["leg_count"] <= 18
+    assert 11 <= t["leg_count"] <= 18
     assert len({l["key"] for l in t["legs"]}) == t["leg_count"]   # one rung per player
     assert t["decimal_odds"] == round(altparlay.ticket_decimal(t["legs"]), 2)
     assert not altparlay.build(legs, "double_up_edge")["price_estimated"]
@@ -449,7 +449,7 @@ def test_four_games_can_carry_a_long_ticket():
             for g in range(4) for i in range(5)]
     t = altparlay.build(legs, "lotto_conf")
     assert t["decimal_odds"] >= 1000 and not t["short_of_target"]
-    assert len({l["fd_event_id"] for l in t["legs"]}) == 4
+    assert 3 <= len({l["fd_event_id"] for l in t["legs"]}) <= 4
     assert max(sum(l["fd_event_id"] == g for l in t["legs"]) for g in "g0 g1 g2 g3".split()) <= 4
 
 
@@ -576,7 +576,7 @@ def test_the_price_archive_reads_back_its_opening_and_latest_quote(tmp_path):
 # --- measured margin (Finding 16) --------------------------------------------
 
 def _steady(**kw):
-    base = dict(snap_min=0.8, ts_mean=0.2, cs_mean=0.0,
+    base = dict(snap_min=0.8, ts_mean=0.2, cs_mean=0.0, hits5=5,
                 last5=[30.0, 28.0, 35.0, 31.0, 40.0], threshold=15.0, line=14.5,
                 odds=-300)
     base.update(kw)
@@ -601,7 +601,9 @@ def test_double_up_legs_are_steady_players_at_a_deep_cushion():
     assert leg["p_model"] == ok["p_cal"] and leg["p_cal"] < 0.75
     assert altparlay.double_up_legs([_steady(threshold=25.0, line=24.5)]) == []   # 1.24x
     assert altparlay.double_up_legs([_steady(snap_min=0.3)]) == []                # no role
-    assert altparlay.double_up_legs([_steady(market="receptions", threshold=2.0)]) == []
+    assert len(altparlay.double_up_legs([_steady(market="receptions", threshold=2.0,
+                                                 last5=[4.0, 5.0, 3.0, 4.0, 6.0])])) == 1
+    assert altparlay.double_up_legs([_steady(hits5=3)]) == []                     # 3 of 5
     assert altparlay.double_up_legs([_steady(last5=[30.0, 31.0])]) == []          # no five
 
 

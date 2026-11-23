@@ -1349,3 +1349,13 @@ tickets settle nothing; the leg ROIs above are the evidence.
   FanDuel price has ever been compared with another book's.
 * The double-up's 1.6 cushion and the receptions cut were chosen looking at
   these weeks. Judge from week 12 on, against `double_up_edge`.
+
+**Addendum, same day (owner's calls).** The double-up now takes receptions
+(with them -15% a leg against -13%, within noise) and needs the rung cleared
+in 4 of the last five (-12%): the owner's "consistency" — the example was a
+hand-built ticket (Malachi Fields 15+, Brian Thomas 5+, Reggie Virgil 5+) lost
+on Virgil, a depth receiver the new rule would not take: no five-game role. Two legs may share a game (`per_game` 2), as the
+owner plays these as same-game parlays and a one-game night has no other way
+to build one. `SGP_SHADE` 0.85 → 0.975 from the first real betslip quote:
+Chase Brown 40+ rushing (-160) + Treylon Burks 2+ receptions (-245), product
++129, paid +123. One quote.
