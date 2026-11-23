@@ -546,3 +546,28 @@ def test_game_legs_grade_off_the_final_score():
     assert tracking._grade_leg(over, {}, set(), scores) == ("WIN", 37.0)
     assert tracking._grade_leg({**over, "side": "UNDER"}, {}, set(), scores)[0] == "LOSS"
     assert tracking._grade_leg(over, {}, set(), {})[0] is None           # not final yet
+
+
+def test_the_price_archive_reads_back_its_opening_and_latest_quote(tmp_path):
+    from sharp_edge.db.sqlite import SQLiteDatabase
+
+    async def run():
+        db = SQLiteDatabase(str(tmp_path / "t.db"))
+        await db.connect()
+        try:
+            row = {"season": 2026, "week": 9, "player_key": "malachi fields",
+                   "market": "receiving_yards", "line": 15.0, "player": "Malachi Fields",
+                   "team": "NYG", "event": "x", "kickoff": "2026-11-08T18:00:00Z",
+                   "odds": -300, "model_p": 0.8, "p_cal": 0.78, "edge_pts": 3.0, "hits4": 4}
+            await db.upsert_nfl_alt_prices([row])
+            await db.upsert_nfl_alt_prices([{**row, "odds": -350}])
+            await db.upsert_nfl_alt_prices([{**row, "week": 10}])
+            (r,) = await db.list_nfl_alt_prices(2026, 9)
+            assert (r["open_odds"], r["odds"]) == (-300, -350)
+            assert r["player"] == "Malachi Fields" and r["line"] == 15.0
+            assert len(await db.list_nfl_alt_prices(2026)) == 2
+            assert await db.list_nfl_alt_prices(2025) == []
+        finally:
+            await db.close()
+
+    asyncio.run(run())

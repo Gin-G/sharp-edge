@@ -379,6 +379,12 @@ class BetDatabase(ABC):
         leg rules will eventually be backtested on in units."""
 
     @abstractmethod
+    async def list_nfl_alt_prices(
+        self, season: int, week: Optional[int] = None
+    ) -> list[dict]:
+        """The archived rungs, for a season or one week of it."""
+
+    @abstractmethod
     async def upsert_nfl_paper_ticket(self, row: dict) -> bool:
         """Write a strategy's ticket for one day unless that day's is settled.
 

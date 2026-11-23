@@ -805,6 +805,17 @@ class SQLiteDatabase(BetDatabase):
         await self._db.commit()
         return bool(cursor.rowcount)
 
+    async def list_nfl_alt_prices(self, season, week=None) -> list[dict]:
+        sql = ("SELECT season, week, player_key, market, line, player, team, event, kickoff, open_odds, odds, model_p, p_cal, edge_pts, hits4, first_seen, last_seen "
+               "FROM nfl_alt_prices WHERE season = ?")
+        args: list = [season]
+        if week is not None:
+            sql += " AND week = ?"; args.append(week)
+        sql += " ORDER BY week, player_key, market, line"
+        cursor = await self._db.execute(sql, args)
+        names = [d[0] for d in cursor.description]
+        return [dict(zip(names, r)) for r in await cursor.fetchall()]
+
     async def list_nfl_paper_tickets(self, season=None, week=None) -> list[dict]:
         sql = f"SELECT {NFL_PAPER_COLUMNS} FROM nfl_paper_tickets WHERE 1=1"
         args: list = []

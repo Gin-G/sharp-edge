@@ -876,6 +876,24 @@ class PostgresDatabase(BetDatabase):
                 *[row.get(c) for c in cols])
         return int(status.rsplit(" ", 1)[-1]) > 0
 
+    async def list_nfl_alt_prices(self, season, week=None) -> list[dict]:
+        sql = ("SELECT season, week, player_key, market, line, player, team, event, kickoff, open_odds, odds, model_p, p_cal, edge_pts, hits4, first_seen, last_seen "
+               "FROM nfl_alt_prices WHERE season = $1")
+        args: list = [season]
+        if week is not None:
+            args.append(week); sql += f" AND week = ${len(args)}"
+        sql += " ORDER BY week, player_key, market, line"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("first_seen", "last_seen"):
+                if d.get(k) is not None and not isinstance(d[k], str):
+                    d[k] = d[k].isoformat()
+            out.append(d)
+        return out
+
     async def list_nfl_paper_tickets(self, season=None, week=None) -> list[dict]:
         sql = f"SELECT {NFL_PAPER_COLUMNS} FROM nfl_paper_tickets WHERE TRUE"
         args: list = []

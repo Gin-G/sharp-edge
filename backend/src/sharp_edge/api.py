@@ -936,6 +936,17 @@ async def nfl_paper(season: Optional[int] = None):
     return await nfl_tracking.paper_record(season)
 
 
+@app.get("/nfl/alt-prices")
+async def nfl_alt_prices(season: int, week: Optional[int] = None):
+    """The archive of every priced alt rung, read-only.
+
+    Alt ladders cannot be fetched after the fact, so this is the only record of
+    what each rung cost: the source for testing which kinds of leg beat their
+    price (Finding 16)."""
+    rows = await get_db().list_nfl_alt_prices(season, week)
+    return {"season": season, "week": week, "count": len(rows), "rows": rows}
+
+
 @app.post("/nfl/placed")
 async def nfl_place_bet(bet: dict = Body(...)):
     """Record a bet the owner placed, as it was on screen. Never rebuilt."""
