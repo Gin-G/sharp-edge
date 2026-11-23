@@ -994,6 +994,8 @@ _LEG_KIND = {"rushing_yards": "rush", "anytime_td": "td", "moneyline": "ml",
              "alt_spread": "game", "alt_total": "game"}
 
 PAPER_LABELS = {"double_up": "Double-up", "lotto": "Role lotto",
+                "double_up_edge": "Double-up, props-edge legs (old rule)",
+                "lotto_conf": "Lotto, confidence-priced (old rule)",
                 "lotto_streak": "Streak lotto (old rule)",
                 "lotto_one": "Role lotto, one per game",
                 "lotto_receiving": "Role lotto, receiving only (control)",

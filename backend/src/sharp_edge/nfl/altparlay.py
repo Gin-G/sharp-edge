@@ -121,14 +121,146 @@ TD_FAIR_SHADE = 0.92
 # filled with a coin flip, which is the leg this lotto exists to avoid.
 GAME_MIN_FAIR = 0.50
 
+# --- measured margin (Finding 16, 2026-11-23) -------------------------------
+#
+# Every alt rung FanDuel priced in weeks 8-11 (14,210 graded), each against its
+# result: no feature we hold -- cushion, streak, role, the props model, line
+# movement -- predicts a rung better than its own price on a held-out week. So
+# the parlays now price each leg at the book's implied chance scaled by what
+# that kind of rung actually returned: hit rate over implied, by market and
+# price band. The knapsack then maximises a real chance, which is the same as
+# minimising the margin the ticket pays -- and that turns out to be the whole
+# game. A 1000x ticket built from +100..+199 rungs keeps ~40% of its fair
+# value; built from today's -300..+150 role legs, ~10%.
+#
+# (hits, implied, rungs) per (market, band); bands are the PRICE_BANDS below.
+PRICE_BANDS = ((-100000, -500), (-500, -300), (-300, -200), (-200, -150),
+               (-150, -100), (100, 200), (200, 100000))
+MEASURED = {
+    "receiving_yards": ((0.842, 0.901, 698), (0.706, 0.797, 554), (0.634, 0.711, 483),
+                        (0.555, 0.636, 391), (0.507, 0.549, 515), (0.382, 0.414, 1064),
+                        (0.132, 0.164, 3325)),
+    "receptions": ((0.817, 0.902, 436), (0.715, 0.798, 309), (0.619, 0.710, 278),
+                   (0.609, 0.634, 174), (0.434, 0.547, 249), (0.346, 0.416, 583),
+                   (0.103, 0.154, 2250)),
+    "rushing_yards": ((0.848, 0.902, 323), (0.698, 0.793, 212), (0.636, 0.707, 173),
+                      (0.531, 0.637, 160), (0.492, 0.550, 193), (0.357, 0.411, 445),
+                      (0.133, 0.166, 1395)),
+}
+# A cell is shrunk toward its band's ratio over every market with this weight
+# in rungs: the cells hold 160-3,300 rungs and a few hundred is noisy.
+MEASURED_SHRINK = 300
+
+
+def _band(odds: int) -> Optional[int]:
+    for i, (lo, hi) in enumerate(PRICE_BANDS):
+        if lo <= odds < hi:
+            return i
+    return None
+
+
+def measured_ratio(market: str, odds: int) -> Optional[float]:
+    """Hit rate over implied chance for this kind of rung, shrunk to its band."""
+    b = _band(odds)
+    if b is None or market not in MEASURED:
+        return None
+    hits = sum(MEASURED[m][b][0] * MEASURED[m][b][2] for m in MEASURED)
+    imp = sum(MEASURED[m][b][1] * MEASURED[m][b][2] for m in MEASURED)
+    pooled = hits / imp
+    h, i, n = MEASURED[market][b]
+    return (n * (h / i) + MEASURED_SHRINK * pooled) / (n + MEASURED_SHRINK)
+
+
+def measured_p(r: dict) -> Optional[float]:
+    """The chance this rung lands: its price, less the margin its kind has paid."""
+    from ..fanduel.odds import american_to_implied
+
+    odds = r.get("odds")
+    if odds is None:
+        return None
+    ratio = measured_ratio(r.get("market"), odds)
+    imp = american_to_implied(odds)
+    if ratio is None or not imp:
+        return None
+    return min(0.99, imp * ratio)
+
+
+def cushion(r: dict) -> Optional[float]:
+    """His median over the last five games, over the rung. None without five."""
+    last5 = r.get("last5") or []
+    thr = r.get("threshold")
+    if len(last5) < ROLE_GAMES or not thr:
+        return None
+    return sorted(last5)[len(last5) // 2] / thr
+
+
+# The double-up's legs (the owner's call, 2026-11-23): players whose work is
+# known, at a rung well under what they usually do -- "Malachi Fields 15+ when
+# his line is ~30". Measured on the archive: a steady role at 1.6x+ cushion,
+# yards markets, -500..-150, returned -13% a leg against -21% for the old
+# props-edge legs. Receptions are left out: 2-for-1 the worst market (-28%).
+# Negative still -- nothing beats the price -- but the least of it.
+DOUBLE_UP_CUSHION = 1.6
+DOUBLE_UP_MARKETS = ("receiving_yards", RUSH)
+
+
+def _priced_measured(r: dict) -> Optional[dict]:
+    p = measured_p(r)
+    if p is None or not (0 < p < 1):
+        return None
+    return {**r, "p_model": r.get("p_cal"), "p_cal": round(p, 4), "priced": "measured"}
+
+
+def _leg_ok(r: dict) -> bool:
+    return (r.get("role_conflict_verdict") != "market" and card_mod._available(r)
+            and not card_mod.is_locked(r))
+
+
+def double_up_legs(rungs: Iterable[dict]) -> list[dict]:
+    """Steady-role players at a deep cushion, priced at the measured margin."""
+    out = []
+    for r in rungs:
+        if r.get("market") not in DOUBLE_UP_MARKETS or not role_ok(r) or not _leg_ok(r):
+            continue
+        c = cushion(r)
+        if c is None or c < DOUBLE_UP_CUSHION:
+            continue
+        leg = _priced_measured(r)
+        if leg is not None:
+            out.append({**leg, "cushion": round(c, 2)})
+    return out
+
+
+def lotto_legs(rungs: Iterable[dict]) -> list[dict]:
+    """Every rung of a player over the role floor, priced at the measured margin.
+
+    No streak or model bar: neither beat the price (Finding 16). What is left to
+    choose is which legs pay the least margin per unit of payout, and with each
+    leg at its measured chance the knapsack does exactly that.
+    """
+    out = []
+    for r in rungs:
+        if r.get("market") not in ROLE_MARKETS or not role_ok(r) or not _leg_ok(r):
+            continue
+        leg = _priced_measured(r)
+        if leg is not None:
+            out.append(leg)
+    return out
+
+
 # Payout targets, as decimal odds, and the price window each draws legs from.
 # The double-up stops at -500 because shorter than that the book prices the
 # streak above what it earns (see the docstring); the lotto takes the same
 # floor and reaches further up the ladder for payout.
 KINDS = {
-    "double_up": {"target": 2.0, "odds": (-500, 150), "min_legs": 2, "stake": 1.0},
-    "lotto": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2, "stake": 0.1,
-              "floor": 250.0, "per_game": 4},
+    # 2-3 legs to about even money (owner's call, 2026-11-23).
+    "double_up": {"target": 2.0, "odds": (-500, -150), "min_legs": 2, "max_legs": 3,
+                  "stake": 1.0},
+    # One leg per game: FanDuel prices a same-game bundle below the product of
+    # its legs (SGP_SHADE), a margin on top of the legs' own. The window reaches
+    # +199; past +200 a rung returns -31% (Finding 16).
+    "lotto": {"target": 1000.0, "odds": (-300, 199), "min_legs": 2, "stake": 0.1,
+              "floor": 250.0, "per_game": 1},
 }
 # FanDuel's own parlay limit.
 MAX_LEGS = 25
@@ -156,6 +288,10 @@ SGP_SHADE = 0.85
 #                uncapped, the build reaches for +1600 touchdowns, where the
 #                model's untested TD edge is largest, and five legs carry it.
 PAPER = {
+    # The double-up and lotto as they were through week 11, kept as controls.
+    "double_up_edge": {"target": 2.0, "odds": (-500, 150), "min_legs": 2, "stake": 1.0},
+    "lotto_conf": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2, "stake": 0.1,
+                   "floor": 250.0, "per_game": 4},
     # The lotto as it was built through week 8 — the 3-of-4 streak rule, any
     # role — kept on paper as the control for the role lotto.
     "lotto_streak": {"target": 1000.0, "odds": (-500, 400), "min_legs": 2, "stake": 0.1},
@@ -552,6 +688,7 @@ def build(cands: Iterable[dict], kind: str,
     lo, hi = spec["odds"]
     max_anchors = spec.get("max_anchors", 0)
     per_game = spec.get("per_game", 1)
+    max_legs = min(MAX_LEGS, spec.get("max_legs", MAX_LEGS))
     by_game: dict = {}
     for c in cands:
         if (c.get("odds") is not None and lo <= c["odds"] <= hi
@@ -578,7 +715,7 @@ def build(cands: Iterable[dict], kind: str,
         nxt = dict(dp)
         for (b, a, _), (v, chosen) in dp.items():
             for ob, on, oa, olp, combo in options:
-                if len(chosen) + on > MAX_LEGS or a + oa > max_anchors:
+                if len(chosen) + on > max_legs or a + oa > max_anchors:
                     continue
                 key = (min(goal, b + ob), a + oa, min(m, len(chosen) + on))
                 cand = (v + olp, chosen + combo)
@@ -674,7 +811,9 @@ def build_paper(cands: list[dict], role: list[dict], anchors: list[dict],
     rushing, touchdowns and game lines joined it.
     """
     extra = list(extra)
-    return {"lotto_streak": build(cands, "lotto_streak"),
+    return {"double_up_edge": build(cands, "double_up_edge"),
+            "lotto_conf": build(role + extra, "lotto_conf"),
+            "lotto_streak": build(cands, "lotto_streak"),
             "lotto_one": build(role + extra, "lotto_one"),
             "lotto_receiving": build([r for r in role if r.get("market") != RUSH],
                                      "lotto_receiving"),

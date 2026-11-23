@@ -76,9 +76,9 @@ def test_the_double_up_is_the_likeliest_ticket_that_pays_even_money():
 
 def test_a_ticket_takes_one_leg_per_game():
     legs = [_rung(key=f"p{i}", fd_event_id="g1", odds=-110, p_cal=0.55) for i in range(4)]
-    assert altparlay.build(legs, "double_up") is None       # all from one game
+    assert altparlay.build(legs, "double_up_edge") is None  # all from one game
     legs[1]["fd_event_id"] = "g2"
-    t = altparlay.build(legs, "double_up")
+    t = altparlay.build(legs, "double_up_edge")
     assert len({l["fd_event_id"] for l in t["legs"]}) == t["leg_count"] == 2
 
 
@@ -433,21 +433,21 @@ def test_several_per_game_takes_different_players_and_marks_the_price():
     legs = [_rung(key=f"p{g}{i}", fd_event_id=f"g{g}", odds=-110, p_cal=0.55)
             for g in range(6) for i in range(3)]
     legs.append(_rung(key="p00", fd_event_id="g0", odds=-120, p_cal=0.56, line=34.5))
-    t = altparlay.build(legs, "lotto")
+    t = altparlay.build(legs, "lotto_conf")
     # 1000x at -110 takes eleven legs, more once the bundles are shaded; six
     # games give them three apiece.
     assert t["decimal_odds"] >= 1000 and not t["short_of_target"] and t["price_estimated"]
     assert 12 <= t["leg_count"] <= 18
     assert len({l["key"] for l in t["legs"]}) == t["leg_count"]   # one rung per player
     assert t["decimal_odds"] == round(altparlay.ticket_decimal(t["legs"]), 2)
-    assert not altparlay.build(legs, "double_up")["price_estimated"]
+    assert not altparlay.build(legs, "double_up_edge")["price_estimated"]
     assert altparlay.build(legs, "lotto_one") is None             # six legs, ~50x
 
 
 def test_four_games_can_carry_a_long_ticket():
     legs = [_rung(key=f"p{g}{i}", fd_event_id=f"g{g}", odds=-110, p_cal=0.55)
             for g in range(4) for i in range(5)]
-    t = altparlay.build(legs, "lotto")
+    t = altparlay.build(legs, "lotto_conf")
     assert t["decimal_odds"] >= 1000 and not t["short_of_target"]
     assert len({l["fd_event_id"] for l in t["legs"]}) == 4
     assert max(sum(l["fd_event_id"] == g for l in t["legs"]) for g in "g0 g1 g2 g3".split()) <= 4
@@ -571,3 +571,54 @@ def test_the_price_archive_reads_back_its_opening_and_latest_quote(tmp_path):
             await db.close()
 
     asyncio.run(run())
+
+
+# --- measured margin (Finding 16) --------------------------------------------
+
+def _steady(**kw):
+    base = dict(snap_min=0.8, ts_mean=0.2, cs_mean=0.0,
+                last5=[30.0, 28.0, 35.0, 31.0, 40.0], threshold=15.0, line=14.5,
+                odds=-300)
+    base.update(kw)
+    return _rung(**base)
+
+
+def test_a_rung_is_priced_at_its_quote_less_its_kinds_measured_margin():
+    p = altparlay.measured_p(_rung(odds=-300))
+    assert 0.6 < p < 0.75                        # implied 0.75, measured ~0.89 of it
+    # Long receptions rungs paid the most margin of anything on the archive.
+    assert (altparlay.measured_ratio("receptions", 250)
+            < altparlay.measured_ratio("receiving_yards", 250) < 1)
+    assert altparlay.measured_ratio("receiving_yards", 120) is not None
+    assert altparlay.measured_ratio("receiving_yards", -100) is None   # no -100..+99 band
+
+
+def test_double_up_legs_are_steady_players_at_a_deep_cushion():
+    ok = _steady()
+    assert len(altparlay.double_up_legs([ok])) == 1
+    leg = altparlay.double_up_legs([ok])[0]
+    assert leg["priced"] == "measured" and leg["cushion"] == pytest.approx(31 / 15, abs=.01)
+    assert leg["p_model"] == ok["p_cal"] and leg["p_cal"] < 0.75
+    assert altparlay.double_up_legs([_steady(threshold=25.0, line=24.5)]) == []   # 1.24x
+    assert altparlay.double_up_legs([_steady(snap_min=0.3)]) == []                # no role
+    assert altparlay.double_up_legs([_steady(market="receptions", threshold=2.0)]) == []
+    assert altparlay.double_up_legs([_steady(last5=[30.0, 31.0])]) == []          # no five
+
+
+def test_the_double_up_is_two_or_three_short_legs_to_even_money():
+    legs = [_steady(key=f"p{g}", fd_event_id=f"g{g}", odds=o)
+            for g, o in enumerate((-300, -250, -400, -450, -200, -110, 130))]
+    t = altparlay.build(altparlay.double_up_legs(legs), "double_up")
+    assert 2 <= t["leg_count"] <= 3 and t["decimal_odds"] >= 2.0
+    assert all(-500 <= l["odds"] <= -150 for l in t["legs"])
+    # Four -450s would get there; three cannot, and three is the cap.
+    longs = [_steady(key=f"q{g}", fd_event_id=f"g{g}", odds=-450) for g in range(5)]
+    assert altparlay.build(altparlay.double_up_legs(longs), "double_up") is None
+
+
+def test_the_lotto_takes_one_leg_per_game():
+    legs = [_steady(key=f"p{g}{i}", fd_event_id=f"g{g}", odds=150, threshold=40.0 + i,
+                    line=39.5 + i) for g in range(9) for i in range(2)]
+    t = altparlay.build(altparlay.lotto_legs(legs), "lotto")
+    assert t["decimal_odds"] >= 1000 and not t["price_estimated"]
+    assert len({l["fd_event_id"] for l in t["legs"]}) == t["leg_count"]

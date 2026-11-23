@@ -1272,3 +1272,80 @@ then judged by. Proposed, for the owner to decide, nothing changed yet:
 3. No placed parlays beyond two legs: the per-leg deficit compounds.
 4. Any new signal judged by Brier against the raw price, on picks it did not
    select itself, before it is allowed to pick.
+
+## Finding 16 — FanDuel's alt ladders know everything we do; the parlays now buy the cheapest margin (2026-11-23)
+
+**Question** (the owner's, after Finding 15): can the double-up and the lotto
+be built from better legs — players with known work at rungs well under
+their usual output, "Malachi Fields 15+ when his line is ~30"?
+
+**Data.** The alt-price archive (every rung FanDuel priced, from week 8),
+now readable at `GET /nfl/alt-prices`. 16,091 rungs, 14,210 graded in weeks
+8-11 against nflverse box scores (void without an offensive snap; a rung
+whose game is not yet in the box scores is skipped). Each carries the
+player's last five games and role as the live board would have read them
+(`altparlay.recent_values`). Scripts: `backend/scripts/rung_study/`
+(`build.py` → `compare.py`, `beyond_price.py`, `leg_rules.py`). CIs bootstrap
+over player-weeks, since one player's rungs move together.
+
+**Every kind of rung loses.** All rungs: hit 35.6% against 40.9% implied,
+-20.5% flat ROI. No slice of market, price, cushion or role is positive.
+The margin is ~7-11% from -500 to +199 and **-31% past +200**; receptions
+(-28%) are worse than receiving (-17%) or rushing (-19%).
+
+**Nothing we hold predicts a rung beyond its price.** Logistic fit of the
+result on logit(implied) plus each candidate, one week held out at a time,
+against a price-only refit on the same rows (held-out log-loss, + is worse):
+cushion + streak +0.0002 [-0.0007, +0.0012]; role +0.0039 [+0.0010,
++0.0067]; props model +0.0003; line move since open +0.0003; everything
++0.0036 [+0.0010, +0.0064]. The role features *hurt* out of sample, and the
+rungs the full fit rated 5+ points over the price hit 20% against 34%.
+This is Finding 15's "the book knows who is a backup" generalised: the ladder
+already prices role, form and streak.
+
+**What is left is margin.** A parlay to a fixed payout pays the sum of its
+legs' margins, so the measure is margin per unit of log payout
+(-log(1+ROI)/log(decimal)):
+
+| legs | rungs | ROI | margin per log-payout |
+|---|---|---|---|
+| old double-up (3/4 streak, props edge 4-12) | 524 | -20.6% | 0.56 |
+| steady role, cushion 1.6+, -500..-150, no receptions | 386 | -13.0% | 0.49 |
+| old lotto (steady, 4/5, -300..+150) | 463 | -14.6% | 0.34 |
+| +100..+199, any | 2,092 | -11.0% | **0.13** |
+| +200 and longer | 6,970 | -30.9% | 0.19 |
+| -500 and shorter | 1,545 | -7.6% | 0.73 |
+
+A 1000x ticket (log 6.9) keeps e^(-6.9 x margin) of its fair value: ~10% on
+the old lotto's legs, ~40% on +100..+199 legs. A 2-3 leg double-up has to use
+short legs, where margin per payout is highest; the owner's kind is the least
+of those.
+
+### What shipped
+
+* Each double-up and lotto leg is priced at `measured_p`: its implied chance
+  times the hit/implied ratio its market and price band returned here, each
+  cell shrunk to its band with weight 300 rungs. The knapsack maximises that
+  chance, which is the same as minimising margin.
+* **Double-up**: `double_up_legs` — over the role floor, median of the last
+  five at least 1.6x the rung, receiving or rushing yards, -500..-150, two or
+  three legs (`max_legs`), to even money.
+* **Lotto**: `lotto_legs` — any rung of a player over the role floor, at the
+  measured price, -300..+199, **one leg per game** (FanDuel's same-game
+  bundle shading is a margin on top), plus the existing TD and game legs.
+* The old builds stay on paper as controls: `double_up_edge`, `lotto_conf`.
+
+Replayed on weeks 8-11 (in-sample: the ratios were measured on these
+weeks): the new double-up hit 1 of 4 at +102..+104, claiming 39%; the old
+rule hit 1 of 4, claiming 46%. The new lotto's legs went 6 of 28. Four
+tickets settle nothing; the leg ROIs above are the evidence.
+
+### Not established
+
+* That any of this is *profitable*. It is the least-losing build of the
+  bets the owner wants; every leg kind still loses to the price. The one
+  untried route to a real edge is price shopping — `oddsapi/` fetches every
+  book's price for a prop, but production has no `ODDS_API_KEY`, so no
+  FanDuel price has ever been compared with another book's.
+* The double-up's 1.6 cushion and the receptions cut were chosen looking at
+  these weeks. Judge from week 12 on, against `double_up_edge`.
