@@ -1190,3 +1190,85 @@ The owner asked for the lotto to draw on rushing again, on likely touchdowns, an
   Shipped: at the fair price, a fair chance of 50%+ (about -115 or shorter), at most one game line per game, as a spread and a total from one game move together. The first build without the 50% bar took two plus-money totals at 38% and 42% to fill games with no role leg.
 
 TD and game legs carry no claimed edge, so the knapsack takes one only where nothing likelier pays as much; they are filler for thin slates, not picks. The paper strategy `lotto_receiving` is the role lotto as it was (receiving only), the control. The strategy lab now splits each strategy's legs into receiving, rushing, TD and spread/total, each with hit rate against the chance it was priced at. Judge each kind there after 3+ weeks.
+
+## Finding 15 — the season audit: nothing on the board beats the price yet (2026-11-23)
+
+The owner asked for an audit after a poor season. Weeks 1-10 settled (week 11
+mostly pending), read from production with `backend/scripts/season_audit.py`,
+which is read-only and re-runnable. The bar throughout is the chance the book's
+price implied, not 50%. Picks share games, players and weeks, so every ± below
+(binomial, 95%) is narrower than the truth.
+
+**The headline.** 662 settled recommendations, 48.0% against 54.0%... implied
+51.3% across types, **-48.3 units**. The record since Finding 14's rules
+(week 8+) is 45-78, -15.7 units, and touchdowns are most of that.
+
+**Props: the book's price is the better forecast than ours.** 600 settled
+props: hit 50.8% ±4.0, price implied 54.0%, our `model_p` 60.1%. Brier, ours
+minus the book's: **+0.0110 ±0.0069**, so the raw price forecasts the outcome
+better than the model does — the first time that is measured rather than
+inferred from ROI. The hit rate does not rise with our probability (0.50-0.55:
+47%; 0.60-0.65: 51%; 0.75+: 41%) or with the edge (12+: 49.6%). Finding 14's
+"the model is loud" is the same fact; `CALIBRATION_KEEP = 0.15` still keeps a
+slice of a disagreement that carries no information. Under the current rules,
+61 settled props hit 52.5% ±12.5 against 54.7% implied: not yet better, not
+yet distinguishable.
+
+| market, side | n | hit | implied | units |
+|---|---|---|---|---|
+| receiving yards over | 86 | 57.0% | 53.2% | +6.2 |
+| receiving yards under | 109 | 54.1% | 53.1% | +2.0 |
+| receptions over | 124 | 48.4% | 54.2% | -13.8 |
+| receptions under | 137 | 55.5% | 55.8% | -0.6 |
+| rushing yards over | 87 | **39.1%** | 53.2% | **-23.0** |
+| rushing yards under | 57 | 47.4% | 53.1% | -6.2 |
+
+Receiving yards is the only market above its price, both sides, and it is the
+market Finding 14 already named as what works. It is ±10 points per side, so
+it is a candidate, not an edge.
+
+**Touchdowns, shipped at week 8, are the biggest leak since.** 11-40 (21.6%
+±11) against 25.0% implied and 34.4% claimed, -10.7 units; +200 to +399 went
+3-17 against a claimed 36.6%. Brier ours minus book +0.021 ±0.021. Finding 14's
+AUC 0.721 was measured over every player who played; the picks are the
+players where the model disagrees with the price, and that subset is where the
+book knows something the model does not — the same lesson as the role lotto's
+"the book knows who is a backup".
+
+**The role-lotto check scheduled for 3+ weeks: it failed.** 208 distinct
+settled legs across all paper strategies, weeks 8-10: hit **42.3% ±6.7**
+against 55.6% implied and 56.7% `p_cal`. Every week is below (47, 39, 43%).
+Short legs (-200 or shorter) hit 50% against 71% implied; plus-money legs 23%
+against 36%. The confidence model's 2026 holdout calibration (said 75, hit 75)
+was over every rung; the legs the lotto selects against the price lose
+calibration the same way the touchdowns do. Settlement was checked: of 41
+losing legs with an actual of exactly 0, 40 had offensive snaps in nflverse
+(Henry and Cook 0 catches at -420, Ferguson injured after 4 snaps). The other,
+Emanuel Wilson's week 8 TD, had no offensive snap but a snap-count row, so the
+void rule stood. The tickets are 4-73 across seven strategies. At 42% legs
+against 56% prices each leg returns ~0.76 of its price, so a 10-leg ticket's
+expected value is ~6% of its payout: -94%.
+
+**Placed bets: 0-5, -2.3 units**, all parlays (two 2-leg pairs of short
+receiving legs at 1u, three 7-10 leg lottos at 0.1u).
+
+**Games** behave as Finding 14 said: margin MAE 9.82 against the market's
+9.35, ML picks 1-3, totals leans 17-12 (+3.6, n=29, noise).
+
+**No closing-line value.** Of 96 picks with an open and a lock price, 21 lines
+moved and 52.4% of those moved toward us; ROI -8.0% at open, -9.4% at lock.
+Our picks do not anticipate where the market goes.
+
+### What it means
+
+Every disagreement-with-the-price product on the board loses to the price,
+and the losses grow with the disagreement. The fixes so far have been cuts
+(rushing, the market verdict, the edge cap), each found on the record it was
+then judged by. Proposed, for the owner to decide, nothing changed yet:
+
+1. Touchdown recommendations and the role-lotto tickets to paper only.
+2. Recommendations limited to receiving yards, kept small, with everything
+   else recorded on paper so the record keeps growing without units on it.
+3. No placed parlays beyond two legs: the per-leg deficit compounds.
+4. Any new signal judged by Brier against the raw price, on picks it did not
+   select itself, before it is allowed to pick.
