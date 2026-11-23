@@ -1199,7 +1199,7 @@ which is read-only and re-runnable. The bar throughout is the chance the book's
 price implied, not 50%. Picks share games, players and weeks, so every ± below
 (binomial, 95%) is narrower than the truth.
 
-**The headline.** 662 settled recommendations, 48.0% against 54.0%... implied
+**The headline.** 662 settled recommendations hit 48.0% against an implied
 51.3% across types, **-48.3 units**. The record since Finding 14's rules
 (week 8+) is 45-78, -15.7 units, and touchdowns are most of that.
 
