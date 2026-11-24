@@ -1343,6 +1343,36 @@ def _leg_result(leg: dict, actual: Optional[float]) -> Optional[str]:
     return "WIN" if (over if leg["side"] == "OVER" else not over) else "LOSS"
 
 
+async def _card_box_score(season: int, week: int):
+    """(actuals, teams played) for the week, or None while it is unpublished."""
+    import asyncio
+
+    try:
+        actuals, played = await asyncio.to_thread(_load_actuals, season, week)
+    except Exception as e:                       # unpublished, or the feed is down
+        logger.info("[nfl-track] card box score unavailable %s wk%s: %s", season, week, e)
+        return None
+    return (actuals, played) if actuals else None
+
+
+def _box_leg(leg: dict, actuals: dict, played: set) -> Optional[dict]:
+    """A card leg with no pick row, as a settled pick off the box score.
+
+    None while its game has not been played. A leg that names no team waits
+    for a row of its own, since "no row" cannot then be told from "not yet".
+    """
+    row = actuals.get(leg["player_key"])
+    team = leg.get("team")
+    if row is None:
+        if team and team in played:
+            return {"result": "VOID", "actual": None}
+        return None
+    if team and team not in played:
+        return None
+    result, actual = _result_for({**leg, "line": leg["line"], "side": leg["side"]}, row)
+    return {"result": result, "actual": actual} if result else None
+
+
 async def _settle_card(season: int, week: int, regrade: bool = False) -> None:
     """Score the frozen card off its legs' settled results.
 
@@ -1360,10 +1390,20 @@ async def _settle_card(season: int, week: int, regrade: bool = False) -> None:
     if not legs:
         return
 
+    # A leg whose pick row is gone -- deleted when the line left the board or
+    # the pick was purged -- has nothing to inherit, and waited forever: the
+    # week 7-10 cards of 2026 sat unsettled until 2026-11-24 for exactly this.
+    # Such a leg is graded straight off the box score instead.
+    box = None
+    if any((leg["player_key"], leg["market"]) not in settled for leg in legs):
+        box = await _card_box_score(season, week)
+
     won = graded = 0
     pending = False
     for leg in legs:
         p = settled.get((leg["player_key"], leg["market"]))
+        if p is None and box is not None:
+            p = _box_leg(leg, *box)
         if not p or not p.get("result"):
             pending = True
             continue

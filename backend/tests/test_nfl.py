@@ -614,8 +614,12 @@ def test_missing_season_file_is_a_status_not_an_error():
 # ---------------------------------------------------------------------------
 
 class _PendingDB:
-    def __init__(self, picks):
+    def __init__(self, picks, cards=()):
         self.picks = picks
+        self.cards = list(cards)
+
+    async def list_nfl_cards(self, season=None, limit=100):
+        return self.cards
 
     async def list_nfl_picks(self, season=None, week=None):
         return self.picks
@@ -628,6 +632,26 @@ class _PendingDB:
 
     async def list_nfl_paper_tickets(self, season=None, week=None):
         return []
+
+
+def test_an_open_card_brings_its_week_back_into_the_walk(monkeypatch):
+    """Weeks 7-10 of 2026: every pick settled, the card still open, and the
+    bare run never looked at those weeks again."""
+    import asyncio
+    from sharp_edge import api
+
+    db = _PendingDB([], cards=[{"season": 2026, "week": 8, "result": None},
+                               {"season": 2026, "week": 6, "result": "LOSS"}])
+    asked = []
+
+    async def fake_settle(season, week, regrade=False):
+        asked.append((season, week))
+        return {"season": season, "week": week, "settled": 0}
+
+    monkeypatch.setattr(api, "get_db", lambda: db)
+    monkeypatch.setattr(nfl_tracking, "settle_week", fake_settle)
+    asyncio.run(api.nfl_settle())
+    assert asked == [(2026, 8)]
 
 
 def _pending(*weeks, season=2026):
@@ -945,14 +969,35 @@ def _pick(key, result, market="rushing_yards", actual=None, line=10.5):
             "actual": actual, "line": line}
 
 
-def _grade(monkeypatch, legs, picks):
-    """Run the real _settle_card against a stub store."""
+def _grade(monkeypatch, legs, picks, box=None):
+    """Run the real _settle_card against a stub store (and box score)."""
     import asyncio
 
     db = _CardDB(legs, picks)
     monkeypatch.setattr(nfl_tracking, "_require_db", lambda: db)
+
+    async def fake_box(season, week):
+        return box
+
+    monkeypatch.setattr(nfl_tracking, "_card_box_score", fake_box)
     asyncio.run(nfl_tracking._settle_card(2026, 1))
     return db.settled
+
+
+def test_a_card_leg_with_no_pick_row_is_graded_off_the_box_score(monkeypatch):
+    """Weeks 7-10 of 2026: a leg's pick row was deleted when its line left
+    the board, and the card waited on it forever."""
+    legs = [_leg("a"), {**_leg("b", line=30.5), "team": "BBB"}]
+    picks = [_pick("a", "WIN")]
+    box = ({"b": {"rushing_yards": 41.0}}, {"BBB"})
+    assert _grade(monkeypatch, legs, picks, box) == ("WIN", 2, 2)
+    box = ({"b": {"rushing_yards": 12.0}}, {"BBB"})
+    assert _grade(monkeypatch, legs, picks, box) == ("LOSS", 1, 2)
+    # Not published yet, or his game not played: still waiting.
+    assert _grade(monkeypatch, legs, picks, None) is None
+    assert _grade(monkeypatch, legs, picks, ({}, set())) is None
+    # His team played and he has no row: the leg voids and drops out.
+    assert _grade(monkeypatch, legs, picks, ({}, {"BBB"})) == ("WIN", 1, 1)
 
 
 def test_card_is_not_scored_while_a_leg_is_unplayed(monkeypatch):

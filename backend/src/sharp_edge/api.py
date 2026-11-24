@@ -1018,6 +1018,9 @@ async def nfl_settle(season: Optional[int] = None, week: Optional[int] = None,
                 if p.get("frozen") and not p.get("result")]
     pending += [b for b in await get_db().list_nfl_placed_bets() if not b.get("result")]
     pending += [t for t in await get_db().list_nfl_paper_tickets() if not t.get("result")]
+    # And a card still open after its picks settled: the walk is keyed on
+    # pending rows, so without this an open card's week was never revisited.
+    pending += [c for c in await get_db().list_nfl_cards() if not c.get("result")]
     if not pending:
         return {"settled": 0, "message": "nothing pending"}
     weeks = sorted({(p["season"], p["week"]) for p in pending})
