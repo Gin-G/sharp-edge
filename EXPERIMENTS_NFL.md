@@ -1359,3 +1359,28 @@ owner plays these as same-game parlays and a one-game night has no other way
 to build one. `SGP_SHADE` 0.85 → 0.975 from the first real betslip quote:
 Chase Brown 40+ rushing (-160) + Treylon Burks 2+ receptions (-245), product
 +129, paid +123. One quote.
+
+### 2026-11-23 — Projection-picked double-up and lotto (owner's call), price builds to paper
+
+The owner: "pick legs that our projections have people clearing, and that
+difference should be noticeable ... find the break in the odds that maximizes
+our return." From week 12 the headline double-up and lotto take a rung only
+where our model's chance (`model_p`) is high (70%+ double-up, 55%+ lotto) and
+5+ points over the book's fair chance, with the role floor and 4-of-5 / 3-of-5
+recent clears (passing: the starter). Anytime TDs qualify where the TD model is
+45%+ and over the book's fair. The knapsack maximises our chance read halfway
+toward the book (PROJ_KEEP 0.5, logits) -- not ours alone -- because on the
+weeks 8-11 archive (14,210 rungs) our chance tracked hit rates within 2-4 pts
+overall, but the 112 rungs where we were 60%+ and 8+ pts over the book hit 55%
+(ours 74%, book 62%, ROI -10%), and taking each ladder's best rung by our own EV
+returned -34% (drifts to longshots). The measured-price builds that led week
+11's Monday rebuild stay on paper as `double_up_price` / `lotto_price`; paper
+legs now record `p_proj` so the gap can be graded. Prior: expect the price
+builds to do better; the record decides.
+
+First run, MNF week 11 (CIN @ WAS), offline: from the alt ladders only Jayden
+Daniels' passing rungs qualified; with main-line props, ~8 players did, mostly
+QB/RB rushing and low-volume pass catchers (Sinnott, Sample, Van Jefferson) --
+the "obscure players" the owner dislikes, which the role floor would drop on a
+real board. A one-game night cannot reach 1000x under these rules. Follow-up:
+main-line props are not rungs yet, so they are not candidates on the live board.

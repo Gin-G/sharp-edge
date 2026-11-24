@@ -610,17 +610,68 @@ def test_double_up_legs_are_steady_players_at_a_deep_cushion():
 def test_the_double_up_is_two_or_three_short_legs_to_even_money():
     legs = [_steady(key=f"p{g}", fd_event_id=f"g{g}", odds=o)
             for g, o in enumerate((-300, -250, -400, -450, -200, -110, 130))]
-    t = altparlay.build(altparlay.double_up_legs(legs), "double_up")
+    t = altparlay.build(altparlay.double_up_legs(legs), "double_up_price")
     assert 2 <= t["leg_count"] <= 3 and t["decimal_odds"] >= 2.0
     assert all(-500 <= l["odds"] <= -150 for l in t["legs"])
     # Four -450s would get there; three cannot, and three is the cap.
     longs = [_steady(key=f"q{g}", fd_event_id=f"g{g}", odds=-450) for g in range(5)]
-    assert altparlay.build(altparlay.double_up_legs(longs), "double_up") is None
+    assert altparlay.build(altparlay.double_up_legs(longs), "double_up_price") is None
 
 
 def test_the_lotto_takes_one_leg_per_game():
     legs = [_steady(key=f"p{g}{i}", fd_event_id=f"g{g}", odds=150, threshold=40.0 + i,
                     line=39.5 + i) for g in range(9) for i in range(2)]
-    t = altparlay.build(altparlay.lotto_legs(legs), "lotto")
+    t = altparlay.build(altparlay.lotto_legs(legs), "lotto_price")
     assert t["decimal_odds"] >= 1000 and not t["price_estimated"]
     assert len({l["fd_event_id"] for l in t["legs"]}) == t["leg_count"]
+
+
+# --- projection-picked legs (from week 12) ---------------------------------
+
+def _proj(**kw):
+    base = dict(model_p=0.75, fair=0.62, odds=-180)
+    base.update(kw)
+    return _steady(**base)
+
+
+def test_a_projection_leg_needs_our_chance_high_and_clear_of_the_book():
+    (leg,) = altparlay.double_up_proj_legs([_proj()])
+    assert leg["priced"] == "projection" and leg["p_proj"] == 0.75
+    assert 0.62 < leg["p_cal"] < 0.75             # read halfway toward the book
+    assert altparlay.double_up_proj_legs([_proj(model_p=0.66, fair=0.5)]) == []   # not 70%
+    assert altparlay.double_up_proj_legs([_proj(model_p=0.75, fair=0.72)]) == []  # no gap
+    assert altparlay.double_up_proj_legs([_proj(snap_min=0.3)]) == []             # no role
+    assert altparlay.double_up_proj_legs([_proj(hits5=3)]) == []                  # 3 of 5
+    assert len(altparlay.lotto_proj_legs([_proj(hits5=3, model_p=0.6, fair=0.5)])) == 1
+
+
+def test_a_passing_leg_needs_the_starter_not_a_receivers_role():
+    qb = _proj(market="passing_yards", snap_min=None, hits5=0, depth_rank=1)
+    assert len(altparlay.lotto_proj_legs([qb])) == 1
+    assert altparlay.lotto_proj_legs([{**qb, "depth_rank": 2}]) == []
+
+
+def test_a_projection_td_leg_needs_our_td_model_over_the_book():
+    td = {"player": "A Back", "key": "a back", "team": "AAA", "odds": 120,
+          "implied_p": 0.4545, "p_cal": 0.52, "avail": "ACTIVE", "fd_event_id": "g1",
+          "kickoff": FUTURE, "fd_selection_id": 9}
+    (leg,) = altparlay.lotto_proj_legs([], [td])
+    assert leg["market"] == "anytime_td" and leg["p_proj"] == 0.52
+    assert altparlay.lotto_proj_legs([], [{**td, "p_cal": 0.43}]) == []
+
+
+def test_the_builder_takes_one_rung_of_a_players_ladder():
+    # The knapsack picks the rung -- the likeliest ticket that reaches the
+    # payout -- and never two rungs of one player.
+    ladder = [_proj(threshold=t, line=t - 0.5, odds=o, model_p=p, fair=f)
+              for t, o, p, f in ((15.0, -400, 0.92, 0.76), (20.0, -250, 0.88, 0.67),
+                                 (25.0, -160, 0.82, 0.58))]
+    other = [_proj(key=f"p{g}", fd_event_id=f"g{g}", odds=-180) for g in range(2, 4)]
+    t = altparlay.build(altparlay.double_up_proj_legs(ladder + other), "double_up")
+    mine = [l for l in t["legs"] if l["key"] == "a receiver"]
+    assert len(mine) <= 1 and t["decimal_odds"] >= 2.0
+
+
+def test_the_projection_lotto_may_take_two_legs_from_one_game():
+    assert altparlay.KINDS["lotto"]["per_game"] == 2
+    assert altparlay.PAPER["lotto_price"]["per_game"] == 1

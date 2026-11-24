@@ -253,21 +253,105 @@ def lotto_legs(rungs: Iterable[dict]) -> list[dict]:
     return out
 
 
+# Projection-picked legs (the owner's call, 2026-11-23): "pick legs that our
+# projections have people clearing, and that difference should be noticeable
+# ... find the break in the odds that maximizes our return". A rung is a leg
+# only where our model's chance of clearing it (``model_p``) is high and a
+# clear margin above the book's fair chance; the knapsack then walks each
+# player's ladder and keeps the rung where the extra payout is worth the drop
+# in chance -- one rung per player, so that is the "break".
+#
+# The chance it maximises is ours read halfway toward the book (PROJ_KEEP, in
+# logits), not ours alone. On the weeks 8-11 archive our chance tracked the
+# hit rate within 2-4 points overall, but on the 112 rungs where we were 60%+
+# and 8+ points above the book they hit 55% against our 74% and the book's
+# 62% -- and ranking every ladder by our own EV drifted to longshots and
+# returned -34%. The blend keeps the selection ours and the payout honest.
+# These run as the headline builds from week 12; the measured-price builds
+# they replaced stay on paper as double_up_price and lotto_price, so the
+# record says whether our projections earn the gap.
+PROJ_KEEP = 0.5
+PROJ_MIN_GAP = 0.05           # our chance over the book's fair, at least
+PROJ_MARKETS = ROLE_MARKETS + ("passing_yards",)
+DOUBLE_UP_PROJ_MIN_P = 0.70   # a double-up leg we have clearing comfortably
+LOTTO_PROJ_MIN_P = 0.55       # a lotto leg: every one doable, none a stretch
+DOUBLE_UP_PROJ_MIN_HITS = 4   # of his last five: the owner's consistency bar
+LOTTO_PROJ_MIN_HITS = 3
+TD_PROJ_MIN_P = 0.45
+
+
+def _blend(ours: float, fair: float) -> float:
+    lf = math.log(fair / (1 - fair))
+    z = lf + PROJ_KEEP * (math.log(ours / (1 - ours)) - lf)
+    return 1 / (1 + math.exp(-z))
+
+
+def _priced_projection(r: dict, ours: Optional[float], fair: Optional[float],
+                       min_p: float) -> Optional[dict]:
+    if ours is None or fair is None or not (0 < ours < 1) or not (0 < fair < 1):
+        return None
+    if ours < min_p or ours - fair < PROJ_MIN_GAP:
+        return None
+    return {**r, "p_model": round(ours, 4), "p_proj": round(ours, 4), "fair": round(fair, 4),
+            "p_cal": round(_blend(ours, fair), 4), "priced": "projection"}
+
+
+def projection_legs(rungs: Iterable[dict], min_p: float, min_hits: int) -> list[dict]:
+    """Rungs our projections have him clearing, by a margin the book does not.
+
+    Receiving and rushing rungs need the role floor and ``min_hits`` of his
+    last five over the rung; a passing rung needs the team's starter.
+    """
+    out = []
+    for r in rungs:
+        m = r.get("market")
+        if m not in PROJ_MARKETS or not _leg_ok(r):
+            continue
+        if m == "passing_yards":
+            if r.get("depth_rank") != 1:
+                continue
+        elif not role_ok(r) or (r.get("hits5") or 0) < min_hits:
+            continue
+        leg = _priced_projection(r, r.get("model_p"), r.get("fair"), min_p)
+        if leg is not None:
+            out.append(leg)
+    return out
+
+
+def projection_td_legs(tds: Iterable[dict]) -> list[dict]:
+    """Anytime-TD legs where our TD model beats the book's fair chance."""
+    out = []
+    for leg in td_legs_all(tds):
+        got = _priced_projection(leg, leg.get("p_model"), leg.get("fair"), TD_PROJ_MIN_P)
+        if got is not None:
+            out.append(got)
+    return out
+
+
+def double_up_proj_legs(rungs: Iterable[dict]) -> list[dict]:
+    return projection_legs(rungs, DOUBLE_UP_PROJ_MIN_P, DOUBLE_UP_PROJ_MIN_HITS)
+
+
+def lotto_proj_legs(rungs: Iterable[dict], tds: Iterable[dict] = ()) -> list[dict]:
+    return (projection_legs(rungs, LOTTO_PROJ_MIN_P, LOTTO_PROJ_MIN_HITS)
+            + projection_td_legs(tds))
+
+
 # Payout targets, as decimal odds, and the price window each draws legs from.
 # The double-up stops at -500 because shorter than that the book prices the
 # streak above what it earns (see the docstring); the lotto takes the same
 # floor and reaches further up the ladder for payout.
 KINDS = {
-    # 2-3 legs to about even money (owner's call, 2026-11-23).
-    # Two legs may share a game: the owner plays these as same-game parlays,
-    # and a one-game night (Monday, Thursday) has no other way to build one.
+    # 2-3 legs to about even money (owner's call, 2026-11-23), projection-picked
+    # (double_up_proj_legs). Two legs may share a game: the owner plays these as
+    # same-game parlays, and a one-game night (Monday, Thursday) has no other
+    # way to build one.
     "double_up": {"target": 2.0, "odds": (-500, -150), "min_legs": 2, "max_legs": 3,
                   "stake": 1.0, "per_game": 2},
-    # One leg per game: FanDuel prices a same-game bundle below the product of
-    # its legs (SGP_SHADE), a margin on top of the legs' own. The window reaches
-    # +199; past +200 a rung returns -31% (Finding 16).
+    # Projection-picked (lotto_proj_legs), up to two legs a game. The window
+    # reaches +199; past +200 a rung returns -31% (Finding 16).
     "lotto": {"target": 1000.0, "odds": (-300, 199), "min_legs": 2, "stake": 0.1,
-              "floor": 250.0, "per_game": 1},
+              "floor": 250.0, "per_game": 2},
 }
 # FanDuel's own parlay limit.
 MAX_LEGS = 25
@@ -298,6 +382,13 @@ SGP_SHADE = 0.975
 #                uncapped, the build reaches for +1600 touchdowns, where the
 #                model's untested TD edge is largest, and five legs carry it.
 PAPER = {
+    # The double-up and lotto priced at the measured margin (double_up_legs,
+    # lotto_legs): the headline builds for week 11's Monday rebuild, now the
+    # control for picking by our projections. The lotto one leg per game.
+    "double_up_price": {"target": 2.0, "odds": (-500, -150), "min_legs": 2, "max_legs": 3,
+                        "stake": 1.0, "per_game": 2},
+    "lotto_price": {"target": 1000.0, "odds": (-300, 199), "min_legs": 2, "stake": 0.1,
+                    "floor": 250.0, "per_game": 1},
     # The double-up and lotto as they were through week 11, kept as controls.
     "double_up_edge": {"target": 2.0, "odds": (-500, 150), "min_legs": 2, "stake": 1.0},
     "lotto_conf": {"target": 1000.0, "odds": (-300, 150), "min_legs": 2, "stake": 0.1,
@@ -542,6 +633,11 @@ def td_legs(tds: Iterable[dict]) -> list[dict]:
     ``fair`` is the quote less TD_FAIR_SHADE; a leg needs TD_MIN_FAIR. The
     model's chance rides along as ``p_model`` for the page, not the price.
     """
+    return [l for l in td_legs_all(tds) if l["fair"] >= TD_MIN_FAIR]
+
+
+def td_legs_all(tds: Iterable[dict]) -> list[dict]:
+    """Every open anytime-TD price as a leg at the book's own chance, no bar."""
     from ..fanduel.odds import american_to_implied
 
     out = []
@@ -549,8 +645,6 @@ def td_legs(tds: Iterable[dict]) -> list[dict]:
         if r.get("odds") is None or not card_mod._available(r) or card_mod.is_locked(r):
             continue
         fair = american_to_implied(r["odds"]) * TD_FAIR_SHADE
-        if fair < TD_MIN_FAIR:
-            continue
         out.append({"market": "anytime_td", "player": r.get("player"), "key": r.get("key"),
                     "team": r.get("team"), "position": r.get("position"),
                     "line": 0.5, "threshold": 1.0, "side": "OVER", "odds": r["odds"],

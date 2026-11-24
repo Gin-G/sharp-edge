@@ -901,7 +901,7 @@ PAPER_TZ = "America/Denver"
 PAPER_LEG_FIELDS = ("player", "key", "team", "position", "market", "line", "threshold",
                     "side", "odds", "p_cal", "p_conf", "p_props", "edge_pts", "hits4",
                     "hits5", "snap_min", "ts_mean", "tgt_mean", "cs_mean", "fair",
-                    "p_model", "anchor", "event", "fd_event_id", "kickoff", "home_team",
+                    "p_model", "p_proj", "priced", "anchor", "event", "fd_event_id", "kickoff", "home_team",
                     "away_team")
 
 
@@ -993,7 +993,9 @@ async def _settle_paper(season: int, week: int, actuals: dict, played: set) -> i
 _LEG_KIND = {"rushing_yards": "rush", "anytime_td": "td", "moneyline": "ml",
              "alt_spread": "game", "alt_total": "game"}
 
-PAPER_LABELS = {"double_up": "Double-up", "lotto": "Role lotto",
+PAPER_LABELS = {"double_up": "Double-up, projection-picked", "lotto": "Lotto, projection-picked",
+                "double_up_price": "Double-up, measured price (control)",
+                "lotto_price": "Lotto, measured price (control)",
                 "double_up_edge": "Double-up, props-edge legs (old rule)",
                 "lotto_conf": "Lotto, confidence-priced (old rule)",
                 "lotto_streak": "Streak lotto (old rule)",

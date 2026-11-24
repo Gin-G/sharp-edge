@@ -538,13 +538,19 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
         cands = altparlay.candidates(board.alt_rungs)
         role = altparlay.role_candidates(board.alt_rungs)
         extra = altparlay.td_legs(board.tds) + altparlay.game_legs(board.alt_games)
-        # The two the page leads with price each leg at its measured margin
-        # (Finding 16); the old builds stay on paper as double_up_edge and
-        # lotto_conf.
+        # The two the page leads with pick legs our projections have clearing
+        # (altparlay.projection_legs, from week 12); the measured-price builds
+        # they replaced stay on paper as double_up_price and lotto_price, and
+        # the older ones as double_up_edge and lotto_conf.
         board.alt_parlays = {
-            "double_up": altparlay.build(altparlay.double_up_legs(board.alt_rungs),
+            "double_up": altparlay.build(altparlay.double_up_proj_legs(board.alt_rungs),
                                          "double_up"),
-            "lotto": altparlay.build(altparlay.lotto_legs(board.alt_rungs) + extra, "lotto")}
+            "lotto": altparlay.build(altparlay.lotto_proj_legs(board.alt_rungs, board.tds),
+                                     "lotto"),
+            "double_up_price": altparlay.build(altparlay.double_up_legs(board.alt_rungs),
+                                               "double_up_price"),
+            "lotto_price": altparlay.build(altparlay.lotto_legs(board.alt_rungs) + extra,
+                                           "lotto_price")}
         # The paper strategies, recorded daily beside them. A moneyline row has
         # no FanDuel event id, so its game is found through either team's props.
         game_of_team: dict = {}
