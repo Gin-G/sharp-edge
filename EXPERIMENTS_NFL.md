@@ -1382,5 +1382,5 @@ First run, MNF week 11 (CIN @ WAS), offline: from the alt ladders only Jayden
 Daniels' passing rungs qualified; with main-line props, ~8 players did, mostly
 QB/RB rushing and low-volume pass catchers (Sinnott, Sample, Van Jefferson) --
 the "obscure players" the owner dislikes, which the role floor would drop on a
-real board. A one-game night cannot reach 1000x under these rules. Follow-up:
-main-line props are not rungs yet, so they are not candidates on the live board.
+real board. A one-game night cannot reach 1000x under these rules. Main-line
+props are candidates from 2026-11-24 (`board.main_rungs`, projection builds only).

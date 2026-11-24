@@ -1349,6 +1349,10 @@ async def test_build_board_executes_end_to_end(monkeypatch):
     assert rungs[25.0]["hits4"] == 4 and rungs[60.0]["hits4"] == 1
     assert rungs[25.0]["model_p"] > rungs[40.0]["model_p"] > rungs[60.0]["model_p"]
     assert payload["alt_rules"]["rungs_priced"] == 3
+    # The main line rides along as a rung for the projection builds only.
+    (main,) = [r for r in board.main_rungs if r["market"] == "receiving_yards"]
+    assert main["main"] and main["line"] == row["line"] and main["odds"] == row["over_odds"]
+    assert main["threshold"] not in rungs
     assert set(payload["alt_parlays"]) == {"double_up", "lotto", "double_up_price", "lotto_price", "double_up_edge", "lotto_conf", "lotto_streak", "lotto_one", "lotto_receiving", "short_stack", "anchored"}
 
 

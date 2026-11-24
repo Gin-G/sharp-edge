@@ -132,6 +132,8 @@ class NFLBoard:
     #: them. See nfl/altparlay.py.
     alt_rungs: list[dict] = field(default_factory=list)
     alt_parlays: dict = field(default_factory=dict)
+    #: Main lines as rungs, for the projection-picked builds only.
+    main_rungs: list = field(default_factory=list)
     fits: dict = field(default_factory=dict)
     prob_fits: dict = field(default_factory=dict)
     #: Who is out this week, and which position groups lost work because of it.
@@ -421,7 +423,34 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
             last5 = mine.get(market) or []
             last4 = last5[-altparlay.RECORD_GAMES:]
             role = mine.get("_role") if (mine.get("_role") or {}).get("team") == p.get("team") else None
-            for rung in fd.ladder(market, key):
+            ladder = fd.ladder(market, key)
+            # The main line as a rung of its own, for the projection-picked
+            # builds only (altparlay.projection_legs): often it is where our
+            # projection and the book part most, and it has no alt twin. Kept
+            # out of alt_rungs so the paper controls draw what they always did.
+            if fair is not None and ln.over is not None and not any(
+                    r.line == ln.line for r in ladder):
+                mp = altparlay.price_rung(ln.over, p_over, fair)
+                if mp is not None:
+                    board.main_rungs.append({
+                        "market": market, "player": ln.player, "key": key,
+                        "player_id": p.get("player_id"), "position": p.get("position"),
+                        "team": p.get("team"), "event": ln.event,
+                        "fd_event_id": ln.event_id, "kickoff": ln.kickoff,
+                        "line": ln.line, "threshold": ln.line + 0.5, "side": "OVER",
+                        "odds": ln.over, "adjusted": round(adjusted, 1), "main": True,
+                        "last4": last4, "hits4": sum(1 for v in last4 if v > ln.line),
+                        "last5": last5, "hits5": sum(1 for v in last5 if v > ln.line),
+                        **{k: (role or {}).get(k) for k in ("snap_min", "ts_mean", "tgt_mean",
+                                                            "tgt_cv", "cs_mean", "car_mean",
+                                                            "car_cv")},
+                        "fd_market_id": ln.market_id,
+                        "over_selection_id": ln.over_selection,
+                        "role_conflict_verdict": None,
+                        **_availability_fields(p, component),
+                        **mp,
+                    })
+            for rung in ladder:
                 rfair = altparlay.rung_fair(rung.over, ln.over, fair)
                 if rfair is None:
                     continue
@@ -532,7 +561,7 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
     flag_td_rooms(board.tds)
     verdicts = {(r["key"], r["market"]): r.get("role_conflict_verdict")
                 for r in board.props}
-    for r in board.alt_rungs:
+    for r in board.alt_rungs + board.main_rungs:
         r["role_conflict_verdict"] = verdicts.get((r["key"], r["market"]))
     if not proj.preseason:
         cands = altparlay.candidates(board.alt_rungs)
@@ -543,10 +572,12 @@ async def build_board(today: Optional[date] = None, state: str = "CO",
         # they replaced stay on paper as double_up_price and lotto_price, and
         # the older ones as double_up_edge and lotto_conf.
         board.alt_parlays = {
-            "double_up": altparlay.build(altparlay.double_up_proj_legs(board.alt_rungs),
-                                         "double_up"),
-            "lotto": altparlay.build(altparlay.lotto_proj_legs(board.alt_rungs, board.tds),
-                                     "lotto"),
+            "double_up": altparlay.build(
+                altparlay.double_up_proj_legs(board.alt_rungs + board.main_rungs),
+                "double_up"),
+            "lotto": altparlay.build(
+                altparlay.lotto_proj_legs(board.alt_rungs + board.main_rungs, board.tds),
+                "lotto"),
             "double_up_price": altparlay.build(altparlay.double_up_legs(board.alt_rungs),
                                                "double_up_price"),
             "lotto_price": altparlay.build(altparlay.lotto_legs(board.alt_rungs) + extra,
